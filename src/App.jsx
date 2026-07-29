@@ -1075,6 +1075,15 @@ const num = (n, d = 0) => (Number(n) || 0).toLocaleString("en-US", { minimumFrac
 // what makes box and pallet relate correctly to SF and planks without
 // needing a full generic conversion graph. Each spoke is independent:
 // missing a factor just means that one conversion shows 0, not a crash.
+// Open-ended packaging conversions, per SKU: each row is "1 [unit] = qty
+// boards" — e.g. {qty: 20, unit: "Box"} or {qty: 40, unit: "Skid"}. This
+// is what lets someone add a completely custom container name (not just
+// the built-in box/pallet) and have it work as a real switchable unit.
+function findConversion(product, unitName) {
+  const list = product?.conversions || [];
+  const needle = String(unitName || "").toLowerCase();
+  return list.find((c) => (c.unit || "").toLowerCase() === needle && Number(c.qty) > 0);
+}
 function woodToBoards(product, qty, fromUnit) {
   const q = Number(qty) || 0;
   if (!product) return q;
@@ -1095,6 +1104,8 @@ function woodToBoards(product, qty, fromUnit) {
     const bpp = Number(product.boardsPerUnit) || 0;
     return bpp > 0 ? q * bpp : q;
   }
+  const conv = findConversion(product, fromUnit);
+  if (conv) return q * Number(conv.qty);
   return q;
 }
 function woodFromBoards(product, boards, toUnit) {
@@ -1116,6 +1127,8 @@ function woodFromBoards(product, boards, toUnit) {
     const bpp = Number(product.boardsPerUnit) || 0;
     return bpp > 0 ? boards / bpp : boards;
   }
+  const conv = findConversion(product, toUnit);
+  if (conv) return boards / Number(conv.qty);
   return boards;
 }
 function toGallons(product, qty, fromUnit) {
@@ -1153,6 +1166,9 @@ function unitsFor(product) {
   const units = ["board", "plank", "sf"];
   if (Number(product.boardsPerBox) > 0 || (Number(product.boardsPerUnit) && Number(product.boxesPerPallet))) units.push("box");
   if (Number(product.boardsPerUnit) > 0) units.push("pallet");
+  (product.conversions || []).forEach((c) => {
+    if (c.unit && Number(c.qty) > 0 && !units.some((u) => u.toLowerCase() === c.unit.toLowerCase())) units.push(c.unit);
+  });
   return units;
 }
 const unitLabel = (u) => (u === "sf" ? "SF" : u === "board" ? "boards" : u === "plank" ? "planks" : u === "gal" ? "gal" : u === "qt" ? "qt" : u === "box" ? "boxes" : u === "pallet" ? "pallets" : u);
@@ -1952,6 +1968,20 @@ function InventoryTab({ products, onChange }) {
   const [unitPrefs, setUnitPrefs] = useState({});
   const [reorderUnitPrefs, setReorderUnitPrefs] = useState({});
 
+  const updateConversion = (pid, key, patch) => {
+    const prod = products.find((p) => p.id === pid);
+    const convs = (prod?.conversions || []).map((c) => (c.key === key ? { ...c, ...patch } : c));
+    update(pid, { conversions: convs });
+  };
+  const addConversion = (pid) => {
+    const prod = products.find((p) => p.id === pid);
+    update(pid, { conversions: [...(prod?.conversions || []), { key: uid(), qty: "", unit: "" }] });
+  };
+  const removeConversion = (pid, key) => {
+    const prod = products.find((p) => p.id === pid);
+    update(pid, { conversions: (prod?.conversions || []).filter((c) => c.key !== key) });
+  };
+
   const canonicalUnitFor = (p) => (p.category === "paint" ? "gal" : p.category === "packing" ? (p.unitLabel || "ea") : (p.kind === "sf" ? "sf" : "board"));
   const sfEquivalent = (p) => (p.category === "packing" ? 0 : convertQty(p, p.onHand, canonicalUnitFor(p), "sf"));
   const needsReorder = (p) => Number(p.reorderPoint) > 0 && (Number(p.onHand) || 0) <= Number(p.reorderPoint);
@@ -2060,16 +2090,39 @@ function InventoryTab({ products, onChange }) {
                     </Field>
 
                     {category === "wood" && (
-                      <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
-                        <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, color: C.gold }}>Packaging & conversions</div>
-                        <div className="grid grid-cols-2 gap-2">
-                          <Field label="SF per board"><input type="number" style={inputStyle} value={p.sfPerBoard ?? ""} placeholder="—" onChange={(e) => update(p.id, { sfPerBoard: e.target.value })} /></Field>
-                          <Field label="Boards per box"><input type="number" style={inputStyle} value={p.boardsPerBox ?? ""} placeholder="—" onChange={(e) => update(p.id, { boardsPerBox: e.target.value })} /></Field>
-                          <Field label="Boards per pallet"><input type="number" style={inputStyle} value={p.boardsPerUnit ?? ""} placeholder="—" onChange={(e) => update(p.id, { boardsPerUnit: e.target.value })} /></Field>
-                          <Field label="Boxes per pallet"><input type="number" style={inputStyle} value={p.boxesPerPallet ?? ""} placeholder="—" onChange={(e) => update(p.id, { boxesPerPallet: e.target.value })} /></Field>
+                      <>
+                        <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
+                          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, color: C.gold }}>Dimensions</div>
+                          <div className="grid grid-cols-3 gap-2">
+                            <Field label="Thickness (in)"><input type="number" style={inputStyle} value={p.thickness ?? ""} placeholder="—" onChange={(e) => update(p.id, { thickness: e.target.value })} /></Field>
+                            <Field label="Width (in)"><input type="number" style={inputStyle} value={p.widthIn ?? ""} placeholder="—" onChange={(e) => update(p.id, { widthIn: e.target.value })} /></Field>
+                            <Field label="Length (in)"><input type="number" style={inputStyle} value={p.lengthIn ?? ""} placeholder="—" onChange={(e) => update(p.id, { lengthIn: e.target.value })} /></Field>
+                          </div>
                         </div>
-                        <div className="text-xs mt-1" style={{ color: C.faint }}>Leave any of these blank if it doesn't apply — boards/planks/SF always work; box and pallet only show up as switchable units once their factor is set.</div>
-                      </div>
+
+                        <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
+                          <div className="grid grid-cols-2 gap-2">
+                            <Field label="SF per board"><input type="number" style={inputStyle} value={p.sfPerBoard ?? ""} placeholder="—" onChange={(e) => update(p.id, { sfPerBoard: e.target.value })} /></Field>
+                            <Field label="Boards per pallet"><input type="number" style={inputStyle} value={p.boardsPerUnit ?? ""} placeholder="—" onChange={(e) => update(p.id, { boardsPerUnit: e.target.value })} /></Field>
+                          </div>
+                        </div>
+
+                        <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
+                          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, color: C.gold }}>Packing & Conversions</div>
+                          <div className="text-xs mb-2" style={{ color: C.faint }}>Define any container you want — each one becomes a real switchable unit for this SKU. "1 [unit] = [qty] boards."</div>
+                          <div className="space-y-2">
+                            {(p.conversions || []).map((c) => (
+                              <div key={c.key} className="flex items-end gap-2">
+                                <Field label="Qty" w={90}><input type="number" style={inputStyle} value={c.qty ?? ""} onChange={(e) => updateConversion(p.id, c.key, { qty: e.target.value })} /></Field>
+                                <span className="text-xs pb-2" style={{ color: C.faint, fontFamily: MONO }}>PER</span>
+                                <Field label="Unit" w={140}><input style={inputStyle} value={c.unit ?? ""} placeholder="e.g. Box, Skid" onChange={(e) => updateConversion(p.id, c.key, { unit: e.target.value })} /></Field>
+                                <button onClick={() => removeConversion(p.id, c.key)} className="opacity-40 hover:opacity-100 mb-2"><Trash2 size={16} /></button>
+                              </div>
+                            ))}
+                          </div>
+                          <Btn onClick={() => addConversion(p.id)}><Plus size={14} /> Add Conversion</Btn>
+                        </div>
+                      </>
                     )}
 
                     {category === "paint" && (
