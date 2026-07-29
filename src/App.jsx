@@ -1512,6 +1512,7 @@ function WorkOrderBoard({ workOrders, customers, onOpen, onNew, onImport }) {
 function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, team, whoWorking, setWhoWorking, onAddTeamMember }) {
   const customer = customers.find((c) => c.id === wo.customerId);
   const update = (patch) => onChange({ ...wo, ...patch });
+  const [bolOpen, setBolOpen] = useState(false);
 
   const updateLine = (lineId, patch) => update({ lines: wo.lines.map((l) => (l.id === lineId ? { ...l, ...patch } : l)) });
   const removeLine = (lineId) => update({ lines: wo.lines.filter((l) => l.id !== lineId) });
@@ -1681,8 +1682,10 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
       </div>
 
       <div className="flex gap-2 mb-8">
+        <Btn kind="primary" onClick={() => setBolOpen(true)}><Printer size={14} /> Print Bill of Lading</Btn>
         <Btn onClick={onDelete}><Trash2 size={14} /> Delete work order</Btn>
       </div>
+      {bolOpen && <BOLModal wo={wo} customer={customer} onClose={() => setBolOpen(false)} />}
     </div>
   );
 }
@@ -2583,6 +2586,119 @@ function QRScannerModal({ onClose, onDecoded }) {
   );
 }
 
+/* ---------------- Bill of Lading (printable, from a Work Order) ----------------
+   Kept intentionally minimal per what's actually needed: pallet count,
+   weight (1.5 lbs/SF, computed from the order's line items but editable
+   in case what's actually loaded differs from what's on the order),
+   load description, and the consignee's address. No freight-charge
+   terms, NMFC codes, etc. — those weren't asked for. */
+
+const SHIPPER = {
+  name: "Good News Wood Salvation",
+  address: "15775 Celestial Valley Road",
+  cityStateZip: "North San Juan, CA 95960",
+};
+const LBS_PER_SF = 1.5;
+
+function BOLModal({ wo, customer, onClose }) {
+  const totalSF = (wo.lines || []).reduce((sum, l) => sum + (Number(l.qtySF) || 0), 0);
+  const [pallets, setPallets] = useState("");
+  const [weight, setWeight] = useState(String(Math.round(totalSF * LBS_PER_SF)));
+  const [date, setDate] = useState(today());
+  const [carrier, setCarrier] = useState(wo.shipVia || "");
+  const bolNumber = `BOL-${wo.number}`;
+
+  return (
+    <div className="fixed inset-0 z-50 overflow-auto" style={{ background: "rgba(34,29,25,0.6)" }}>
+      <style>{`
+        @page { size: letter; margin: 0.5in; }
+        @media print {
+          body * { visibility: hidden !important; }
+          #bol-root, #bol-root * { visibility: visible !important; }
+          #bol-root { position: absolute !important; left: 0; top: 0; margin: 0; }
+          .no-print { display: none !important; }
+        }
+      `}</style>
+      <div className="max-w-2xl mx-auto my-8">
+        <div className="flex justify-end gap-2 mb-3 no-print">
+          <Field label="Pallets" w={90}><input type="number" style={inputStyle} value={pallets} onChange={(e) => setPallets(e.target.value)} /></Field>
+          <Field label="Weight (lbs)" w={110}><input type="number" style={inputStyle} value={weight} onChange={(e) => setWeight(e.target.value)} /></Field>
+          <Field label="Carrier / ship via" w={160}><input style={inputStyle} value={carrier} onChange={(e) => setCarrier(e.target.value)} /></Field>
+          <Field label="Date" w={140}><input type="date" style={inputStyle} value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+          <div className="flex items-end gap-2">
+            <Btn kind="dark" onClick={() => window.print()}><Printer size={13} /> Print</Btn>
+            <Btn onClick={onClose}><X size={13} /> Close</Btn>
+          </div>
+        </div>
+
+        <div id="bol-root" style={{ background: "#fff", color: "#000", padding: "0.4in", fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif" }}>
+          <div className="flex items-center justify-between" style={{ borderBottom: "3px solid #000", paddingBottom: 10, marginBottom: 16 }}>
+            <div style={{ fontSize: 24, fontWeight: 900 }}>BILL OF LADING</div>
+            <div style={{ textAlign: "right", fontSize: 12 }}>
+              <div><strong>BOL #:</strong> {bolNumber}</div>
+              <div><strong>Date:</strong> {date}</div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-6 mb-6">
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: "#555", marginBottom: 4 }}>SHIP FROM</div>
+              <div style={{ fontWeight: 700 }}>{SHIPPER.name}</div>
+              <div>{SHIPPER.address}</div>
+              <div>{SHIPPER.cityStateZip}</div>
+            </div>
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: "#555", marginBottom: 4 }}>CONSIGNEE (SHIP TO)</div>
+              <div style={{ fontWeight: 700 }}>{customer?.company || "—"}</div>
+              {customer?.address && <div>{customer.address}</div>}
+              <div>{[customer?.city, customer?.state, customer?.zip].filter(Boolean).join(", ")}</div>
+              {customer?.country && customer.country !== "USA" ? <div>{customer.country}</div> : null}
+            </div>
+          </div>
+
+          <div className="mb-6">
+            <div style={{ fontSize: 11, fontWeight: 700, color: "#555", marginBottom: 4 }}>CARRIER</div>
+            <div>{carrier || "—"}</div>
+          </div>
+
+          <table className="w-full" style={{ borderCollapse: "collapse", marginBottom: 24 }}>
+            <thead>
+              <tr style={{ background: "#eee" }}>
+                <th style={{ border: "1px solid #999", padding: 8, textAlign: "left" }}>Pallets</th>
+                <th style={{ border: "1px solid #999", padding: 8, textAlign: "left" }}>Description of Goods</th>
+                <th style={{ border: "1px solid #999", padding: 8, textAlign: "right" }}>Weight (lbs)</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td style={{ border: "1px solid #999", padding: 8 }}>{pallets || "—"}</td>
+                <td style={{ border: "1px solid #999", padding: 8 }}>Wood</td>
+                <td style={{ border: "1px solid #999", padding: 8, textAlign: "right" }}>{weight || "—"}</td>
+              </tr>
+              <tr>
+                <td style={{ border: "1px solid #999", padding: 8 }}></td>
+                <td style={{ border: "1px solid #999", padding: 8, textAlign: "right", fontWeight: 700 }}>Total</td>
+                <td style={{ border: "1px solid #999", padding: 8, textAlign: "right", fontWeight: 700 }}>{weight || "—"} lbs</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div className="grid grid-cols-2 gap-10" style={{ marginTop: 48 }}>
+            <div>
+              <div style={{ borderTop: "1px solid #000", paddingTop: 4 }}>Shipper Signature</div>
+              <div style={{ marginTop: 24, borderTop: "1px solid #000", paddingTop: 4 }}>Date</div>
+            </div>
+            <div>
+              <div style={{ borderTop: "1px solid #000", paddingTop: 4 }}>Consignee Signature</div>
+              <div style={{ marginTop: 24, borderTop: "1px solid #000", paddingTop: 4 }}>Date</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function LabelPrintView({ units, supplierFor, onClose }) {
   return (
     <div className="fixed inset-0 z-50 overflow-auto" style={{ background: "rgba(34,29,25,0.6)" }}>
@@ -2591,8 +2707,9 @@ function LabelPrintView({ units, supplierFor, onClose }) {
         @media print {
           body * { visibility: hidden !important; }
           #labels-root, #labels-root * { visibility: visible !important; }
-          #labels-root { position: absolute !important; left: 0; top: 0; margin: 0; }
+          #labels-root { margin: 0 !important; }
           .label-page { page-break-after: always; break-after: page; border: none !important; margin: 0 !important; }
+          .label-page:last-child { page-break-after: auto; break-after: auto; }
           .no-print { display: none !important; }
         }
       `}</style>
@@ -3005,7 +3122,6 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
   const millStock = products.find((p) => p.role === "millStock");
   const rawProducts = products.filter((p) => p.kind === "board" && p.role === "raw");
 
-  const [batchLabel, setBatchLabel] = useState("");
   const [workOrderId, setWorkOrderId] = useState("");
   const [unitId, setUnitId] = useState(jumpToUnitId || "");
   const [rawProductId, setRawProductId] = useState("");
@@ -3102,13 +3218,14 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
       return p;
     });
     const wo = workOrders.find((w) => w.id === workOrderId);
+    const autoLabel = selectedUnit ? `${selectedUnit.sizeLabel} unit` : (rawProduct?.sku || "Batch");
     runGrouped(() => {
       onProductsChange(updates);
       if (unitId) {
         onUnitsChange(units.map((u) => u.id === unitId ? { ...u, boardsRemaining: Math.max(0, (Number(u.boardsRemaining) || 0) - rawIn) } : u));
       }
       onLogSort({
-        id: uid(), date: today(), by: whoWorking, batchLabel: batchLabel || "Unlabeled batch",
+        id: uid(), date: today(), by: whoWorking, batchLabel: autoLabel,
         workOrderId: workOrderId || "", workOrderNumber: wo?.number || "",
         unitId: unitId || "", rawProductId,
         rawBoards: rawIn, toN: Number(toN) || 0, toP: Number(toP) || 0, toMill: Number(toMill) || 0, toWaste: Number(toWaste) || 0,
@@ -3116,7 +3233,7 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
         startedAt: new Date().toISOString(),
       });
     });
-    setBatchLabel(""); setWorkOrderId(""); setUnitId(""); setRawProductId(""); setRawBoards(""); setToN(""); setToP(""); setToMill(""); setToWaste("");
+    setWorkOrderId(""); setUnitId(""); setRawProductId(""); setRawBoards(""); setToN(""); setToP(""); setToMill(""); setToWaste("");
     sw.reset();
   };
 
@@ -3142,14 +3259,37 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
         <div className="my-3 text-xs" style={{ color: C.faint, fontFamily: MONO }}>— or fill in manually —</div>
 
         <Field label="Which received unit is this?">
-          <select style={inputStyle} value={unitId} onChange={(e) => setUnitId(e.target.value)}>
+          <select
+            style={inputStyle} value={unitId}
+            onChange={(e) => {
+              const newUnitId = e.target.value;
+              setUnitId(newUnitId);
+              const unit = units.find((u) => u.id === newUnitId);
+              if (unit) {
+                let matched = unit.productId ? products.find((p) => p.id === unit.productId) : null;
+                if (!matched && unit.sizeLabel) {
+                  matched = products.find((p) => p.kind === "board" && p.role === "raw" && p.sku === unit.sizeLabel);
+                }
+                if (matched) setRawProductId(matched.id);
+                setRawBoards(String(Number(unit.boardsRemaining) || ""));
+              }
+            }}
+          >
             <option value="">— Not tied to a specific unit —</option>
-            {availableUnits.map((u) => <option key={u.id} value={u.id}>{u.sizeLabel} · {u.receivedDate} · {u.boardsRemaining} bd left</option>)}
+            {availableUnits.map((u) => <option key={u.id} value={u.id}>{u.sizeLabel} · received {u.receivedDate} · {u.boardsRemaining} boards left</option>)}
           </select>
         </Field>
         {selectedUnit && (
           <div className="mt-1 text-xs" style={{ color: C.faint, fontFamily: MONO }}>Unit {selectedUnit.id} · received {selectedUnit.receivedDate}</div>
         )}
+
+        <Field label="Which size are you sorting?" required>
+          <select style={{ ...inputStyle, marginTop: 8 }} value={rawProductId} onChange={(e) => setRawProductId(e.target.value)}>
+            <option value="">— Select raw size —</option>
+            {rawProducts.map((p) => <option key={p.id} value={p.id}>{p.sku} (on hand: {num(p.onHand)} bd)</option>)}
+          </select>
+        </Field>
+        <div className="text-xs mt-1" style={{ color: C.faint }}>Picking a unit above fills this in automatically — change it here if it's wrong.</div>
 
         <Field label="Which work order is this for?">
           <select style={{ ...inputStyle, marginTop: 8 }} value={workOrderId} onChange={(e) => setWorkOrderId(e.target.value)}>
@@ -3158,14 +3298,6 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
           </select>
         </Field>
 
-        <Field label="Which size are you sorting?" required>
-          <select style={inputStyle} value={rawProductId} onChange={(e) => setRawProductId(e.target.value)}>
-            <option value="">— Select raw size —</option>
-            {rawProducts.map((p) => <option key={p.id} value={p.id}>{p.sku} (on hand: {num(p.onHand)} bd)</option>)}
-          </select>
-        </Field>
-
-        <Field label="Batch label"><input style={{ ...inputStyle, marginTop: 8 }} value={batchLabel} onChange={(e) => setBatchLabel(e.target.value)} placeholder='e.g. "185 pallet from Tuesday load"' /></Field>
         <Field label="Raw boards brought in" required><input type="number" style={{ ...inputStyle, marginTop: 8 }} value={rawBoards} onChange={(e) => setRawBoards(e.target.value)} /></Field>
 
         <div className="grid grid-cols-2 gap-3 mt-3">
