@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
+import jsQR from "jsqr";
 import {
   Plus, Trash2, ChevronLeft, Users, Package, LayoutGrid, Scissors,
   Boxes, MapPin, AlertTriangle, Check, Clock, CircleDot, User,
   Ruler, Palette, StickyNote, ClipboardList, Truck, RefreshCw,
   Play, Pause, Square, Timer, CalendarDays, Tag, QrCode, Printer,
-  FileText, X, Search, Pencil, Star
+  FileText, X, Search, Pencil, Star, Settings, Menu
 } from "lucide-react";
 
 /* ============================================================
@@ -54,6 +55,7 @@ const KEY = {
   suppliers: "gnws-shared-suppliers-v1",
   purchaseOrders: "gnws-shared-pos-v1",
   units: "gnws-shared-units-v1",
+  goals: "gnws-shared-goals-v1",
 };
 
 /* ---------------- Seed data ---------------- */
@@ -1223,10 +1225,10 @@ function WhoSelect({ team, current, onChange, onAddMember }) {
   );
 }
 
-function Dashboard({ workOrders, products, sortLog, units, onOpenWO, goTab }) {
+function Dashboard({ workOrders, products, sortLog, units, onOpenWO, goTab, goals, onGoalsChange }) {
   const active = workOrders.filter((w) => w.status !== "shipped");
   const byStatus = STATUS_FLOW.reduce((acc, s) => ({ ...acc, [s]: workOrders.filter((w) => w.status === s).length }), {});
-  const shortItems = products.filter((p) => Number(p.onHand) <= 0 && (p.kind === "sf" || p.kind === "board"));
+  const needsReorder = products.filter((p) => Number(p.reorderPoint) > 0 && (Number(p.onHand) || 0) <= Number(p.reorderPoint));
   const todaysSorts = sortLog.filter((s) => s.date === today());
   const unclaimedUnits = (units || []).filter((u) => Number(u.boardsRemaining) > 0);
 
@@ -1240,6 +1242,9 @@ function Dashboard({ workOrders, products, sortLog, units, onOpenWO, goTab }) {
   const totalBoards30 = recentTimed.reduce((sum, s) => sum + (Number(s.rawBoards) || 0), 0);
   const totalSeconds30 = recentTimed.reduce((sum, s) => sum + (Number(s.seconds) || 0), 0);
   const boardsPerHour = totalSeconds30 > 0 ? totalBoards30 / (totalSeconds30 / 3600) : 0;
+  const goal = Number(goals?.boardsPerHour) || 0;
+  const aboveGoal = totalSeconds30 > 0 && goal > 0 && boardsPerHour >= goal;
+  const belowGoal = totalSeconds30 > 0 && goal > 0 && boardsPerHour < goal;
 
   // "A unit" is a pallet — 300 boards for 1x8 stock, 400 for 1x6, etc.
   // Sorted stock (185N, 185P) accumulates as boards come in off the sort
@@ -1256,14 +1261,25 @@ function Dashboard({ workOrders, products, sortLog, units, onOpenWO, goTab }) {
 
   return (
     <div>
-      <div className="rounded-sm p-4 mb-5" style={{ background: C.panel, border: `1px solid ${C.kraftDark}`, borderLeft: `4px solid ${C.gold}` }}>
-        <div style={{ fontFamily: MONO, fontSize: 10, color: C.faint, letterSpacing: "0.08em" }}>SORTING THROUGHPUT · LAST 30 DAYS</div>
+      <div className="rounded-sm p-4 mb-5" style={{ background: C.panel, border: `1px solid ${C.kraftDark}`, borderLeft: `4px solid ${aboveGoal ? C.moss : belowGoal ? C.redwood : C.gold}` }}>
+        <div className="flex items-center justify-between">
+          <div style={{ fontFamily: MONO, fontSize: 10, color: C.faint, letterSpacing: "0.08em" }}>SORTING THROUGHPUT · LAST 30 DAYS</div>
+          <div className="flex items-center gap-1 text-xs" style={{ color: C.faint, fontFamily: MONO }}>
+            GOAL
+            <input
+              type="number" value={goals?.boardsPerHour ?? ""} placeholder="—"
+              onChange={(e) => onGoalsChange({ ...goals, boardsPerHour: e.target.value })}
+              style={{ width: 55, border: `1px solid ${C.kraftDark}`, borderRadius: 3, padding: "2px 4px", textAlign: "right", fontFamily: MONO }}
+            />
+            bd/hr
+          </div>
+        </div>
         {totalSeconds30 === 0 ? (
           <div className="text-sm mt-1" style={{ color: C.faint }}>No timed sorting batches logged in the last 30 days yet.</div>
         ) : (
           <div className="flex items-baseline gap-2 mt-1">
-            <span style={{ fontSize: 28, fontWeight: 900 }}>{num(boardsPerHour, 1)}</span>
-            <span style={{ fontSize: 13, color: C.faint }}>boards / man-hour</span>
+            <span style={{ fontSize: 28, fontWeight: 900, color: aboveGoal ? C.moss : belowGoal ? C.redwood : C.ink }}>{num(boardsPerHour, 1)}</span>
+            <span style={{ fontSize: 13, color: C.faint }}>boards / man-hour (actual)</span>
             <span style={{ fontSize: 12, color: C.faint, marginLeft: 8 }}>({num(totalBoards30)} boards over {num(hoursDecimal(totalSeconds30), 1)}h logged)</span>
           </div>
         )}
@@ -1332,18 +1348,21 @@ function Dashboard({ workOrders, products, sortLog, units, onOpenWO, goTab }) {
 
         <div className="rounded-sm p-4" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
           <div className="flex items-center justify-between mb-3">
-            <div style={{ fontWeight: 800, fontSize: 15 }}>Inventory Flags</div>
+            <div style={{ fontWeight: 800, fontSize: 15 }}>Reordering</div>
             <button onClick={() => goTab("inventory")} style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>View all →</button>
           </div>
-          {shortItems.length === 0 ? (
-            <div className="text-sm text-center py-6" style={{ color: C.moss }}>Nothing flagged. All stock accounted for.</div>
+          {needsReorder.length === 0 ? (
+            <div className="text-sm text-center py-6" style={{ color: C.moss }}>Everything's above its reorder point.</div>
           ) : (
             <div className="space-y-2">
-              {shortItems.slice(0, 6).map((p) => (
+              {needsReorder.slice(0, 6).map((p) => (
                 <div key={p.id} className="flex items-center justify-between px-3 py-2 rounded-sm" style={{ background: "#FDF6F4", border: `1px solid ${C.redwood}22` }}>
-                  <div style={{ fontFamily: MONO, fontSize: 13, fontWeight: 700 }}>{p.sku}</div>
+                  <div>
+                    <div style={{ fontFamily: MONO, fontSize: 13, fontWeight: 700 }}>{p.sku}</div>
+                    <div style={{ fontSize: 11, color: C.faint }}>{num(p.onHand)} on hand · reorder at {num(p.reorderPoint)}</div>
+                  </div>
                   <div className="flex items-center gap-1" style={{ color: C.redwood, fontSize: 12, fontFamily: MONO }}>
-                    <AlertTriangle size={12} /> {Number(p.onHand) < 0 ? "Short" : "Empty"}
+                    <AlertTriangle size={12} /> Reorder
                   </div>
                 </div>
               ))}
@@ -1617,6 +1636,62 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
    work order before relying on it. No dollar amounts are requested or
    stored anywhere in this flow. */
 
+/* ---------------- Settings ----------------
+   A starting point — whatever else belongs here can get added as it
+   comes up. For now: the sorting throughput goal, the team roster
+   (add/remove), and a way to reset your personal tab order. */
+
+function SettingsModal({ team, onAddTeamMember, onRemoveTeamMember, goals, onGoalsChange, onResetTabOrder, onClose }) {
+  const [newName, setNewName] = useState("");
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 overflow-auto" style={{ background: "rgba(34,29,25,0.6)" }}>
+      <div className="rounded-sm p-5 w-full max-w-md my-8" style={{ background: C.panel }}>
+        <div className="flex items-center justify-between mb-4">
+          <div style={{ fontWeight: 800, fontSize: 16 }}>Settings</div>
+          <button onClick={onClose} className="opacity-60 hover:opacity-100"><X size={16} /></button>
+        </div>
+
+        <div className="mb-5">
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Sorting throughput goal</div>
+          <div className="flex items-center gap-2">
+            <input
+              type="number" style={{ ...inputStyle, width: 100 }}
+              value={goals?.boardsPerHour ?? ""} placeholder="—"
+              onChange={(e) => onGoalsChange({ ...goals, boardsPerHour: e.target.value })}
+            />
+            <span className="text-sm" style={{ color: C.faint }}>boards / man-hour</span>
+          </div>
+        </div>
+
+        <div className="mb-5">
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Team roster</div>
+          <div className="space-y-1 mb-2">
+            {team.map((name) => (
+              <div key={name} className="flex items-center justify-between px-3 py-1.5 rounded-sm text-sm" style={{ background: C.paper }}>
+                <span>{name}</span>
+                <button onClick={() => onRemoveTeamMember(name)} className="opacity-40 hover:opacity-100"><Trash2 size={13} /></button>
+              </div>
+            ))}
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              style={{ ...inputStyle, flex: 1 }} value={newName} onChange={(e) => setNewName(e.target.value)}
+              placeholder="Add name" onKeyDown={(e) => { if (e.key === "Enter" && newName.trim()) { onAddTeamMember(newName.trim()); setNewName(""); } }}
+            />
+            <Btn onClick={() => { if (newName.trim()) { onAddTeamMember(newName.trim()); setNewName(""); } }}><Plus size={14} /> Add</Btn>
+          </div>
+        </div>
+
+        <div>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Tab order</div>
+          <p className="text-xs mb-2" style={{ color: C.faint }}>Your tab arrangement is personal to this browser. Reset it back to default here.</p>
+          <Btn onClick={onResetTabOrder}><RefreshCw size={13} /> Reset to default order</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ImportInvoiceModal({ customers, onClose, onImported }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -1836,6 +1911,7 @@ function InventoryTab({ products, onChange }) {
                 <th className="text-left px-3 py-2">SKU / Name</th>
                 <th className="text-right px-2 py-2">On Hand</th>
                 <th className="text-right px-2 py-2">Boards / Unit</th>
+                <th className="text-right px-2 py-2">Reorder At</th>
                 <th style={{ width: 36 }}></th>
               </tr>
             </thead>
@@ -1885,6 +1961,13 @@ function InventoryTab({ products, onChange }) {
                       ) : (
                         <span style={{ color: C.faint }}>—</span>
                       )}
+                    </td>
+                    <td className="px-2 py-2 text-right">
+                      <input
+                        type="number" style={{ ...inputStyle, width: 80, textAlign: "right", fontFamily: MONO, fontSize: 12 }}
+                        value={p.reorderPoint ?? ""} placeholder="—"
+                        onChange={(e) => update(p.id, { reorderPoint: e.target.value })}
+                      />
                     </td>
                     <td className="px-2 py-2 text-center"><button onClick={() => remove(p.id)} className="opacity-40 hover:opacity-100"><Trash2 size={14} /></button></td>
                   </tr>
@@ -2242,6 +2325,88 @@ function VendorsTab({ suppliers, onChange }) {
             );
           })
         )}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- QR Scanner (camera-based, in-app) ----------------
+   Our printed labels encode plain text ("<unit id> <boardCount>bd"), not
+   a URL — a version-1 QR code can't fit a real URL, and even if it
+   could, a phone's native Camera app only makes a code tappable when
+   it's a URL. So scanning happens INSIDE the app instead: this opens
+   the camera in a live video feed and decodes frames with jsQR (a
+   pure-JS decoder, so it works the same on iPhone Safari as anywhere
+   else — no dependency on a browser's native barcode API). */
+
+function QRScannerModal({ onClose, onDecoded }) {
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const streamRef = useRef(null);
+  const rafRef = useRef(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const stop = () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop());
+    };
+
+    const tick = () => {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      if (video && canvas && video.readyState === video.HAVE_ENOUGH_DATA) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const code = jsQR(imageData.data, imageData.width, imageData.height);
+        if (code && code.data) {
+          stop();
+          onDecoded(code.data);
+          return;
+        }
+      }
+      rafRef.current = requestAnimationFrame(tick);
+    };
+
+    (async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+        if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return; }
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play();
+        }
+        tick();
+      } catch (e) {
+        setError("Couldn't access the camera. Check that you've allowed camera permission for this site, or use the manual fields below instead.");
+      }
+    })();
+
+    return () => { cancelled = true; stop(); };
+  }, []);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.85)" }}>
+      <div className="rounded-sm p-4 w-full max-w-sm" style={{ background: C.panel }}>
+        <div className="flex items-center justify-between mb-3">
+          <div style={{ fontWeight: 800, fontSize: 16 }}>Scan unit label</div>
+          <button onClick={onClose} className="opacity-60 hover:opacity-100"><X size={16} /></button>
+        </div>
+        {error ? (
+          <div className="text-sm" style={{ color: C.warn }}>{error}</div>
+        ) : (
+          <div className="rounded-sm overflow-hidden" style={{ background: "#000" }}>
+            <video ref={videoRef} playsInline muted style={{ width: "100%", display: "block" }} />
+          </div>
+        )}
+        <canvas ref={canvasRef} style={{ display: "none" }} />
+        <p className="text-xs mt-2" style={{ color: C.faint }}>Point the camera at the QR code on the unit's printed label.</p>
       </div>
     </div>
   );
@@ -2684,12 +2849,37 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
 
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({});
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const [scanError, setScanError] = useState("");
 
   const rawProduct = products.find((p) => p.id === rawProductId);
   const nProduct = products.find((p) => p.groupId === rawProduct?.groupId && p.role === "sortedN");
   const pProduct = products.find((p) => p.groupId === rawProduct?.groupId && p.role === "sortedP");
 
   useEffect(() => { if (jumpToUnitId) setUnitId(jumpToUnitId); }, [jumpToUnitId]);
+
+  // A scanned label's text is "<unit id> <boardCount>bd". We look the
+  // unit up, then figure out which raw product it is — preferring the
+  // unit's own productId (set for anything received through a PO after
+  // the rename-proofing fix), falling back to matching its sizeLabel
+  // text against a raw SKU for older units that predate that field.
+  const handleScanned = (rawText) => {
+    setScannerOpen(false);
+    const scannedId = (rawText || "").trim().split(/\s+/)[0];
+    const unit = units.find((u) => u.id === scannedId);
+    if (!unit) {
+      setScanError(`Scanned "${scannedId || rawText}" but couldn't find a matching received unit. Pick it manually below.`);
+      return;
+    }
+    setScanError("");
+    setUnitId(unit.id);
+    let matched = unit.productId ? products.find((p) => p.id === unit.productId) : null;
+    if (!matched && unit.sizeLabel) {
+      matched = products.find((p) => p.kind === "board" && p.role === "raw" && p.sku === unit.sizeLabel);
+    }
+    if (matched) setRawProductId(matched.id);
+    setRawBoards(String(Number(unit.boardsRemaining) || ""));
+  };
 
   const startEdit = (s) => {
     setEditingId(s.id);
@@ -2769,6 +2959,16 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
           Pick the received unit you're breaking down, then split it into what it actually sorted into.
           Everything here is counted in <strong>boards</strong>. Make sure your name is picked in the top right first.
         </p>
+
+        <Btn kind="primary" onClick={() => { setScanError(""); setScannerOpen(true); }} big>
+          <Tag size={16} /> Scan QR to start
+        </Btn>
+        {scanError && (
+          <div className="mt-2 text-xs flex items-center gap-1" style={{ color: C.warn }}>
+            <AlertTriangle size={12} /> {scanError}
+          </div>
+        )}
+        <div className="my-3 text-xs" style={{ color: C.faint, fontFamily: MONO }}>— or fill in manually —</div>
 
         <Field label="Which received unit is this?">
           <select style={inputStyle} value={unitId} onChange={(e) => setUnitId(e.target.value)}>
@@ -2900,6 +3100,9 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
           </div>
         )}
       </div>
+      {scannerOpen && (
+        <QRScannerModal onClose={() => setScannerOpen(false)} onDecoded={handleScanned} />
+      )}
     </div>
   );
 }
@@ -3000,6 +3203,7 @@ export default function App() {
   const [suppliers, _setSuppliers] = useState(SEED_VENDORS);
   const [purchaseOrders, _setPurchaseOrders] = useState([]);
   const [units, _setUnits] = useState([]);
+  const [goals, setGoals] = useState({ boardsPerHour: 100 });
 
   // --- Undo/redo history --------------------------------------------
   // Every meaningful action touches one or more of the 8 arrays above.
@@ -3105,7 +3309,7 @@ export default function App() {
     try {
       const params = new URLSearchParams(window.location.search);
       const u = params.get("unit");
-      if (u) { setJumpToUnitId(u); setTab("sorting"); }
+      if (u) { setJumpToUnitId(u); setTab("work"); }
     } catch (e) { /* no-op if URL access is unavailable */ }
   }, []);
 
@@ -3129,6 +3333,7 @@ export default function App() {
       await tryLoad(KEY.suppliers, (d) => setSuppliers(Array.isArray(d) ? d : []));
       await tryLoad(KEY.purchaseOrders, (d) => setPurchaseOrders(Array.isArray(d) ? d : []));
       await tryLoad(KEY.units, (d) => setUnits(Array.isArray(d) ? d : []));
+      await tryLoad(KEY.goals, (d) => setGoals(d && !Array.isArray(d) ? d : { boardsPerHour: 100 }));
       setLoaded(true);
     })();
   }, []);
@@ -3149,8 +3354,13 @@ export default function App() {
   useEffect(() => { if (loaded) saveKey(KEY.suppliers, suppliers); }, [suppliers, loaded]);
   useEffect(() => { if (loaded) saveKey(KEY.purchaseOrders, purchaseOrders); }, [purchaseOrders, loaded]);
   useEffect(() => { if (loaded) saveKey(KEY.units, units); }, [units, loaded]);
+  useEffect(() => { if (loaded) saveKey(KEY.goals, goals); }, [goals, loaded]);
 
   const addTeamMember = (name) => { if (!team.includes(name)) setTeam([...team, name]); };
+  const removeTeamMember = (name) => {
+    setTeam(team.filter((t) => t !== name));
+    if (whoWorking === name) setWhoWorking("");
+  };
 
   // Editing or deleting a sort-log entry has to undo its original inventory
   // effect (raw boards consumed, sorted outputs added) before applying the
@@ -3221,7 +3431,8 @@ export default function App() {
     };
     setWorkOrders([w, ...workOrders]);
     setActiveWOId(w.id);
-    setTab("workorders");
+    setTab("orders");
+    setOrdersSubTab("workorders");
   };
 
   const updateWO = (w) => {
@@ -3260,20 +3471,23 @@ export default function App() {
     };
     setWorkOrders([w, ...workOrders]);
     setActiveWOId(w.id);
-    setTab("workorders");
+    setTab("orders");
+    setOrdersSubTab("workorders");
     setImportOpen(false);
   };
 
   const tabs = [
     { id: "dashboard", label: "Dashboard", icon: LayoutGrid },
-    { id: "workorders", label: "Work Orders", icon: ClipboardList },
-    { id: "receiving", label: "Receiving", icon: Tag },
-    { id: "vendors", label: "Vendors", icon: Truck },
-    { id: "sorting", label: "Sorting", icon: Scissors },
-    { id: "time", label: "Time", icon: Timer },
+    { id: "work", label: "Work", icon: Scissors },
+    { id: "orders", label: "Orders", icon: ClipboardList },
     { id: "inventory", label: "Inventory", icon: Boxes },
-    { id: "customers", label: "Customers", icon: Users },
+    { id: "contacts", label: "Contacts", icon: Users },
+    { id: "reports", label: "Reports", icon: Timer },
   ];
+
+  const [ordersSubTab, setOrdersSubTab] = useState("workorders");
+  const [contactsSubTab, setContactsSubTab] = useState("customers");
+  const [navMenuOpen, setNavMenuOpen] = useState(false);
 
   // Tab order is a personal display preference (which order YOU like to
   // see them in), not shared business data — so it lives in this browser's
@@ -3304,6 +3518,9 @@ export default function App() {
       return without;
     });
   };
+  const resetTabOrder = () => setTabOrderIds(tabs.map((t) => t.id));
+
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   if (!loaded) {
     return <div className="min-h-screen flex items-center justify-center" style={{ background: C.paper, fontFamily: MONO, color: C.faint }}>Loading shared data…</div>;
@@ -3316,27 +3533,46 @@ export default function App() {
           <div className="flex items-baseline gap-3">
             <span style={{ fontWeight: 900, letterSpacing: "0.08em", fontSize: 16 }}>GNWS OPS</span>
           </div>
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-1">
-              <button
-                onClick={undo} disabled={historyCounts.undo === 0} title={`Undo (${historyCounts.undo} available)`}
-                className="p-1.5 rounded-sm disabled:opacity-30 hover:opacity-70"
-                style={{ border: "1px solid #4a423a" }}
-              >
-                <RefreshCw size={13} style={{ transform: "scaleX(-1)" }} />
-              </button>
-              <button
-                onClick={redo} disabled={historyCounts.redo === 0} title={`Redo (${historyCounts.redo} available)`}
-                className="p-1.5 rounded-sm disabled:opacity-30 hover:opacity-70"
-                style={{ border: "1px solid #4a423a" }}
-              >
-                <RefreshCw size={13} />
-              </button>
-            </div>
-            <WhoSelect team={team} current={whoWorking} onChange={setWhoWorking} onAddMember={addTeamMember} />
+          <div className="flex items-center gap-2 relative">
+            <button onClick={() => setSettingsOpen(true)} title="Settings" className="p-1.5 rounded-sm hover:opacity-70" style={{ border: "1px solid #4a423a" }}>
+              <Settings size={15} />
+            </button>
+            <button onClick={() => setNavMenuOpen(!navMenuOpen)} title="Menu" className="p-1.5 rounded-sm hover:opacity-70" style={{ border: "1px solid #4a423a" }}>
+              <Menu size={15} />
+            </button>
+            {navMenuOpen && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setNavMenuOpen(false)} />
+                <div
+                  className="absolute right-0 top-full mt-2 rounded-sm p-3 z-50"
+                  style={{ background: C.ink, border: "1px solid #4a423a", minWidth: 220 }}
+                >
+                <div className="text-xs mb-1.5" style={{ color: C.kraftDark, fontFamily: MONO, letterSpacing: "0.08em" }}>UNDO / REDO</div>
+                <div className="flex items-center gap-1 mb-3">
+                  <button
+                    onClick={undo} disabled={historyCounts.undo === 0} title={`Undo (${historyCounts.undo} available)`}
+                    className="p-1.5 rounded-sm disabled:opacity-30 hover:opacity-70"
+                    style={{ border: "1px solid #4a423a" }}
+                  >
+                    <RefreshCw size={13} style={{ transform: "scaleX(-1)" }} />
+                  </button>
+                  <button
+                    onClick={redo} disabled={historyCounts.redo === 0} title={`Redo (${historyCounts.redo} available)`}
+                    className="p-1.5 rounded-sm disabled:opacity-30 hover:opacity-70"
+                    style={{ border: "1px solid #4a423a" }}
+                  >
+                    <RefreshCw size={13} />
+                  </button>
+                  <span className="text-xs" style={{ color: C.kraftDark, fontFamily: MONO }}>{historyCounts.undo} / {historyCounts.redo}</span>
+                </div>
+                <div className="text-xs mb-1.5" style={{ color: C.kraftDark, fontFamily: MONO, letterSpacing: "0.08em" }}>WHO'S WORKING</div>
+                <WhoSelect team={team} current={whoWorking} onChange={setWhoWorking} onAddMember={addTeamMember} />
+                </div>
+              </>
+            )}
           </div>
         </div>
-        {!(tab === "workorders" && activeWO) && (
+        {!(tab === "orders" && ordersSubTab === "workorders" && activeWO) && (
           <nav className="max-w-6xl mx-auto px-4 flex gap-1 overflow-x-auto">
             {orderedTabs.map((t) => (
               <button
@@ -3346,8 +3582,8 @@ export default function App() {
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={(e) => { e.preventDefault(); reorderTabs(t.id); setDraggedTabId(null); }}
                 onDragEnd={() => setDraggedTabId(null)}
-                onClick={() => { setTab(t.id); if (t.id === "workorders") setActiveWOId(null); }}
-                className="flex items-center gap-1.5 px-4 py-2 text-xs whitespace-nowrap cursor-grab active:cursor-grabbing"
+                onClick={() => { setTab(t.id); if (t.id === "orders" && ordersSubTab === "workorders") setActiveWOId(null); }}
+                className="flex items-center gap-1.5 px-4 py-2.5 text-sm font-bold whitespace-nowrap cursor-grab active:cursor-grabbing"
                 style={{
                   fontFamily: MONO, letterSpacing: "0.05em",
                   background: tab === t.id ? C.paper : "transparent",
@@ -3356,7 +3592,7 @@ export default function App() {
                   opacity: draggedTabId === t.id ? 0.4 : 1,
                 }}
               >
-                <t.icon size={13} /> {t.label}
+                <t.icon size={15} /> {t.label}
               </button>
             ))}
           </nav>
@@ -3365,9 +3601,23 @@ export default function App() {
 
       <main className="max-w-6xl mx-auto px-4 py-5">
         {tab === "dashboard" && (
-          <Dashboard workOrders={workOrders} products={products} sortLog={sortLog} units={units} onOpenWO={(id) => { setActiveWOId(id); setTab("workorders"); }} goTab={setTab} />
+          <Dashboard workOrders={workOrders} products={products} sortLog={sortLog} units={units} onOpenWO={(id) => { setActiveWOId(id); setTab("orders"); setOrdersSubTab("workorders"); }} goTab={setTab} goals={goals} onGoalsChange={setGoals} />
         )}
-        {tab === "workorders" && (
+
+        {tab === "orders" && !(ordersSubTab === "workorders" && activeWO) && (
+          <div className="flex items-center gap-2 mb-4">
+            {[["workorders", "Work Orders"], ["purchaseorders", "Purchase Orders"]].map(([id, label]) => (
+              <button
+                key={id} onClick={() => setOrdersSubTab(id)}
+                className="px-3 py-1.5 rounded-sm text-xs"
+                style={{ fontFamily: MONO, background: ordersSubTab === id ? C.ink : "transparent", color: ordersSubTab === id ? "#fff" : C.faint, border: `1px solid ${ordersSubTab === id ? C.ink : C.kraftDark}` }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
+        {tab === "orders" && ordersSubTab === "workorders" && (
           activeWO ? (
             <WorkOrderDetail
               wo={activeWO} customers={customers} products={products}
@@ -3378,10 +3628,7 @@ export default function App() {
             <WorkOrderBoard workOrders={workOrders} customers={customers} onOpen={(id) => setActiveWOId(id)} onNew={newWorkOrder} onImport={() => setImportOpen(true)} />
           )
         )}
-        {importOpen && (
-          <ImportInvoiceModal customers={customers} onClose={() => setImportOpen(false)} onImported={handleImported} />
-        )}
-        {tab === "receiving" && (
+        {tab === "orders" && ordersSubTab === "purchaseorders" && (
           <ReceivingTab
             suppliers={suppliers}
             purchaseOrders={purchaseOrders} onPOChange={setPurchaseOrders}
@@ -3390,8 +3637,19 @@ export default function App() {
             runGrouped={runGrouped}
           />
         )}
-        {tab === "vendors" && <VendorsTab suppliers={suppliers} onChange={setSuppliers} />}
-        {tab === "sorting" && (
+        {importOpen && (
+          <ImportInvoiceModal customers={customers} onClose={() => setImportOpen(false)} onImported={handleImported} />
+        )}
+        {settingsOpen && (
+          <SettingsModal
+            team={team} onAddTeamMember={addTeamMember} onRemoveTeamMember={removeTeamMember}
+            goals={goals} onGoalsChange={setGoals}
+            onResetTabOrder={resetTabOrder}
+            onClose={() => setSettingsOpen(false)}
+          />
+        )}
+
+        {tab === "work" && (
           <SortingTab
             products={products} onProductsChange={setProducts}
             sortLog={sortLog} onLogSort={(s) => setSortLog([s, ...sortLog])}
@@ -3403,11 +3661,30 @@ export default function App() {
             runGrouped={runGrouped}
           />
         )}
-        {tab === "time" && (
+
+        {tab === "inventory" && <InventoryTab products={products} onChange={setProducts} />}
+
+        {tab === "contacts" && (
+          <div>
+            <div className="flex items-center gap-2 mb-4">
+              {[["customers", "Customers"], ["vendors", "Vendors"]].map(([id, label]) => (
+                <button
+                  key={id} onClick={() => setContactsSubTab(id)}
+                  className="px-3 py-1.5 rounded-sm text-xs"
+                  style={{ fontFamily: MONO, background: contactsSubTab === id ? C.ink : "transparent", color: contactsSubTab === id ? "#fff" : C.faint, border: `1px solid ${contactsSubTab === id ? C.ink : C.kraftDark}` }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {contactsSubTab === "customers" && <CustomersTab customers={customers} onChange={setCustomers} />}
+            {contactsSubTab === "vendors" && <VendorsTab suppliers={suppliers} onChange={setSuppliers} />}
+          </div>
+        )}
+
+        {tab === "reports" && (
           <TimeTab sortLog={sortLog} team={team} whoWorking={whoWorking} setWhoWorking={setWhoWorking} onAddTeamMember={addTeamMember} />
         )}
-        {tab === "inventory" && <InventoryTab products={products} onChange={setProducts} />}
-        {tab === "customers" && <CustomersTab customers={customers} onChange={setCustomers} />}
       </main>
     </div>
   );
