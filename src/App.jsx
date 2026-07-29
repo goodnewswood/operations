@@ -1685,7 +1685,7 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
         <Btn kind="primary" onClick={() => setBolOpen(true)}><Printer size={14} /> Print Bill of Lading</Btn>
         <Btn onClick={onDelete}><Trash2 size={14} /> Delete work order</Btn>
       </div>
-      {bolOpen && <BOLModal wo={wo} customer={customer} onClose={() => setBolOpen(false)} />}
+      {bolOpen && <BOLModal wo={wo} customer={customer} products={products} onClose={() => setBolOpen(false)} />}
     </div>
   );
 }
@@ -2600,9 +2600,14 @@ const SHIPPER = {
 };
 const LBS_PER_SF = 1.5;
 
-function BOLModal({ wo, customer, onClose }) {
+function BOLModal({ wo, customer, products, onClose }) {
   const totalSF = (wo.lines || []).reduce((sum, l) => sum + (Number(l.qtySF) || 0), 0);
-  const [pallets, setPallets] = useState("");
+  const estimatedPallets = (wo.lines || []).reduce((sum, l) => {
+    const product = products.find((p) => p.id === l.productId);
+    if (!product || !unitsFor(product).includes("pallet")) return sum;
+    return sum + convertQty(product, Number(l.qtySF) || 0, "sf", "pallet");
+  }, 0);
+  const [pallets, setPallets] = useState(estimatedPallets > 0 ? String(Math.ceil(estimatedPallets)) : "");
   const [weight, setWeight] = useState(String(Math.round(totalSF * LBS_PER_SF)));
   const [date, setDate] = useState(today());
   const [carrier, setCarrier] = useState(wo.shipVia || "");
