@@ -2886,7 +2886,7 @@ function LabelPrintView({ units, supplierFor, onClose }) {
    to be a manual, disconnected step. */
 
 function NewPurchaseOrderModal({ suppliers, products, editingPO, onClose, onCreate, onUpdate }) {
-  const blankLine = () => ({ key: uid(), item: "185", boardCount: "", copies: "1", costPerBoard: "" });
+  const blankLine = () => ({ key: uid(), item: "185", other: false, boardCount: "", copies: "1", costPerBoard: "" });
   const isEditing = !!editingPO;
 
   const initialShipChoice = editingPO
@@ -2898,7 +2898,9 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, onClose, onCrea
         const copies = Number(l.copies) || 1;
         const costPerBoard = boards > 0 ? (Number(l.cost) || 0) / (boards * copies) : (Number(l.cost) || 0);
         const liveProduct = l.productId ? products.find((p) => p.id === l.productId) : null;
-        return { key: uid(), item: liveProduct?.sku || l.sizeLabel || "", boardCount: l.boardCount ?? "", copies: String(copies), costPerBoard: costPerBoard || "" };
+        const item = liveProduct?.sku || l.sizeLabel || "";
+        const isKnownRaw = products.some((p) => p.kind === "board" && p.role === "raw" && p.sku === item);
+        return { key: uid(), item, other: item !== "" && !isKnownRaw, boardCount: l.boardCount ?? "", copies: String(copies), costPerBoard: costPerBoard || "" };
       })
     : [blankLine()];
 
@@ -2952,6 +2954,14 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, onClose, onCrea
         });
       }
     }
+    // Sequential "1 of 14" numbering, grouped by size — spans every line
+    // that contributed to that size, so 13 full pallets + 1 partial (from
+    // a separate row) still number 1 through 14 together.
+    const bySize = {};
+    createdUnits.forEach((u) => { (bySize[u.sizeLabel] = bySize[u.sizeLabel] || []).push(u); });
+    Object.values(bySize).forEach((group) => {
+      group.forEach((u, i) => { u.seq = i + 1; u.seqTotal = group.length; });
+    });
     return { createdUnits, boardsBySize };
   };
 
@@ -3012,9 +3022,6 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, onClose, onCrea
 
         <div className="mt-4 pt-3" style={{ borderTop: `1px solid ${C.kraft}` }}>
           <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6 }}>What was bought</div>
-          <datalist id="po-item-options">
-            {sizeOptions.map((code) => <option key={code} value={code} />)}
-          </datalist>
           <div className="space-y-2">
             {lines.map((l) => {
               const total = lineTotal(l);
@@ -3023,7 +3030,20 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, onClose, onCrea
               return (
                 <div key={l.key} className="flex flex-wrap gap-2 items-end">
                   <Field label="Item / size" w={130} required>
-                    <input list="po-item-options" style={inputStyle} value={l.item} onChange={(e) => updateLine(l.key, { item: e.target.value })} placeholder="185, or type anything" />
+                    <select
+                      style={inputStyle}
+                      value={l.other ? "__other__" : l.item}
+                      onChange={(e) => {
+                        if (e.target.value === "__other__") updateLine(l.key, { other: true, item: "" });
+                        else updateLine(l.key, { other: false, item: e.target.value });
+                      }}
+                    >
+                      {sizeOptions.map((code) => <option key={code} value={code}>{code}</option>)}
+                      <option value="__other__">Other (not inventory)…</option>
+                    </select>
+                    {l.other && (
+                      <input style={{ ...inputStyle, marginTop: 6 }} value={l.item} onChange={(e) => updateLine(l.key, { item: e.target.value })} placeholder="Describe what this is" />
+                    )}
                   </Field>
                   <Field label="Boards/unit" w={90}><input type="number" style={inputStyle} value={l.boardCount} onChange={(e) => updateLine(l.key, { boardCount: e.target.value })} /></Field>
                   <Field label="× units" w={70}><input type="number" min="1" style={inputStyle} value={l.copies} onChange={(e) => updateLine(l.key, { copies: e.target.value })} /></Field>
@@ -3098,8 +3118,14 @@ function ReceivingTab({ suppliers, purchaseOrders, onPOChange, units, onUnitsCha
   // raw-size product's on-hand board count — that last part used to be a
   // disconnected manual step nobody was actually doing.
   const handleCreatePO = ({ po, units: createdUnits, boardsBySize }) => {
+    const year = new Date().getFullYear();
+    const maxSeq = purchaseOrders.reduce((max, p) => {
+      const m = /^PO-(\d{4})-(\d+)$/.exec(p.number || "");
+      return m && Number(m[1]) === year ? Math.max(max, Number(m[2])) : max;
+    }, 0);
+    const numberedPO = { ...po, number: `PO-${year}-${String(maxSeq + 1).padStart(3, "0")}` };
     runGrouped(() => {
-      onPOChange([po, ...purchaseOrders]);
+      onPOChange([numberedPO, ...purchaseOrders]);
       onUnitsChange([...createdUnits, ...units]);
       onProductsChange(products.map((p) => {
         const bump = boardsBySize[p.id];
@@ -3170,7 +3196,7 @@ function ReceivingTab({ suppliers, purchaseOrders, onPOChange, units, onUnitsCha
                 <div key={po.id} className="rounded-sm overflow-hidden" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
                   <button onClick={() => setOpenPOId(open ? null : po.id)} className="w-full text-left px-4 py-3 flex items-center justify-between gap-3">
                     <div>
-                      <div style={{ fontWeight: 700, fontSize: 14 }}>{sup?.name || "Unknown vendor"}</div>
+                      <div style={{ fontWeight: 700, fontSize: 14 }}>{po.number ? `${po.number} · ` : ""}{sup?.name || "Unknown vendor"}</div>
                       <div className="text-xs mt-0.5" style={{ color: C.faint, fontFamily: MONO }}>
                         {po.date} · {num(totalBoards)} boards · {poUnits.length} unit{poUnits.length === 1 ? "" : "s"}
                         {po.totalCost ? ` · $${Number(po.totalCost).toFixed(2)}` : ""}
@@ -3206,7 +3232,7 @@ function ReceivingTab({ suppliers, purchaseOrders, onPOChange, units, onUnitsCha
                         <div className="text-xs mb-1" style={{ color: C.faint, fontFamily: MONO }}>RECEIVED UNITS</div>
                         {poUnits.map((u) => (
                           <div key={u.id} className="flex items-center justify-between px-2 py-1.5 text-sm" style={{ borderBottom: `1px solid ${C.kraft}` }}>
-                            <span style={{ fontFamily: MONO }}>{u.sizeLabel} · {num(u.boardsRemaining)}/{num(u.boardCount)} bd left</span>
+                            <span style={{ fontFamily: MONO }}>{u.sizeLabel}{u.seqTotal ? ` · ${u.seq} of ${u.seqTotal}` : ""} · {num(u.boardsRemaining)}/{num(u.boardCount)} bd left</span>
                             <div className="flex items-center gap-2">
                               <button onClick={() => setPrintUnits([u])} title="Print label" className="opacity-60 hover:opacity-100"><Tag size={14} /></button>
                               <button onClick={() => removeUnit(u.id)} className="opacity-40 hover:opacity-100"><Trash2 size={13} /></button>
@@ -3242,7 +3268,7 @@ function ReceivingTab({ suppliers, purchaseOrders, onPOChange, units, onUnitsCha
   );
 }
 
-function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSort, onDeleteSort, team, whoWorking, setWhoWorking, onAddTeamMember, workOrders, units, onUnitsChange, jumpToUnitId, runGrouped }) {
+function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSort, onDeleteSort, team, whoWorking, setWhoWorking, onAddTeamMember, workOrders, units, onUnitsChange, jumpToUnitId, runGrouped, purchaseOrders }) {
   const millStock = products.find((p) => p.role === "millStock");
   const rawProducts = products.filter((p) => p.kind === "board" && p.role === "raw");
 
@@ -3400,7 +3426,14 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
             }}
           >
             <option value="">— Not tied to a specific unit —</option>
-            {availableUnits.map((u) => <option key={u.id} value={u.id}>{u.sizeLabel} · received {u.receivedDate} · {u.boardsRemaining} boards left</option>)}
+            {availableUnits.map((u) => {
+              const po = purchaseOrders.find((p) => p.id === u.poId);
+              return (
+                <option key={u.id} value={u.id}>
+                  {po?.number ? `${po.number} · ` : ""}{u.sizeLabel}{u.seqTotal ? ` · ${u.seq} of ${u.seqTotal}` : ""} · {u.boardsRemaining} boards left
+                </option>
+              );
+            })}
           </select>
         </Field>
         {selectedUnit && (
@@ -4086,6 +4119,7 @@ export default function App() {
             units={units} onUnitsChange={setUnits}
             jumpToUnitId={jumpToUnitId}
             runGrouped={runGrouped}
+            purchaseOrders={purchaseOrders}
           />
         )}
 
