@@ -1071,22 +1071,52 @@ const resolveRawProduct = (entry, products) => {
 const today = () => new Date().toISOString().slice(0, 10);
 const num = (n, d = 0) => (Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
 
-function toPlanks(product, qty, fromUnit) {
+// Wood conversions all route through "board" as the hub unit — that's
+// what makes box and pallet relate correctly to SF and planks without
+// needing a full generic conversion graph. Each spoke is independent:
+// missing a factor just means that one conversion shows 0, not a crash.
+function woodToBoards(product, qty, fromUnit) {
   const q = Number(qty) || 0;
   if (!product) return q;
-  const ppb = Number(product.planksPerBoard) || 0;
-  if (fromUnit === "plank") return q;
-  if (fromUnit === "board") return ppb > 0 ? q * ppb : q;
+  if (fromUnit === "board") return q;
+  if (fromUnit === "plank") {
+    const ppb = Number(product.planksPerBoard) || 0;
+    return ppb > 0 ? q / ppb : q;
+  }
   if (fromUnit === "sf") {
-    const sfp = Number(product.sfPerPlank) || 0;
-    return sfp > 0 ? q / sfp : q;
+    const sfb = Number(product.sfPerBoard) || (Number(product.sfPerPlank) || 0) * (Number(product.planksPerBoard) || 0);
+    return sfb > 0 ? q / sfb : q;
+  }
+  if (fromUnit === "box") {
+    const bpb = Number(product.boardsPerBox) || (Number(product.boardsPerUnit) && Number(product.boxesPerPallet) ? Number(product.boardsPerUnit) / Number(product.boxesPerPallet) : 0);
+    return bpb > 0 ? q * bpb : q;
+  }
+  if (fromUnit === "pallet") {
+    const bpp = Number(product.boardsPerUnit) || 0;
+    return bpp > 0 ? q * bpp : q;
   }
   return q;
 }
-function toBoards(product, qty, fromUnit) {
-  const planks = toPlanks(product, qty, fromUnit);
-  const ppb = Number(product?.planksPerBoard) || 0;
-  return ppb > 0 ? planks / ppb : planks;
+function woodFromBoards(product, boards, toUnit) {
+  if (!product) return boards;
+  if (toUnit === "board") return boards;
+  if (toUnit === "plank") {
+    const ppb = Number(product.planksPerBoard) || 0;
+    return ppb > 0 ? boards * ppb : boards;
+  }
+  if (toUnit === "sf") {
+    const sfb = Number(product.sfPerBoard) || (Number(product.sfPerPlank) || 0) * (Number(product.planksPerBoard) || 0);
+    return sfb > 0 ? boards * sfb : boards;
+  }
+  if (toUnit === "box") {
+    const bpb = Number(product.boardsPerBox) || (Number(product.boardsPerUnit) && Number(product.boxesPerPallet) ? Number(product.boardsPerUnit) / Number(product.boxesPerPallet) : 0);
+    return bpb > 0 ? boards / bpb : boards;
+  }
+  if (toUnit === "pallet") {
+    const bpp = Number(product.boardsPerUnit) || 0;
+    return bpp > 0 ? boards / bpp : boards;
+  }
+  return boards;
 }
 function toGallons(product, qty, fromUnit) {
   const q = Number(qty) || 0;
@@ -1101,39 +1131,31 @@ function toGallons(product, qty, fromUnit) {
 function toQuarts(product, qty, fromUnit) {
   return toGallons(product, qty, fromUnit) * 4;
 }
-function toSF(product, qty, fromUnit) {
-  if (product?.category === "paint") {
-    const gal = toGallons(product, qty, fromUnit);
-    const sfg = Number(product?.sfPerGallon) || 0;
-    return sfg > 0 ? gal * sfg : gal;
-  }
-  const planks = toPlanks(product, qty, fromUnit);
-  const sfp = Number(product?.sfPerPlank) || 0;
-  return sfp > 0 ? planks * sfp : planks;
-}
 function convertQty(product, qty, fromUnit, toUnit) {
   if (fromUnit === toUnit) return Number(qty) || 0;
   if (product?.category === "paint") {
     if (toUnit === "gal") return toGallons(product, qty, fromUnit);
     if (toUnit === "qt") return toQuarts(product, qty, fromUnit);
-    if (toUnit === "sf") return toSF(product, qty, fromUnit);
+    if (toUnit === "sf") {
+      const gal = toGallons(product, qty, fromUnit);
+      const sfg = Number(product?.sfPerGallon) || 0;
+      return sfg > 0 ? gal * sfg : gal;
+    }
     return Number(qty) || 0;
   }
-  if (toUnit === "plank") return toPlanks(product, qty, fromUnit);
-  if (toUnit === "board") return toBoards(product, qty, fromUnit);
-  if (toUnit === "sf") return toSF(product, qty, fromUnit);
-  return Number(qty) || 0;
+  const boards = woodToBoards(product, qty, fromUnit);
+  return woodFromBoards(product, boards, toUnit);
 }
 function unitsFor(product) {
   if (!product) return ["sf", "board", "plank"];
   if (product.category === "paint") return ["gal", "qt", "sf"];
   if (product.category === "packing") return [product.unitLabel || "ea"];
-  // Wood always offers board/plank/SF, regardless of which unit it's
-  // canonically stored in — conversion factors just show 0 until set,
-  // rather than hiding the option entirely.
-  return ["board", "plank", "sf"];
+  const units = ["board", "plank", "sf"];
+  if (Number(product.boardsPerBox) > 0 || (Number(product.boardsPerUnit) && Number(product.boxesPerPallet))) units.push("box");
+  if (Number(product.boardsPerUnit) > 0) units.push("pallet");
+  return units;
 }
-const unitLabel = (u) => (u === "sf" ? "SF" : u === "board" ? "boards" : u === "plank" ? "planks" : u === "gal" ? "gal" : u === "qt" ? "qt" : u);
+const unitLabel = (u) => (u === "sf" ? "SF" : u === "board" ? "boards" : u === "plank" ? "planks" : u === "gal" ? "gal" : u === "qt" ? "qt" : u === "box" ? "boxes" : u === "pallet" ? "pallets" : u);
 
 const inputStyle = {
   border: `1px solid ${C.kraftDark}`,
@@ -1377,7 +1399,14 @@ function Dashboard({ workOrders, products, sortLog, units, onOpenWO, goTab, goal
 
         <div className="rounded-sm p-4" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
           <div className="flex items-center justify-between mb-3">
-            <div style={{ fontWeight: 800, fontSize: 15 }}>Reordering</div>
+            <div className="flex items-baseline gap-2">
+              <div style={{ fontWeight: 800, fontSize: 15 }}>Reordering</div>
+              {needsReorder.length > 0 && (
+                <span className="px-2 py-0.5 rounded-sm text-xs font-bold" style={{ background: C.redwood, color: "#fff", fontFamily: MONO }}>
+                  {needsReorder.length} SKU{needsReorder.length === 1 ? "" : "s"}
+                </span>
+              )}
+            </div>
             <button onClick={() => goTab("inventory")} style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>View all →</button>
           </div>
           {needsReorder.length === 0 ? (
@@ -1912,13 +1941,20 @@ function CustomersTab({ customers, onChange }) {
 function InventoryTab({ products, onChange }) {
   const [group, setGroup] = useState("all");
   const [sortBy, setSortBy] = useState("name");
+  const [openId, setOpenId] = useState(null);
   const update = (id, patch) => onChange(products.map((p) => (p.id === id ? { ...p, ...patch } : p)));
   const remove = (id) => onChange(products.filter((p) => p.id !== id));
-  const add = () => onChange([...products, { id: uid(), sku: "NEW-SKU", name: "New item", kind: "each", category: "wood", unitLabel: "ea", onHand: 0 }]);
+  const add = () => {
+    const p = { id: uid(), sku: "NEW-SKU", name: "New item", kind: "each", category: "wood", unitLabel: "ea", onHand: 0 };
+    onChange([...products, p]);
+    setOpenId(p.id);
+  };
   const [unitPrefs, setUnitPrefs] = useState({});
+  const [reorderUnitPrefs, setReorderUnitPrefs] = useState({});
 
   const canonicalUnitFor = (p) => (p.category === "paint" ? "gal" : p.category === "packing" ? (p.unitLabel || "ea") : (p.kind === "sf" ? "sf" : "board"));
   const sfEquivalent = (p) => (p.category === "packing" ? 0 : convertQty(p, p.onHand, canonicalUnitFor(p), "sf"));
+  const needsReorder = (p) => Number(p.reorderPoint) > 0 && (Number(p.onHand) || 0) <= Number(p.reorderPoint);
 
   const filtered = products.filter((p) => group === "all" ? true : (p.category || "wood") === group);
   const shown = filtered.slice().sort((a, b) => {
@@ -1929,6 +1965,7 @@ function InventoryTab({ products, onChange }) {
   return (
     <div>
       <div className="flex flex-wrap items-center gap-2 mb-3">
+        <Btn kind="primary" onClick={add}><Plus size={14} /> Add item</Btn>
         {[["all", "All"], ["wood", "Wood"], ["paint", "Paint"], ["packing", "Packing"]].map(([id, label]) => (
           <button
             key={id} onClick={() => setGroup(id)}
@@ -1949,104 +1986,118 @@ function InventoryTab({ products, onChange }) {
           </button>
         ))}
       </div>
+
       <div className="rounded-sm overflow-hidden" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm" style={{ borderCollapse: "collapse", minWidth: 760 }}>
-            <thead>
-              <tr style={{ background: C.ink, color: "#fff", fontFamily: MONO, fontSize: 10, letterSpacing: "0.06em" }}>
-                <th className="text-left px-3 py-2">SKU / Name</th>
-                <th className="text-left px-2 py-2">Category</th>
-                <th className="text-right px-2 py-2">On Hand</th>
-                <th className="text-right px-2 py-2">≈ SF</th>
-                <th className="text-right px-2 py-2">Boards / Unit</th>
-                <th className="text-right px-2 py-2">Reorder At</th>
-                <th style={{ width: 36 }}></th>
-              </tr>
-            </thead>
-            <tbody>
-              {shown.map((p) => {
-                const category = p.category || "wood";
-                const short = Number(p.onHand) <= 0;
-                const canonicalUnit = canonicalUnitFor(p);
-                const displayUnit = unitPrefs[p.id] || canonicalUnit;
-                const sfEq = sfEquivalent(p);
-                return (
-                  <tr key={p.id} style={{ borderBottom: `1px solid ${C.kraft}` }}>
-                    <td className="px-3 py-2">
+        {shown.length === 0 ? (
+          <div className="px-4 py-8 text-center text-sm" style={{ color: C.faint }}>No items to show.</div>
+        ) : (
+          shown.map((p) => {
+            const category = p.category || "wood";
+            const canonicalUnit = canonicalUnitFor(p);
+            const displayUnit = unitPrefs[p.id] || canonicalUnit;
+            const sfEq = sfEquivalent(p);
+            const open = openId === p.id;
+            const reorderDisplayUnit = reorderUnitPrefs[p.id] || canonicalUnit;
+            const flagged = needsReorder(p);
+
+            return (
+              <div key={p.id} style={{ borderBottom: `1px solid ${C.kraft}` }}>
+                <div className="px-4 py-2.5 flex items-center gap-3">
+                  <button onClick={() => setOpenId(open ? null : p.id)} className="text-left flex-1 min-w-0">
+                    <div className="flex items-baseline gap-2 flex-wrap">
+                      <span style={{ fontFamily: MONO, fontWeight: 700, fontSize: 14 }}>{p.sku}</span>
+                      <span className="text-xs" style={{ color: C.faint }}>{p.name}</span>
+                      <span className="text-xs px-1.5 rounded-sm" style={{ background: C.kraft, color: C.faint, fontFamily: MONO }}>{category}</span>
+                      {flagged && (
+                        <span className="text-xs flex items-center gap-1" style={{ color: C.redwood, fontFamily: MONO }}>
+                          <AlertTriangle size={11} /> reorder
+                        </span>
+                      )}
+                    </div>
+                    {category !== "packing" && (
+                      <div className="text-xs mt-0.5" style={{ color: C.faint, fontFamily: MONO }}>≈ {num(sfEq, 0)} SF on hand</div>
+                    )}
+                  </button>
+
+                  {category === "packing" ? (
+                    <div className="flex items-center gap-1 shrink-0">
                       <input
-                        style={{ ...inputStyle, fontFamily: MONO, fontWeight: 700, fontSize: 13, padding: "4px 6px", marginBottom: 3 }}
-                        value={p.sku} onChange={(e) => update(p.id, { sku: e.target.value })}
+                        type="number" style={{ ...inputStyle, width: 80, textAlign: "right", fontFamily: MONO, color: Number(p.onHand) <= 0 ? C.redwood : C.ink, fontWeight: 700 }}
+                        value={p.onHand ?? ""} onChange={(e) => update(p.id, { onHand: e.target.value })}
                       />
                       <input
-                        style={{ ...inputStyle, fontSize: 12, padding: "4px 6px" }}
-                        value={p.name} onChange={(e) => update(p.id, { name: e.target.value })}
+                        style={{ ...inputStyle, width: 55, fontSize: 11, padding: "4px 6px" }}
+                        value={p.unitLabel || ""} placeholder="ea"
+                        onChange={(e) => update(p.id, { unitLabel: e.target.value })}
                       />
-                    </td>
-                    <td className="px-2 py-2">
-                      <select
-                        style={{ ...inputStyle, fontSize: 12, padding: "4px 6px" }}
-                        value={category}
-                        onChange={(e) => update(p.id, { category: e.target.value })}
-                      >
+                    </div>
+                  ) : (
+                    <div className="shrink-0">
+                      <UnitSwitchInput
+                        product={p} value={p.onHand} canonicalUnit={canonicalUnit}
+                        onChange={(v) => update(p.id, { onHand: v })}
+                        displayUnit={displayUnit}
+                        onDisplayUnitChange={(u) => setUnitPrefs({ ...unitPrefs, [p.id]: u })}
+                        width={90}
+                      />
+                    </div>
+                  )}
+                  <button onClick={() => remove(p.id)} className="opacity-40 hover:opacity-100 shrink-0"><Trash2 size={14} /></button>
+                </div>
+
+                {open && (
+                  <div className="px-4 pb-4 space-y-2" style={{ background: C.paper }}>
+                    <div className="grid grid-cols-2 gap-2">
+                      <Field label="SKU"><input style={{ ...inputStyle, fontFamily: MONO }} value={p.sku} onChange={(e) => update(p.id, { sku: e.target.value })} /></Field>
+                      <Field label="Name"><input style={inputStyle} value={p.name} onChange={(e) => update(p.id, { name: e.target.value })} /></Field>
+                    </div>
+                    <Field label="Category">
+                      <select style={inputStyle} value={category} onChange={(e) => update(p.id, { category: e.target.value })}>
                         <option value="wood">Wood</option>
                         <option value="paint">Paint</option>
                         <option value="packing">Packing</option>
                       </select>
-                    </td>
-                    <td className="px-2 py-2 text-right">
-                      {category === "packing" ? (
-                        <div className="flex items-center justify-end gap-1">
-                          <input
-                            type="number" style={{ ...inputStyle, width: 90, textAlign: "right", fontFamily: MONO, color: short ? C.redwood : C.ink, fontWeight: 700 }}
-                            value={p.onHand ?? ""} onChange={(e) => update(p.id, { onHand: e.target.value })}
-                          />
-                          <input
-                            style={{ ...inputStyle, width: 60, fontSize: 11, padding: "4px 6px" }}
-                            value={p.unitLabel || ""} placeholder="ea"
-                            onChange={(e) => update(p.id, { unitLabel: e.target.value })}
-                          />
+                    </Field>
+
+                    {category === "wood" && (
+                      <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
+                        <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, color: C.gold }}>Packaging & conversions</div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <Field label="SF per board"><input type="number" style={inputStyle} value={p.sfPerBoard ?? ""} placeholder="—" onChange={(e) => update(p.id, { sfPerBoard: e.target.value })} /></Field>
+                          <Field label="Boards per box"><input type="number" style={inputStyle} value={p.boardsPerBox ?? ""} placeholder="—" onChange={(e) => update(p.id, { boardsPerBox: e.target.value })} /></Field>
+                          <Field label="Boards per pallet"><input type="number" style={inputStyle} value={p.boardsPerUnit ?? ""} placeholder="—" onChange={(e) => update(p.id, { boardsPerUnit: e.target.value })} /></Field>
+                          <Field label="Boxes per pallet"><input type="number" style={inputStyle} value={p.boxesPerPallet ?? ""} placeholder="—" onChange={(e) => update(p.id, { boxesPerPallet: e.target.value })} /></Field>
                         </div>
-                      ) : (
+                        <div className="text-xs mt-1" style={{ color: C.faint }}>Leave any of these blank if it doesn't apply — boards/planks/SF always work; box and pallet only show up as switchable units once their factor is set.</div>
+                      </div>
+                    )}
+
+                    {category === "paint" && (
+                      <Field label="SF per gallon"><input type="number" style={inputStyle} value={p.sfPerGallon ?? ""} placeholder="250" onChange={(e) => update(p.id, { sfPerGallon: e.target.value })} /></Field>
+                    )}
+
+                    <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
+                      <Field label="Reorder at">
                         <UnitSwitchInput
-                          product={p} value={p.onHand} canonicalUnit={canonicalUnit}
-                          onChange={(v) => update(p.id, { onHand: v })}
-                          displayUnit={displayUnit}
-                          onDisplayUnitChange={(u) => setUnitPrefs({ ...unitPrefs, [p.id]: u })}
+                          product={p} value={p.reorderPoint || 0} canonicalUnit={canonicalUnit}
+                          onChange={(v) => update(p.id, { reorderPoint: v })}
+                          displayUnit={reorderDisplayUnit}
+                          onDisplayUnitChange={(u) => setReorderUnitPrefs({ ...reorderUnitPrefs, [p.id]: u })}
                           width={90}
                         />
-                      )}
-                    </td>
-                    <td className="px-2 py-2 text-right" style={{ fontFamily: MONO, fontSize: 12, color: C.faint }}>
-                      {category === "packing" ? "—" : num(sfEq, 0)}
-                    </td>
-                    <td className="px-2 py-2 text-right">
-                      {category === "wood" ? (
-                        <input
-                          type="number" style={{ ...inputStyle, width: 80, textAlign: "right", fontFamily: MONO, fontSize: 12 }}
-                          value={p.boardsPerUnit ?? ""} placeholder="—"
-                          onChange={(e) => update(p.id, { boardsPerUnit: e.target.value })}
-                        />
-                      ) : (
-                        <span style={{ color: C.faint }}>—</span>
-                      )}
-                    </td>
-                    <td className="px-2 py-2 text-right">
-                      <input
-                        type="number" style={{ ...inputStyle, width: 80, textAlign: "right", fontFamily: MONO, fontSize: 12 }}
-                        value={p.reorderPoint ?? ""} placeholder="—"
-                        onChange={(e) => update(p.id, { reorderPoint: e.target.value })}
-                      />
-                    </td>
-                    <td className="px-2 py-2 text-center"><button onClick={() => remove(p.id)} className="opacity-40 hover:opacity-100"><Trash2 size={14} /></button></td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-        <div className="p-3" style={{ background: C.paper, borderTop: `1px solid ${C.kraftDark}` }}>
-          <Btn kind="primary" onClick={add}><Plus size={14} /> Add item</Btn>
-        </div>
+                      </Field>
+                      <div className="text-xs mt-1" style={{ color: C.faint }}>Flag this item when on-hand drops to or below this amount — pick whichever unit makes sense (boards, SF, pallets, gallons…).</div>
+                    </div>
+
+                    <Field label="Other notes (bundle sizes, odd conversions, anything else worth remembering)">
+                      <textarea style={{ ...inputStyle, minHeight: 50 }} value={p.otherNotes || ""} onChange={(e) => update(p.id, { otherNotes: e.target.value })} />
+                    </Field>
+                  </div>
+                )}
+              </div>
+            );
+          })
+        )}
       </div>
     </div>
   );
