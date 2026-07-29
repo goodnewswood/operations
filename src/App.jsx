@@ -1513,6 +1513,8 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
   const customer = customers.find((c) => c.id === wo.customerId);
   const update = (patch) => onChange({ ...wo, ...patch });
   const [bolOpen, setBolOpen] = useState(false);
+  const [palletModalOpen, setPalletModalOpen] = useState(false);
+  const [printLabels, setPrintLabels] = useState(null);
 
   const updateLine = (lineId, patch) => update({ lines: wo.lines.map((l) => (l.id === lineId ? { ...l, ...patch } : l)) });
   const removeLine = (lineId) => update({ lines: wo.lines.filter((l) => l.id !== lineId) });
@@ -1683,9 +1685,20 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
 
       <div className="flex gap-2 mb-8">
         <Btn kind="primary" onClick={() => setBolOpen(true)}><Printer size={14} /> Print Bill of Lading</Btn>
+        <Btn kind="primary" onClick={() => setPalletModalOpen(true)}><Tag size={14} /> Print Pallet Labels</Btn>
         <Btn onClick={onDelete}><Trash2 size={14} /> Delete work order</Btn>
       </div>
       {bolOpen && <BOLModal wo={wo} customer={customer} products={products} onClose={() => setBolOpen(false)} />}
+      {palletModalOpen && (
+        <PalletLabelModal
+          wo={wo} customer={customer} products={products}
+          onClose={() => setPalletModalOpen(false)}
+          onGenerate={(labels) => { setPalletModalOpen(false); setPrintLabels(labels); }}
+        />
+      )}
+      {printLabels && printLabels.length > 0 && (
+        <FinishedLabelPrintView labels={printLabels} onClose={() => setPrintLabels(null)} />
+      )}
     </div>
   );
 }
@@ -2698,6 +2711,112 @@ function BOLModal({ wo, customer, products, onClose }) {
               <div style={{ marginTop: 24, borderTop: "1px solid #000", paddingTop: 4 }}>Date</div>
             </div>
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Finished pallet labels (from a Work Order) ----------------
+   These are the outbound labels — distinct from the inbound raw-unit
+   labels in Receiving. Prioritizes legibility over density: no QR code
+   here, just large text, since the ask was specifically to make the
+   customer name, size, and ship date very clearly readable at a glance.
+   Always 4"x1" for the Rollo printer — that's the only format offered
+   here, on purpose. */
+
+function PalletLabelModal({ wo, customer, products, onClose, onGenerate }) {
+  const lineDesc = (l) => {
+    const p = products.find((pr) => pr.id === l.productId);
+    return p ? p.sku : (l.desc || "Item");
+  };
+  const blankRow = () => ({ key: uid(), size: "", pallets: "" });
+  const [shipDate, setShipDate] = useState(wo.shipDate || today());
+  const [rows, setRows] = useState(
+    (wo.lines && wo.lines.length > 0)
+      ? wo.lines.map((l) => ({ key: uid(), size: lineDesc(l), pallets: "" }))
+      : [blankRow()]
+  );
+  const updateRow = (key, patch) => setRows(rows.map((r) => (r.key === key ? { ...r, ...patch } : r)));
+  const removeRow = (key) => setRows(rows.length > 1 ? rows.filter((r) => r.key !== key) : rows);
+
+  const totalLabels = rows.reduce((sum, r) => sum + Math.max(0, Math.floor(Number(r.pallets) || 0)), 0);
+
+  const generate = () => {
+    const labels = [];
+    rows.forEach((r) => {
+      const count = Math.max(0, Math.floor(Number(r.pallets) || 0));
+      for (let i = 0; i < count; i++) {
+        labels.push({ key: uid(), customer: customer?.company || "—", size: r.size || "—", shipDate });
+      }
+    });
+    onGenerate(labels);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(34,29,25,0.6)" }}>
+      <div className="rounded-sm p-5 w-full max-w-md" style={{ background: C.panel }}>
+        <div className="flex items-center justify-between mb-3">
+          <div style={{ fontWeight: 800, fontSize: 16 }}>Print pallet labels</div>
+          <button onClick={onClose} className="opacity-60 hover:opacity-100"><X size={16} /></button>
+        </div>
+        <div className="text-sm mb-3" style={{ color: C.faint }}>4"×1" Rollo labels — customer, size, and ship date, big and legible.</div>
+        <Field label="Ship date"><input type="date" style={inputStyle} value={shipDate} onChange={(e) => setShipDate(e.target.value)} /></Field>
+        <div className="mt-3 space-y-2">
+          {rows.map((r) => (
+            <div key={r.key} className="flex items-end gap-2">
+              <Field label="Size / description" w={200}><input style={inputStyle} value={r.size} onChange={(e) => updateRow(r.key, { size: e.target.value })} /></Field>
+              <Field label="Pallets" w={80}><input type="number" style={inputStyle} value={r.pallets} onChange={(e) => updateRow(r.key, { pallets: e.target.value })} /></Field>
+              <button onClick={() => removeRow(r.key)} disabled={rows.length === 1} className="opacity-40 hover:opacity-100 disabled:opacity-15 mb-2"><Trash2 size={16} /></button>
+            </div>
+          ))}
+        </div>
+        <Btn onClick={() => setRows([...rows, blankRow()])}><Plus size={14} /> Add another size</Btn>
+        <div className="mt-3 pt-3 flex items-center justify-between" style={{ borderTop: `1px solid ${C.kraft}` }}>
+          <div className="text-sm" style={{ color: C.faint }}>{totalLabels} label{totalLabels === 1 ? "" : "s"}</div>
+          <Btn kind="primary" onClick={generate} disabled={totalLabels === 0}><Printer size={16} /> Generate & print</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FinishedLabelPrintView({ labels, onClose }) {
+  return (
+    <div className="fixed inset-0 z-50 overflow-auto" style={{ background: "rgba(34,29,25,0.6)" }}>
+      <style>{`
+        @page { size: 4in 1in; margin: 0; }
+        @media print {
+          body * { visibility: hidden !important; }
+          #flabels-root, #flabels-root * { visibility: visible !important; }
+          #flabels-root { margin: 0 !important; }
+          .flabel-page { page-break-after: always; break-after: page; border: none !important; margin: 0 !important; }
+          .flabel-page:last-child { page-break-after: auto; break-after: auto; }
+          .no-print { display: none !important; }
+        }
+      `}</style>
+      <div className="max-w-md mx-auto my-8">
+        <div className="flex justify-end gap-2 mb-3 no-print">
+          <Btn kind="dark" onClick={() => window.print()}><Printer size={13} /> Print all {labels.length} labels</Btn>
+          <Btn onClick={onClose}><X size={13} /> Close</Btn>
+        </div>
+        <div id="flabels-root">
+          {labels.map((l) => (
+            <div
+              key={l.key}
+              className="flabel-page"
+              style={{
+                width: "4in", height: "1in", background: "#fff", color: "#000",
+                display: "flex", flexDirection: "column", justifyContent: "center",
+                padding: "0.1in 0.18in", boxSizing: "border-box", border: "1px solid #ccc",
+                fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif", marginBottom: 8,
+              }}
+            >
+              <div style={{ fontSize: 21, fontWeight: 900, lineHeight: 1.1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.customer}</div>
+              <div style={{ fontSize: 17, fontWeight: 700, marginTop: 3 }}>{l.size}</div>
+              <div style={{ fontSize: 13, marginTop: 3 }}>Ship: {l.shipDate}</div>
+            </div>
+          ))}
         </div>
       </div>
     </div>
