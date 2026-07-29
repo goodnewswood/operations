@@ -1073,63 +1073,50 @@ const num = (n, d = 0) => (Number(n) || 0).toLocaleString("en-US", { minimumFrac
 
 // Wood conversions all route through "board" as the hub unit — that's
 // what makes box and pallet relate correctly to SF and planks without
-// needing a full generic conversion graph. Each spoke is independent:
-// missing a factor just means that one conversion shows 0, not a crash.
-// Open-ended packaging conversions, per SKU: each row is "1 [unit] = qty
-// boards" — e.g. {qty: 20, unit: "Box"} or {qty: 40, unit: "Skid"}. This
-// is what lets someone add a completely custom container name (not just
-// the built-in box/pallet) and have it work as a real switchable unit.
-function findConversion(product, unitName) {
-  const list = product?.conversions || [];
-  const needle = String(unitName || "").toLowerCase();
-  return list.find((c) => (c.unit || "").toLowerCase() === needle && Number(c.qty) > 0);
+// Builds a unit graph for one SKU: each node is a unit name, each edge a
+// multiplier (1 of nodeA = factor of nodeB). Both the built-in fields
+// (planksPerBoard, sfPerBoard, boardsPerUnit) and the open-ended
+// "qtyA unitA = qtyB unitB" conversions list feed the same graph, so
+// board/plank/sf/pallet/box/anything-custom all interconvert correctly
+// as long as SOME chain of edges connects them.
+function buildUnitGraph(product) {
+  const graph = {};
+  const addEdge = (uA, uB, factor) => {
+    if (!uA || !uB || !(factor > 0)) return;
+    graph[uA] = graph[uA] || {};
+    graph[uB] = graph[uB] || {};
+    graph[uA][uB] = factor;
+    graph[uB][uA] = 1 / factor;
+  };
+  if (Number(product?.planksPerBoard) > 0) addEdge("board", "plank", Number(product.planksPerBoard));
+  const sfb = Number(product?.sfPerBoard) || (Number(product?.sfPerPlank) || 0) * (Number(product?.planksPerBoard) || 0);
+  if (sfb > 0) addEdge("board", "sf", sfb);
+  if (Number(product?.boardsPerUnit) > 0) addEdge("pallet", "board", Number(product.boardsPerUnit));
+  if (Number(product?.boardsPerBox) > 0) addEdge("box", "board", Number(product.boardsPerBox));
+  (product?.conversions || []).forEach((c) => {
+    const qtyA = Number(c.qtyA), qtyB = Number(c.qtyB);
+    if (c.unitA && c.unitB && qtyA > 0 && qtyB > 0) addEdge(c.unitA, c.unitB, qtyB / qtyA);
+  });
+  return graph;
 }
-function woodToBoards(product, qty, fromUnit) {
+function convertViaGraph(product, qty, fromUnit, toUnit) {
   const q = Number(qty) || 0;
-  if (!product) return q;
-  if (fromUnit === "board") return q;
-  if (fromUnit === "plank") {
-    const ppb = Number(product.planksPerBoard) || 0;
-    return ppb > 0 ? q / ppb : q;
+  if (fromUnit === toUnit) return q;
+  const graph = buildUnitGraph(product);
+  const visited = new Set([fromUnit]);
+  const queue = [[fromUnit, 1]];
+  while (queue.length) {
+    const [node, mult] = queue.shift();
+    if (node === toUnit) return q * mult;
+    const neighbors = graph[node] || {};
+    for (const next in neighbors) {
+      if (!visited.has(next)) {
+        visited.add(next);
+        queue.push([next, mult * neighbors[next]]);
+      }
+    }
   }
-  if (fromUnit === "sf") {
-    const sfb = Number(product.sfPerBoard) || (Number(product.sfPerPlank) || 0) * (Number(product.planksPerBoard) || 0);
-    return sfb > 0 ? q / sfb : q;
-  }
-  if (fromUnit === "box") {
-    const bpb = Number(product.boardsPerBox) || (Number(product.boardsPerUnit) && Number(product.boxesPerPallet) ? Number(product.boardsPerUnit) / Number(product.boxesPerPallet) : 0);
-    return bpb > 0 ? q * bpb : q;
-  }
-  if (fromUnit === "pallet") {
-    const bpp = Number(product.boardsPerUnit) || 0;
-    return bpp > 0 ? q * bpp : q;
-  }
-  const conv = findConversion(product, fromUnit);
-  if (conv) return q * Number(conv.qty);
-  return q;
-}
-function woodFromBoards(product, boards, toUnit) {
-  if (!product) return boards;
-  if (toUnit === "board") return boards;
-  if (toUnit === "plank") {
-    const ppb = Number(product.planksPerBoard) || 0;
-    return ppb > 0 ? boards * ppb : boards;
-  }
-  if (toUnit === "sf") {
-    const sfb = Number(product.sfPerBoard) || (Number(product.sfPerPlank) || 0) * (Number(product.planksPerBoard) || 0);
-    return sfb > 0 ? boards * sfb : boards;
-  }
-  if (toUnit === "box") {
-    const bpb = Number(product.boardsPerBox) || (Number(product.boardsPerUnit) && Number(product.boxesPerPallet) ? Number(product.boardsPerUnit) / Number(product.boxesPerPallet) : 0);
-    return bpb > 0 ? boards / bpb : boards;
-  }
-  if (toUnit === "pallet") {
-    const bpp = Number(product.boardsPerUnit) || 0;
-    return bpp > 0 ? boards / bpp : boards;
-  }
-  const conv = findConversion(product, toUnit);
-  if (conv) return boards / Number(conv.qty);
-  return boards;
+  return q; // no path between these two units yet — return unconverted rather than crash
 }
 function toGallons(product, qty, fromUnit) {
   const q = Number(qty) || 0;
@@ -1156,20 +1143,16 @@ function convertQty(product, qty, fromUnit, toUnit) {
     }
     return Number(qty) || 0;
   }
-  const boards = woodToBoards(product, qty, fromUnit);
-  return woodFromBoards(product, boards, toUnit);
+  return convertViaGraph(product, qty, fromUnit, toUnit);
 }
 function unitsFor(product) {
   if (!product) return ["sf", "board", "plank"];
   if (product.category === "paint") return ["gal", "qt", "sf"];
   if (product.category === "packing") return [product.unitLabel || "ea"];
-  const units = ["board", "plank", "sf"];
-  if (Number(product.boardsPerBox) > 0 || (Number(product.boardsPerUnit) && Number(product.boxesPerPallet))) units.push("box");
-  if (Number(product.boardsPerUnit) > 0) units.push("pallet");
-  (product.conversions || []).forEach((c) => {
-    if (c.unit && Number(c.qty) > 0 && !units.some((u) => u.toLowerCase() === c.unit.toLowerCase())) units.push(c.unit);
-  });
-  return units;
+  const units = new Set(["board", "plank", "sf"]);
+  const graph = buildUnitGraph(product);
+  Object.keys(graph).forEach((u) => units.add(u));
+  return Array.from(units);
 }
 const unitLabel = (u) => (u === "sf" ? "SF" : u === "board" ? "boards" : u === "plank" ? "planks" : u === "gal" ? "gal" : u === "qt" ? "qt" : u === "box" ? "boxes" : u === "pallet" ? "pallets" : u);
 
@@ -1975,11 +1958,22 @@ function InventoryTab({ products, onChange }) {
   };
   const addConversion = (pid) => {
     const prod = products.find((p) => p.id === pid);
-    update(pid, { conversions: [...(prod?.conversions || []), { key: uid(), qty: "", unit: "" }] });
+    update(pid, { conversions: [...(prod?.conversions || []), { key: uid(), qtyA: "", unitA: "board", qtyB: "", unitB: "" }] });
   };
   const removeConversion = (pid, key) => {
     const prod = products.find((p) => p.id === pid);
     update(pid, { conversions: (prod?.conversions || []).filter((c) => c.key !== key) });
+  };
+  // Width × Length ÷ 144 = SF per board — one-directional: editing
+  // dimensions recalculates SF/board, but editing SF/board directly
+  // never touches the dimensions back.
+  const updateDims = (pid, patch) => {
+    const prod = products.find((p) => p.id === pid);
+    const merged = { ...prod, ...patch };
+    const w = Number(merged.widthIn) || 0;
+    const l = Number(merged.lengthIn) || 0;
+    const extra = w > 0 && l > 0 ? { sfPerBoard: Math.round(((w * l) / 144) * 1000) / 1000 } : {};
+    update(pid, { ...patch, ...extra });
   };
 
   const canonicalUnitFor = (p) => (p.category === "paint" ? "gal" : p.category === "packing" ? (p.unitLabel || "ea") : (p.kind === "sf" ? "sf" : "board"));
@@ -2095,8 +2089,8 @@ function InventoryTab({ products, onChange }) {
                           <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, color: C.gold }}>Dimensions</div>
                           <div className="grid grid-cols-3 gap-2">
                             <Field label="Thickness (in)"><input type="number" style={inputStyle} value={p.thickness ?? ""} placeholder="—" onChange={(e) => update(p.id, { thickness: e.target.value })} /></Field>
-                            <Field label="Width (in)"><input type="number" style={inputStyle} value={p.widthIn ?? ""} placeholder="—" onChange={(e) => update(p.id, { widthIn: e.target.value })} /></Field>
-                            <Field label="Length (in)"><input type="number" style={inputStyle} value={p.lengthIn ?? ""} placeholder="—" onChange={(e) => update(p.id, { lengthIn: e.target.value })} /></Field>
+                            <Field label="Width (in)"><input type="number" style={inputStyle} value={p.widthIn ?? ""} placeholder="—" onChange={(e) => updateDims(p.id, { widthIn: e.target.value })} /></Field>
+                            <Field label="Length (in)"><input type="number" style={inputStyle} value={p.lengthIn ?? ""} placeholder="—" onChange={(e) => updateDims(p.id, { lengthIn: e.target.value })} /></Field>
                           </div>
                         </div>
 
@@ -2109,13 +2103,18 @@ function InventoryTab({ products, onChange }) {
 
                         <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
                           <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, color: C.gold }}>Packing & Conversions</div>
-                          <div className="text-xs mb-2" style={{ color: C.faint }}>Define any container you want — each one becomes a real switchable unit for this SKU. "1 [unit] = [qty] boards."</div>
+                          <div className="text-xs mb-2" style={{ color: C.faint }}>"[Qty] [Unit] per [Qty] [Unit]" — e.g. 40 boards per 1 Box. Pick from units this SKU already has, or type a brand new one.</div>
+                          <datalist id={`units-${p.id}`}>
+                            {unitsFor(p).map((u) => <option key={u} value={u} />)}
+                          </datalist>
                           <div className="space-y-2">
                             {(p.conversions || []).map((c) => (
-                              <div key={c.key} className="flex items-end gap-2">
-                                <Field label="Qty" w={90}><input type="number" style={inputStyle} value={c.qty ?? ""} onChange={(e) => updateConversion(p.id, c.key, { qty: e.target.value })} /></Field>
+                              <div key={c.key} className="flex items-end gap-2 flex-wrap">
+                                <Field label="Qty" w={70}><input type="number" style={inputStyle} value={c.qtyA ?? ""} onChange={(e) => updateConversion(p.id, c.key, { qtyA: e.target.value })} /></Field>
+                                <Field label="Unit" w={110}><input list={`units-${p.id}`} style={inputStyle} value={c.unitA ?? ""} placeholder="board" onChange={(e) => updateConversion(p.id, c.key, { unitA: e.target.value })} /></Field>
                                 <span className="text-xs pb-2" style={{ color: C.faint, fontFamily: MONO }}>PER</span>
-                                <Field label="Unit" w={140}><input style={inputStyle} value={c.unit ?? ""} placeholder="e.g. Box, Skid" onChange={(e) => updateConversion(p.id, c.key, { unit: e.target.value })} /></Field>
+                                <Field label="Qty" w={70}><input type="number" style={inputStyle} value={c.qtyB ?? ""} onChange={(e) => updateConversion(p.id, c.key, { qtyB: e.target.value })} /></Field>
+                                <Field label="Unit" w={110}><input list={`units-${p.id}`} style={inputStyle} value={c.unitB ?? ""} placeholder="e.g. Box, Skid" onChange={(e) => updateConversion(p.id, c.key, { unitB: e.target.value })} /></Field>
                                 <button onClick={() => removeConversion(p.id, c.key)} className="opacity-40 hover:opacity-100 mb-2"><Trash2 size={16} /></button>
                               </div>
                             ))}
