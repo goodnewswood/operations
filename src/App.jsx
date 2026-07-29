@@ -2747,7 +2747,7 @@ function PalletLabelModal({ wo, customer, products, onClose, onGenerate }) {
     rows.forEach((r) => {
       const count = Math.max(0, Math.floor(Number(r.pallets) || 0));
       for (let i = 0; i < count; i++) {
-        labels.push({ key: uid(), customer: customer?.company || "—", size: r.size || "—", shipDate });
+        labels.push({ key: uid(), customer: customer?.company || "—", size: r.size || "—", shipDate, seq: i + 1, seqTotal: count });
       }
     });
     onGenerate(labels);
@@ -2785,12 +2785,12 @@ function FinishedLabelPrintView({ labels, onClose }) {
   return (
     <div className="fixed inset-0 z-50 overflow-auto" style={{ background: "rgba(34,29,25,0.6)" }}>
       <style>{`
-        @page { size: 4in 1in; margin: 0; }
+        @page { size: 4in 1in landscape; margin: 0; }
         @media print {
           body * { visibility: hidden !important; }
           #flabels-root, #flabels-root * { visibility: visible !important; }
           #flabels-root { margin: 0 !important; }
-          .flabel-page { page-break-after: always; break-after: page; border: none !important; margin: 0 !important; }
+          .flabel-page { page-break-after: always; break-after: page; page-break-inside: avoid; break-inside: avoid; border: none !important; margin: 0 !important; }
           .flabel-page:last-child { page-break-after: auto; break-after: auto; }
           .no-print { display: none !important; }
         }
@@ -2813,7 +2813,10 @@ function FinishedLabelPrintView({ labels, onClose }) {
               }}
             >
               <div style={{ fontSize: 21, fontWeight: 900, lineHeight: 1.1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.customer}</div>
-              <div style={{ fontSize: 17, fontWeight: 700, marginTop: 3 }}>{l.size}</div>
+              <div className="flex items-baseline justify-between" style={{ marginTop: 3 }}>
+                <span style={{ fontSize: 17, fontWeight: 700 }}>{l.size}</span>
+                {l.seqTotal > 1 && <span style={{ fontSize: 13, fontWeight: 700, color: "#555" }}>{l.seq} of {l.seqTotal}</span>}
+              </div>
               <div style={{ fontSize: 13, marginTop: 3 }}>Ship: {l.shipDate}</div>
             </div>
           ))}
@@ -2827,12 +2830,12 @@ function LabelPrintView({ units, supplierFor, onClose }) {
   return (
     <div className="fixed inset-0 z-50 overflow-auto" style={{ background: "rgba(34,29,25,0.6)" }}>
       <style>{`
-        @page { size: 4in 1in; margin: 0; }
+        @page { size: 4in 1in landscape; margin: 0; }
         @media print {
           body * { visibility: hidden !important; }
           #labels-root, #labels-root * { visibility: visible !important; }
           #labels-root { margin: 0 !important; }
-          .label-page { page-break-after: always; break-after: page; border: none !important; margin: 0 !important; }
+          .label-page { page-break-after: always; break-after: page; page-break-inside: avoid; break-inside: avoid; border: none !important; margin: 0 !important; }
           .label-page:last-child { page-break-after: auto; break-after: auto; }
           .no-print { display: none !important; }
         }
