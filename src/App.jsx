@@ -972,15 +972,15 @@ const SEED_CUSTOMERS = [
 ];
 
 const SEED_PRODUCTS = [
-  { id: "p1", sku: "TH-545-NAT", name: "Natural Patina", kind: "sf", face: '4.75"', width: '5.09"', length: '45"', sfPerPlank: 1.59, planksPerBoard: 2, sourceBoardSku: "185-RAW", sfPerBox: 20, boxesPerPallet: 64, onHand: 0 },
-  { id: "p6", sku: "5S3S-THIN", name: '5" S3S (Thin)', kind: "sf", face: '5.00"', width: '5.00"', length: '45"', sfPerPlank: 1.74, sfPerBox: 20, onHand: 0 },
-  { id: "p7", sku: "7S3S", name: '7" S3S', kind: "sf", face: '7.00"', width: '7.00"', length: '45"', sfPerPlank: 2.19, sfPerBox: 40, onHand: 0 },
-  { id: "p8", sku: "5SHIPLAP", name: '5" Shiplap', kind: "sf", face: '4.75"', width: '5.00"', length: '48"', sfPerPlank: 1.67, sfPerBox: 20, onHand: 0 },
-  { id: "p9", sku: "7SHIPLAP", name: '7" Shiplap', kind: "sf", face: '6.75"', width: '7.00"', length: '48"', sfPerPlank: 2.25, sfPerBox: 40, onHand: 0 },
-  { id: "p10", sku: "5SEQ-TG", name: '5" Sequoia T&G', kind: "sf", face: '4.75"', width: '5.00" (w/ T&G)', length: '48"', sfPerPlank: 1.67, sfPerBox: 20, onHand: 0 },
-  { id: "p11", sku: "7SEQ-TG", name: '7" Sequoia T&G', kind: "sf", face: '6.75"', width: '7.00" (w/ T&G)', length: '48"', sfPerPlank: 2.25, sfPerBox: 40, onHand: 0 },
-  { id: "p12", sku: "RAW-1x8x5-NP", name: "Raw Plank 1x8x5, Non-Painted", kind: "sf", face: '~7.5"', width: '~7.5"', length: '60"', onHand: 0 },
-  { id: "p13", sku: "RAW-1x8x5-OSP", name: "Raw Plank 1x8x5, One-Side Painted", kind: "sf", face: '~7.5"', width: '~7.5"', length: '60"', onHand: 0 },
+  { id: "p1", sku: "TH-545-NAT", name: "Natural Patina", kind: "sf", category: "wood", face: '4.75"', width: '5.09"', length: '45"', sfPerPlank: 1.59, planksPerBoard: 2, sourceBoardSku: "185-RAW", sfPerBox: 20, boxesPerPallet: 64, onHand: 0 },
+  { id: "p6", sku: "5S3S-THIN", name: '5" S3S (Thin)', kind: "sf", category: "wood", face: '5.00"', width: '5.00"', length: '45"', sfPerPlank: 1.74, sfPerBox: 20, onHand: 0 },
+  { id: "p7", sku: "7S3S", name: '7" S3S', kind: "sf", category: "wood", face: '7.00"', width: '7.00"', length: '45"', sfPerPlank: 2.19, sfPerBox: 40, onHand: 0 },
+  { id: "p8", sku: "5SHIPLAP", name: '5" Shiplap', kind: "sf", category: "wood", face: '4.75"', width: '5.00"', length: '48"', sfPerPlank: 1.67, sfPerBox: 20, onHand: 0 },
+  { id: "p9", sku: "7SHIPLAP", name: '7" Shiplap', kind: "sf", category: "wood", face: '6.75"', width: '7.00"', length: '48"', sfPerPlank: 2.25, sfPerBox: 40, onHand: 0 },
+  { id: "p10", sku: "5SEQ-TG", name: '5" Sequoia T&G', kind: "sf", category: "wood", face: '4.75"', width: '5.00" (w/ T&G)', length: '48"', sfPerPlank: 1.67, sfPerBox: 20, onHand: 0 },
+  { id: "p11", sku: "7SEQ-TG", name: '7" Sequoia T&G', kind: "sf", category: "wood", face: '6.75"', width: '7.00" (w/ T&G)', length: '48"', sfPerPlank: 2.25, sfPerBox: 40, onHand: 0 },
+  { id: "p12", sku: "RAW-1x8x5-NP", name: "Raw Plank 1x8x5, Non-Painted", kind: "sf", category: "wood", face: '~7.5"', width: '~7.5"', length: '60"', onHand: 0 },
+  { id: "p13", sku: "RAW-1x8x5-OSP", name: "Raw Plank 1x8x5, One-Side Painted", kind: "sf", category: "wood", face: '~7.5"', width: '~7.5"', length: '60"', onHand: 0 },
   // Raw + sorted board stock, generated per size code. A size code's middle
   // digit is the board width in inches — that's what sets boards-per-unit
   // (8" wide = 300/pallet, 6" wide = 400/pallet), per how these are stacked.
@@ -991,19 +991,23 @@ const SEED_PRODUCTS = [
     const perUnit = width === "8" ? 300 : width === "6" ? 400 : undefined;
     const groupId = `grp-${size}`;
     return [
-      { id: `raw-${size}`, sku: `${size}-RAW`, name: `${size} Raw Incoming (Unsorted)`, kind: "board", groupId, role: "raw", onHand: 0 },
-      { id: `n-${size}`, sku: `${size}N`, name: `${size}, No Paint (Sorted, unmilled)`, kind: "board", groupId, role: "sortedN", boardsPerUnit: perUnit, onHand: 0 },
-      { id: `p-${size}`, sku: `${size}P`, name: `${size}, One Side Painted (Sorted, unmilled)`, kind: "board", groupId, role: "sortedP", boardsPerUnit: perUnit, onHand: 0 },
+      { id: `raw-${size}`, sku: `${size}-RAW`, name: `${size} Raw Incoming (Unsorted)`, kind: "board", category: "wood", groupId, role: "raw", onHand: 0 },
+      { id: `n-${size}`, sku: `${size}N`, name: `${size}, No Paint (Sorted, unmilled)`, kind: "board", category: "wood", groupId, role: "sortedN", boardsPerUnit: perUnit, onHand: 0 },
+      { id: `p-${size}`, sku: `${size}P`, name: `${size}, One Side Painted (Sorted, unmilled)`, kind: "board", category: "wood", groupId, role: "sortedP", boardsPerUnit: perUnit, onHand: 0 },
     ];
   }),
-  { id: "p5", sku: "MILL-STOCK", name: "Mill Stock (Slush Inventory)", kind: "board", role: "millStock", unitLabel: "board", onHand: 0 },
-  { id: "gs1", sku: "GS-TABUNOKI", name: "Graphene Stone — Tabunoki", kind: "each", unitLabel: "bucket", onHand: 3 },
-  { id: "gs2", sku: "GS-CARAMEL", name: "Graphene Stone — Caramel Corn", kind: "each", unitLabel: "bucket", onHand: 3 },
-  { id: "gs3", sku: "GS-GRIZZLE", name: "Graphene Stone — Grizzle Gray", kind: "each", unitLabel: "bucket", onHand: 2 },
-  { id: "gs4", sku: "GS-FIRED", name: "Graphene Stone — Fired Brick", kind: "each", unitLabel: "bucket", onHand: 1 },
-  { id: "gs5", sku: "GS-BLACK", name: "Graphene Stone — Black", kind: "each", unitLabel: "bucket", onHand: 2 },
-  { id: "gs6", sku: "GS-WHITE", name: "Graphene Stone — White", kind: "each", unitLabel: "bucket", onHand: 1 },
-  { id: "gs7", sku: "GS-SILKEN", name: "Graphene Stone — Silken Peacock White", kind: "each", unitLabel: "bucket", onHand: 1 },
+  { id: "p5", sku: "MILL-STOCK", name: "Mill Stock (Slush Inventory)", kind: "board", category: "wood", role: "millStock", unitLabel: "board", onHand: 0 },
+  // Paint — tracked in gallons, not bucket counts. Converted from the old
+  // bucket-count records assuming 5-gallon pails (double check against
+  // actual container size and correct if that assumption is off).
+  // sfPerGallon follows the ~250 sf/gallon coverage rate already in use.
+  { id: "gs1", sku: "GS-TABUNOKI", name: "Graphene Stone — Tabunoki", kind: "each", category: "paint", sfPerGallon: 250, onHand: 15 },
+  { id: "gs2", sku: "GS-CARAMEL", name: "Graphene Stone — Caramel Corn", kind: "each", category: "paint", sfPerGallon: 250, onHand: 15 },
+  { id: "gs3", sku: "GS-GRIZZLE", name: "Graphene Stone — Grizzle Gray", kind: "each", category: "paint", sfPerGallon: 250, onHand: 10 },
+  { id: "gs4", sku: "GS-FIRED", name: "Graphene Stone — Fired Brick", kind: "each", category: "paint", sfPerGallon: 250, onHand: 5 },
+  { id: "gs5", sku: "GS-BLACK", name: "Graphene Stone — Black", kind: "each", category: "paint", sfPerGallon: 250, onHand: 10 },
+  { id: "gs6", sku: "GS-WHITE", name: "Graphene Stone — White", kind: "each", category: "paint", sfPerGallon: 250, onHand: 5 },
+  { id: "gs7", sku: "GS-SILKEN", name: "Graphene Stone — Silken Peacock White", kind: "each", category: "paint", sfPerGallon: 250, onHand: 5 },
 ];
 
 // Vendor records, transcribed from the Wood Vendor Master List spreadsheet
@@ -1084,13 +1088,37 @@ function toBoards(product, qty, fromUnit) {
   const ppb = Number(product?.planksPerBoard) || 0;
   return ppb > 0 ? planks / ppb : planks;
 }
+function toGallons(product, qty, fromUnit) {
+  const q = Number(qty) || 0;
+  if (fromUnit === "gal") return q;
+  if (fromUnit === "qt") return q / 4;
+  if (fromUnit === "sf") {
+    const sfg = Number(product?.sfPerGallon) || 0;
+    return sfg > 0 ? q / sfg : q;
+  }
+  return q;
+}
+function toQuarts(product, qty, fromUnit) {
+  return toGallons(product, qty, fromUnit) * 4;
+}
 function toSF(product, qty, fromUnit) {
+  if (product?.category === "paint") {
+    const gal = toGallons(product, qty, fromUnit);
+    const sfg = Number(product?.sfPerGallon) || 0;
+    return sfg > 0 ? gal * sfg : gal;
+  }
   const planks = toPlanks(product, qty, fromUnit);
   const sfp = Number(product?.sfPerPlank) || 0;
   return sfp > 0 ? planks * sfp : planks;
 }
 function convertQty(product, qty, fromUnit, toUnit) {
   if (fromUnit === toUnit) return Number(qty) || 0;
+  if (product?.category === "paint") {
+    if (toUnit === "gal") return toGallons(product, qty, fromUnit);
+    if (toUnit === "qt") return toQuarts(product, qty, fromUnit);
+    if (toUnit === "sf") return toSF(product, qty, fromUnit);
+    return Number(qty) || 0;
+  }
   if (toUnit === "plank") return toPlanks(product, qty, fromUnit);
   if (toUnit === "board") return toBoards(product, qty, fromUnit);
   if (toUnit === "sf") return toSF(product, qty, fromUnit);
@@ -1098,13 +1126,14 @@ function convertQty(product, qty, fromUnit, toUnit) {
 }
 function unitsFor(product) {
   if (!product) return ["sf", "board", "plank"];
-  if (product.kind === "board" || product.kind === "each") return [product.kind === "board" ? "board" : (product.unitLabel || "ea")];
-  const units = ["sf"];
-  if (Number(product.planksPerBoard) > 0) units.push("plank", "board");
-  else units.push("plank");
-  return units;
+  if (product.category === "paint") return ["gal", "qt", "sf"];
+  if (product.category === "packing") return [product.unitLabel || "ea"];
+  // Wood always offers board/plank/SF, regardless of which unit it's
+  // canonically stored in — conversion factors just show 0 until set,
+  // rather than hiding the option entirely.
+  return ["board", "plank", "sf"];
 }
-const unitLabel = (u) => (u === "sf" ? "SF" : u === "board" ? "boards" : u === "plank" ? "planks" : u);
+const unitLabel = (u) => (u === "sf" ? "SF" : u === "board" ? "boards" : u === "plank" ? "planks" : u === "gal" ? "gal" : u === "qt" ? "qt" : u);
 
 const inputStyle = {
   border: `1px solid ${C.kraftDark}`,
@@ -1882,18 +1911,25 @@ function CustomersTab({ customers, onChange }) {
 
 function InventoryTab({ products, onChange }) {
   const [group, setGroup] = useState("all");
+  const [sortBy, setSortBy] = useState("name");
   const update = (id, patch) => onChange(products.map((p) => (p.id === id ? { ...p, ...patch } : p)));
   const remove = (id) => onChange(products.filter((p) => p.id !== id));
-  const add = () => onChange([...products, { id: uid(), sku: "NEW-SKU", name: "New item", kind: "each", unitLabel: "ea", onHand: 0 }]);
+  const add = () => onChange([...products, { id: uid(), sku: "NEW-SKU", name: "New item", kind: "each", category: "wood", unitLabel: "ea", onHand: 0 }]);
   const [unitPrefs, setUnitPrefs] = useState({});
 
-  const isPaint = (p) => p.sku.startsWith("GS-");
-  const shown = products.filter((p) => group === "all" ? true : group === "paint" ? isPaint(p) : !isPaint(p));
+  const canonicalUnitFor = (p) => (p.category === "paint" ? "gal" : p.category === "packing" ? (p.unitLabel || "ea") : (p.kind === "sf" ? "sf" : "board"));
+  const sfEquivalent = (p) => (p.category === "packing" ? 0 : convertQty(p, p.onHand, canonicalUnitFor(p), "sf"));
+
+  const filtered = products.filter((p) => group === "all" ? true : (p.category || "wood") === group);
+  const shown = filtered.slice().sort((a, b) => {
+    if (sortBy === "sf") return sfEquivalent(b) - sfEquivalent(a);
+    return (a.name || a.sku || "").localeCompare(b.name || b.sku || "");
+  });
 
   return (
     <div>
-      <div className="flex items-center gap-2 mb-3">
-        {[["all", "All"], ["wood", "Wood profiles"], ["paint", "Paint"]].map(([id, label]) => (
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        {[["all", "All"], ["wood", "Wood"], ["paint", "Paint"], ["packing", "Packing"]].map(([id, label]) => (
           <button
             key={id} onClick={() => setGroup(id)}
             className="px-3 py-1.5 rounded-sm text-xs"
@@ -1902,14 +1938,26 @@ function InventoryTab({ products, onChange }) {
             {label}
           </button>
         ))}
+        <span className="text-xs" style={{ color: C.faint, fontFamily: MONO, marginLeft: 8 }}>SORT BY</span>
+        {[["name", "Name"], ["sf", "Square Feet"]].map(([id, label]) => (
+          <button
+            key={id} onClick={() => setSortBy(id)}
+            className="px-3 py-1.5 rounded-sm text-xs"
+            style={{ fontFamily: MONO, background: sortBy === id ? C.ink : "transparent", color: sortBy === id ? "#fff" : C.faint, border: `1px solid ${sortBy === id ? C.ink : C.kraftDark}` }}
+          >
+            {label}
+          </button>
+        ))}
       </div>
       <div className="rounded-sm overflow-hidden" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
         <div className="overflow-x-auto">
-          <table className="w-full text-sm" style={{ borderCollapse: "collapse", minWidth: 640 }}>
+          <table className="w-full text-sm" style={{ borderCollapse: "collapse", minWidth: 760 }}>
             <thead>
               <tr style={{ background: C.ink, color: "#fff", fontFamily: MONO, fontSize: 10, letterSpacing: "0.06em" }}>
                 <th className="text-left px-3 py-2">SKU / Name</th>
+                <th className="text-left px-2 py-2">Category</th>
                 <th className="text-right px-2 py-2">On Hand</th>
+                <th className="text-right px-2 py-2">≈ SF</th>
                 <th className="text-right px-2 py-2">Boards / Unit</th>
                 <th className="text-right px-2 py-2">Reorder At</th>
                 <th style={{ width: 36 }}></th>
@@ -1917,9 +1965,11 @@ function InventoryTab({ products, onChange }) {
             </thead>
             <tbody>
               {shown.map((p) => {
+                const category = p.category || "wood";
                 const short = Number(p.onHand) <= 0;
-                const canonicalUnit = p.kind === "sf" ? "sf" : p.kind === "board" ? "board" : (p.unitLabel || "ea");
+                const canonicalUnit = canonicalUnitFor(p);
                 const displayUnit = unitPrefs[p.id] || canonicalUnit;
+                const sfEq = sfEquivalent(p);
                 return (
                   <tr key={p.id} style={{ borderBottom: `1px solid ${C.kraft}` }}>
                     <td className="px-3 py-2">
@@ -1932,27 +1982,45 @@ function InventoryTab({ products, onChange }) {
                         value={p.name} onChange={(e) => update(p.id, { name: e.target.value })}
                       />
                     </td>
+                    <td className="px-2 py-2">
+                      <select
+                        style={{ ...inputStyle, fontSize: 12, padding: "4px 6px" }}
+                        value={category}
+                        onChange={(e) => update(p.id, { category: e.target.value })}
+                      >
+                        <option value="wood">Wood</option>
+                        <option value="paint">Paint</option>
+                        <option value="packing">Packing</option>
+                      </select>
+                    </td>
                     <td className="px-2 py-2 text-right">
-                      {p.kind === "sf" ? (
+                      {category === "packing" ? (
+                        <div className="flex items-center justify-end gap-1">
+                          <input
+                            type="number" style={{ ...inputStyle, width: 90, textAlign: "right", fontFamily: MONO, color: short ? C.redwood : C.ink, fontWeight: 700 }}
+                            value={p.onHand ?? ""} onChange={(e) => update(p.id, { onHand: e.target.value })}
+                          />
+                          <input
+                            style={{ ...inputStyle, width: 60, fontSize: 11, padding: "4px 6px" }}
+                            value={p.unitLabel || ""} placeholder="ea"
+                            onChange={(e) => update(p.id, { unitLabel: e.target.value })}
+                          />
+                        </div>
+                      ) : (
                         <UnitSwitchInput
-                          product={p} value={p.onHand} canonicalUnit="sf"
+                          product={p} value={p.onHand} canonicalUnit={canonicalUnit}
                           onChange={(v) => update(p.id, { onHand: v })}
                           displayUnit={displayUnit}
                           onDisplayUnitChange={(u) => setUnitPrefs({ ...unitPrefs, [p.id]: u })}
-                          width={100}
+                          width={90}
                         />
-                      ) : (
-                        <div className="flex items-center justify-end gap-1">
-                          <input
-                            type="number" style={{ ...inputStyle, width: 100, textAlign: "right", fontFamily: MONO, color: short ? C.redwood : C.ink, fontWeight: 700 }}
-                            value={p.onHand ?? ""} onChange={(e) => update(p.id, { onHand: e.target.value })}
-                          />
-                          <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>{canonicalUnit === "board" ? "boards" : p.unitLabel || "ea"}</span>
-                        </div>
                       )}
                     </td>
+                    <td className="px-2 py-2 text-right" style={{ fontFamily: MONO, fontSize: 12, color: C.faint }}>
+                      {category === "packing" ? "—" : num(sfEq, 0)}
+                    </td>
                     <td className="px-2 py-2 text-right">
-                      {p.kind === "board" ? (
+                      {category === "wood" ? (
                         <input
                           type="number" style={{ ...inputStyle, width: 80, textAlign: "right", fontFamily: MONO, fontSize: 12 }}
                           value={p.boardsPerUnit ?? ""} placeholder="—"
