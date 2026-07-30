@@ -1226,13 +1226,38 @@ function UnitSwitchInput({ product, value, canonicalUnit, onChange, displayUnit,
   );
 }
 
-const STATUS_FLOW = ["not_started", "sorting", "milling", "packed", "shipped"];
+// Simplified to two real states — the old 5-stage pipeline (sorting →
+// milling → packed) assumed every order gets milled, which isn't true;
+// the per-line Process Steps checklist above tracks the real detail now.
+// This is just open vs. done, with a direct one-click way to push an
+// order through rather than clicking through stages that don't apply.
+const STATUS_FLOW = ["not_started", "shipped"];
 const STATUS_LABEL = {
-  not_started: "Not Started", sorting: "Sorting", milling: "Milling", packed: "Packed", shipped: "Shipped",
+  not_started: "Open", sorting: "Sorting", milling: "Milling", packed: "Packed", shipped: "Shipped",
 };
 const STATUS_COLOR = {
   not_started: C.faint, sorting: C.gold, milling: C.redwood, packed: C.moss, shipped: C.ink,
 };
+
+// The granular steps that actually happen to a given line item — set as
+// defaults on the product itself (what this SKU usually needs), then
+// copied onto each work order line when that product is picked, and
+// editable per-order from there since not every order needs every step
+// (e.g. a sorted-only order skips milling entirely).
+const PROCESS_STEPS = [
+  { id: "sorting", label: "Sorting" },
+  { id: "sort", label: "Sort" },
+  { id: "trim", label: "Trim" },
+  { id: "metal", label: "Metal" },
+  { id: "rip", label: "Rip" },
+  { id: "resaw", label: "Resaw" },
+  { id: "mold", label: "Mold" },
+  { id: "plane", label: "Plane" },
+  { id: "brushBox", label: "Brush Box" },
+  { id: "palletize", label: "Palletize" },
+  { id: "ship", label: "Ship" },
+];
+const defaultSteps = () => PROCESS_STEPS.reduce((acc, s) => ({ ...acc, [s.id]: false }), {});
 
 const fmtDuration = (seconds) => {
   const s = Math.max(0, Math.round(Number(seconds) || 0));
@@ -1459,7 +1484,7 @@ function Dashboard({ workOrders, products, sortLog, units, onOpenWO, goTab, goal
   );
 }
 
-function WorkOrderBoard({ workOrders, customers, onOpen, onNew, onImport }) {
+function WorkOrderBoard({ workOrders, customers, onOpen, onNew, onImport, onPushThrough }) {
   const [filter, setFilter] = useState("active");
   const shown = workOrders.filter((w) => (filter === "active" ? w.status !== "shipped" : true));
 
@@ -1488,20 +1513,31 @@ function WorkOrderBoard({ workOrders, customers, onOpen, onNew, onImport }) {
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {shown.map((w) => (
-            <button
-              key={w.id} onClick={() => onOpen(w.id)}
+            <div
+              key={w.id}
               className="text-left rounded-sm p-4 hover:shadow-md transition-shadow"
               style={{ background: C.panel, border: `1px solid ${C.kraftDark}`, borderLeft: `4px solid ${STATUS_COLOR[w.status]}` }}
             >
-              <div className="flex justify-between items-start">
-                <span style={{ fontFamily: MONO, fontWeight: 700, fontSize: 14 }}>{w.number}</span>
-                <span className="px-2 py-0.5 rounded-sm text-xs font-bold" style={{ background: STATUS_COLOR[w.status], color: "#fff", fontFamily: MONO }}>
-                  {STATUS_LABEL[w.status]}
-                </span>
-              </div>
-              <div className="mt-1 text-sm" style={{ color: C.faint }}>{w.customerName || "No customer"}</div>
-              <div className="mt-2 text-xs" style={{ fontFamily: MONO, color: C.faint }}>{w.lines?.length || 0} line{(w.lines?.length || 0) === 1 ? "" : "s"} · {w.date}</div>
-            </button>
+              <button onClick={() => onOpen(w.id)} className="text-left w-full">
+                <div className="flex justify-between items-start">
+                  <span style={{ fontFamily: MONO, fontWeight: 700, fontSize: 14 }}>{w.number}</span>
+                  <span className="px-2 py-0.5 rounded-sm text-xs font-bold" style={{ background: STATUS_COLOR[w.status], color: "#fff", fontFamily: MONO }}>
+                    {STATUS_LABEL[w.status] || w.status}
+                  </span>
+                </div>
+                <div className="mt-1 text-sm" style={{ color: C.faint }}>{w.customerName || "No customer"}</div>
+                <div className="mt-2 text-xs" style={{ fontFamily: MONO, color: C.faint }}>{w.lines?.length || 0} line{(w.lines?.length || 0) === 1 ? "" : "s"} · {w.date}</div>
+              </button>
+              {w.status !== "shipped" && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); onPushThrough(w.id); }}
+                  className="mt-2 w-full text-center px-2 py-1.5 rounded-sm text-xs font-bold hover:opacity-85"
+                  style={{ background: C.moss, color: "#fff", fontFamily: MONO }}
+                >
+                  Push Through → Shipped
+                </button>
+              )}
+            </div>
           ))}
         </div>
       )}
@@ -1509,10 +1545,12 @@ function WorkOrderBoard({ workOrders, customers, onOpen, onNew, onImport }) {
   );
 }
 
-function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, team, whoWorking, setWhoWorking, onAddTeamMember }) {
+function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, team, whoWorking, setWhoWorking, onAddTeamMember, onUpdateCustomerSpec }) {
   const customer = customers.find((c) => c.id === wo.customerId);
   const update = (patch) => onChange({ ...wo, ...patch });
+  const updateSpec = (patch) => { if (customer) onUpdateCustomerSpec(customer.id, patch); };
   const [bolOpen, setBolOpen] = useState(false);
+  const [woPrintOpen, setWoPrintOpen] = useState(false);
   const [palletModalOpen, setPalletModalOpen] = useState(false);
   const [printLabels, setPrintLabels] = useState(null);
 
@@ -1524,17 +1562,12 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
       qtySF: "",
       displayUnit: "sf",
       done: false, note: "",
+      steps: defaultSteps(),
     }],
   });
 
-  const advanceStatus = () => {
-    const idx = STATUS_FLOW.indexOf(wo.status);
-    if (idx < STATUS_FLOW.length - 1) update({ status: STATUS_FLOW[idx + 1] });
-  };
-  const revertStatus = () => {
-    const idx = STATUS_FLOW.indexOf(wo.status);
-    if (idx > 0) update({ status: STATUS_FLOW[idx - 1] });
-  };
+  const pushThrough = () => update({ status: "shipped" });
+  const reopen = () => update({ status: "not_started" });
 
   const spec = customer?.spec || {};
   const hasSpec = spec.minSize || spec.maxSize || spec.paintTolerance || spec.knotTolerance || spec.notes;
@@ -1566,7 +1599,7 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
             {customer?.contact ? <div style={{ fontSize: 13, color: C.kraftDark }}>{customer.contact}</div> : null}
           </div>
           <span className="px-3 py-1 rounded-sm text-sm font-bold" style={{ background: STATUS_COLOR[wo.status], fontFamily: MONO }}>
-            {STATUS_LABEL[wo.status]}
+            {STATUS_LABEL[wo.status] || wo.status}
           </span>
         </div>
 
@@ -1585,40 +1618,34 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
           </div>
         )}
 
-        {customer?.flags ? (
-          <div className="mt-2 text-sm" style={{ color: "#E8A87C", fontFamily: MONO }}>⚑ {customer.flags}</div>
-        ) : null}
-
         <div className="mt-4 flex gap-2">
-          <Btn kind="ghost" onClick={revertStatus} disabled={wo.status === STATUS_FLOW[0]}>
-            <span style={{ color: "#fff" }}>← Back a step</span>
-          </Btn>
-          <Btn kind="moss" onClick={advanceStatus} disabled={wo.status === STATUS_FLOW[STATUS_FLOW.length - 1]} big>
-            <Check size={16} /> Mark {STATUS_LABEL[STATUS_FLOW[Math.min(STATUS_FLOW.indexOf(wo.status) + 1, STATUS_FLOW.length - 1)]]}
-          </Btn>
+          {wo.status === "shipped" ? (
+            <Btn kind="ghost" onClick={reopen}>
+              <span style={{ color: "#fff" }}>↺ Reopen</span>
+            </Btn>
+          ) : (
+            <Btn kind="moss" onClick={pushThrough} big>
+              <Check size={16} /> Push Through → Shipped
+            </Btn>
+          )}
         </div>
       </div>
 
-      {hasSpec && (
+      {customer && (
         <div className="rounded-sm p-4 mb-4" style={{ background: "#FBF6EC", border: `2px solid ${C.gold}` }}>
           <div className="flex items-center gap-2 mb-2">
             <ClipboardList size={16} style={{ color: C.gold }} />
             <div style={{ fontWeight: 800, fontSize: 15 }}>Customer Spec — check while sorting/milling</div>
           </div>
-          <div className="grid gap-2 sm:grid-cols-2" style={{ fontSize: 14 }}>
-            {spec.minSize && <div><Ruler size={13} className="inline mr-1" style={{ color: C.faint }} /><strong>Min size:</strong> {spec.minSize}</div>}
-            {spec.maxSize && <div><Ruler size={13} className="inline mr-1" style={{ color: C.faint }} /><strong>Max size:</strong> {spec.maxSize}</div>}
-            {spec.paintTolerance && <div><Palette size={13} className="inline mr-1" style={{ color: C.faint }} /><strong>Paint:</strong> {spec.paintTolerance}</div>}
-            {spec.knotTolerance && <div><CircleDot size={13} className="inline mr-1" style={{ color: C.faint }} /><strong>Knots:</strong> {spec.knotTolerance}</div>}
+          <div className="grid gap-2 sm:grid-cols-2">
+            <Field label="Min size"><input style={inputStyle} value={spec.minSize || ""} onChange={(e) => updateSpec({ minSize: e.target.value })} placeholder='e.g. 4" face' /></Field>
+            <Field label="Max size"><input style={inputStyle} value={spec.maxSize || ""} onChange={(e) => updateSpec({ maxSize: e.target.value })} placeholder='e.g. 8" face' /></Field>
           </div>
-          {spec.notes && (
-            <div className="mt-2 pt-2 flex items-start gap-1.5" style={{ borderTop: `1px solid ${C.gold}55`, fontSize: 13 }}>
-              <StickyNote size={13} style={{ color: C.faint, marginTop: 2 }} />
-              <span>{spec.notes}</span>
-            </div>
-          )}
+          <Field label="Paint tolerance"><input style={inputStyle} value={spec.paintTolerance || ""} onChange={(e) => updateSpec({ paintTolerance: e.target.value })} placeholder="e.g. one side painted OK" /></Field>
+          <Field label="Knot / defect tolerance"><input style={inputStyle} value={spec.knotTolerance || ""} onChange={(e) => updateSpec({ knotTolerance: e.target.value })} placeholder="e.g. no knots over 1 inch" /></Field>
+          <Field label="Other notes"><textarea style={{ ...inputStyle, minHeight: 60 }} value={spec.notes || ""} onChange={(e) => updateSpec({ notes: e.target.value })} /></Field>
           <div className="mt-2 text-xs italic" style={{ color: C.faint }}>
-            Anything that doesn't meet this spec goes to Mill Stock or Waste — don't force it into this order.
+            Editing here updates {customer.company}'s spec everywhere — it's shared, not just for this order. Anything that doesn't meet spec goes to Mill Stock or Waste.
           </div>
         </div>
       )}
@@ -1645,7 +1672,11 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
               <div className="flex-1 min-w-0">
                 <select
                   style={{ ...inputStyle, fontWeight: 700, marginBottom: 4 }}
-                  value={line.productId} onChange={(e) => updateLine(line.id, { productId: e.target.value, displayUnit: "sf" })}
+                  value={line.productId}
+                  onChange={(e) => {
+                    const newProduct = products.find((pr) => pr.id === e.target.value);
+                    updateLine(line.id, { productId: e.target.value, displayUnit: "sf", steps: newProduct?.steps ? { ...newProduct.steps } : defaultSteps() });
+                  }}
                 >
                   <option value="">Custom / describe below…</option>
                   {products.map((pr) => <option key={pr.id} value={pr.id}>{pr.sku} — {pr.name}</option>)}
@@ -1663,6 +1694,17 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
                   width={110}
                 />
                 <input className="mt-2" style={inputStyle} placeholder="Note for this line" value={line.note || ""} onChange={(e) => updateLine(line.id, { note: e.target.value })} />
+                <div className="mt-2 grid grid-cols-3 sm:grid-cols-4 gap-1.5">
+                  {PROCESS_STEPS.map((s) => (
+                    <label key={s.id} className="flex items-center gap-1.5 text-xs" style={{ color: C.faint }}>
+                      <input
+                        type="checkbox" checked={!!(line.steps && line.steps[s.id])}
+                        onChange={(e) => updateLine(line.id, { steps: { ...(line.steps || defaultSteps()), [s.id]: e.target.checked } })}
+                      />
+                      {s.label}
+                    </label>
+                  ))}
+                </div>
               </div>
               <button onClick={() => removeLine(line.id)} className="shrink-0 opacity-40 hover:opacity-100 mt-1"><Trash2 size={16} /></button>
             </div>
@@ -1683,11 +1725,13 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
         </Field>
       </div>
 
-      <div className="flex gap-2 mb-8">
+      <div className="flex gap-2 mb-8 flex-wrap">
+        <Btn kind="primary" onClick={() => setWoPrintOpen(true)}><Printer size={14} /> Print Work Order</Btn>
         <Btn kind="primary" onClick={() => setBolOpen(true)}><Printer size={14} /> Print Bill of Lading</Btn>
         <Btn kind="primary" onClick={() => setPalletModalOpen(true)}><Tag size={14} /> Print Pallet Labels</Btn>
         <Btn onClick={onDelete}><Trash2 size={14} /> Delete work order</Btn>
       </div>
+      {woPrintOpen && <WorkOrderPrintView wo={wo} customer={customer} products={products} onClose={() => setWoPrintOpen(false)} />}
       {bolOpen && <BOLModal wo={wo} customer={customer} products={products} onClose={() => setBolOpen(false)} />}
       {palletModalOpen && (
         <PalletLabelModal
@@ -1925,7 +1969,6 @@ function CustomersTab({ customers, onChange }) {
                       <Field label="Zip/Postal"><input style={inputStyle} value={c.zip || ""} onChange={(e) => update(c.id, { zip: e.target.value })} /></Field>
                     </div>
                     <Field label="Country"><input style={inputStyle} value={c.country || ""} onChange={(e) => update(c.id, { country: e.target.value })} /></Field>
-                    <Field label="Flags (shows on work orders)"><input style={{ ...inputStyle, color: C.warn }} value={c.flags} onChange={(e) => update(c.id, { flags: e.target.value })} /></Field>
 
                     <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${C.kraft}` }}>
                       <div className="flex items-center gap-1.5 mb-2" style={{ fontWeight: 700, color: C.gold }}>
@@ -2155,6 +2198,22 @@ function InventoryTab({ products, onChange }) {
                         />
                       </Field>
                       <div className="text-xs mt-1" style={{ color: C.faint }}>Flag this item when on-hand drops to or below this amount — pick whichever unit makes sense (boards, SF, pallets, gallons…).</div>
+                    </div>
+
+                    <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
+                      <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, color: C.gold }}>Process Steps (defaults for this SKU)</div>
+                      <div className="text-xs mb-2" style={{ color: C.faint }}>Check whatever this product normally goes through — new work order lines for this SKU start with these checked, editable per order.</div>
+                      <div className="grid grid-cols-3 sm:grid-cols-4 gap-1.5">
+                        {PROCESS_STEPS.map((s) => (
+                          <label key={s.id} className="flex items-center gap-1.5 text-xs">
+                            <input
+                              type="checkbox" checked={!!(p.steps && p.steps[s.id])}
+                              onChange={(e) => update(p.id, { steps: { ...(p.steps || defaultSteps()), [s.id]: e.target.checked } })}
+                            />
+                            {s.label}
+                          </label>
+                        ))}
+                      </div>
                     </div>
 
                     <Field label="Other notes (bundle sizes, odd conversions, anything else worth remembering)">
@@ -2613,6 +2672,90 @@ const SHIPPER = {
 };
 const LBS_PER_SF = 1.5;
 
+/* ---------------- Printable Work Order (8.5x11) ----------------
+   Shows every line item with its process-steps checked off — this is
+   the physical version of what's tracked on screen, so it stays useful
+   as a paper traveler if someone wants to hand-mark further steps as
+   they happen. */
+
+function WorkOrderPrintView({ wo, customer, products, onClose }) {
+  return (
+    <div className="fixed inset-0 z-50 overflow-auto" style={{ background: "rgba(34,29,25,0.6)" }}>
+      <style>{`
+        @page { size: letter; margin: 0.5in; }
+        @media print {
+          body * { visibility: hidden !important; }
+          #wo-print-root, #wo-print-root * { visibility: visible !important; }
+          #wo-print-root { position: absolute !important; left: 0; top: 0; margin: 0; }
+          .no-print { display: none !important; }
+        }
+      `}</style>
+      <div className="max-w-4xl mx-auto my-8">
+        <div className="flex justify-end gap-2 mb-3 no-print">
+          <Btn kind="dark" onClick={() => window.print()}><Printer size={13} /> Print</Btn>
+          <Btn onClick={onClose}><X size={13} /> Close</Btn>
+        </div>
+
+        <div id="wo-print-root" style={{ background: "#fff", color: "#000", padding: "0.4in", fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif" }}>
+          <div className="flex items-center justify-between" style={{ borderBottom: "3px solid #000", paddingBottom: 10, marginBottom: 16 }}>
+            <div style={{ fontSize: 24, fontWeight: 900 }}>WORK ORDER</div>
+            <div style={{ textAlign: "right", fontSize: 12 }}>
+              <div><strong>WO #:</strong> {wo.number}</div>
+              <div><strong>Date:</strong> {wo.date}</div>
+              {wo.shipDate && <div><strong>Ship date:</strong> {wo.shipDate}</div>}
+            </div>
+          </div>
+
+          <div className="mb-4">
+            <div style={{ fontSize: 11, fontWeight: 700, color: "#555" }}>CUSTOMER</div>
+            <div style={{ fontWeight: 700 }}>{customer?.company || "No customer assigned"}</div>
+            {customer?.address && <div style={{ fontSize: 13 }}>{customer.address}</div>}
+            {(customer?.city || customer?.state) && <div style={{ fontSize: 13 }}>{[customer?.city, customer?.state, customer?.zip].filter(Boolean).join(", ")}</div>}
+          </div>
+
+          {wo.notes && (
+            <div className="mb-4" style={{ fontSize: 13 }}>
+              <strong>Notes:</strong> {wo.notes}
+            </div>
+          )}
+
+          <table className="w-full" style={{ borderCollapse: "collapse", fontSize: 10 }}>
+            <thead>
+              <tr style={{ background: "#eee" }}>
+                <th style={{ border: "1px solid #999", padding: 5, textAlign: "left", fontSize: 11 }}>Item</th>
+                <th style={{ border: "1px solid #999", padding: 5, textAlign: "right", fontSize: 11 }}>SF</th>
+                {PROCESS_STEPS.map((s) => (
+                  <th key={s.id} style={{ border: "1px solid #999", padding: 3, textAlign: "center", writingMode: "vertical-rl", transform: "rotate(180deg)", height: 70 }}>{s.label}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {(wo.lines || []).map((line) => {
+                const p = products.find((pr) => pr.id === line.productId);
+                const label = p ? p.sku : (line.desc || "Item");
+                return (
+                  <tr key={line.id}>
+                    <td style={{ border: "1px solid #999", padding: 5 }}>{label}</td>
+                    <td style={{ border: "1px solid #999", padding: 5, textAlign: "right" }}>{num(line.qtySF)}</td>
+                    {PROCESS_STEPS.map((s) => (
+                      <td key={s.id} style={{ border: "1px solid #999", padding: 3, textAlign: "center", fontSize: 14 }}>
+                        {line.steps && line.steps[s.id] ? "☑" : "☐"}
+                      </td>
+                    ))}
+                  </tr>
+                );
+              })}
+              {(!wo.lines || wo.lines.length === 0) && (
+                <tr><td colSpan={2 + PROCESS_STEPS.length} style={{ border: "1px solid #999", padding: 10, textAlign: "center", color: "#888" }}>No line items</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function BOLModal({ wo, customer, products, onClose }) {
   const totalSF = (wo.lines || []).reduce((sum, l) => sum + (Number(l.qtySF) || 0), 0);
   const estimatedPallets = (wo.lines || []).reduce((sum, l) => {
@@ -2902,8 +3045,8 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, onClose, onCrea
         const costPerBoard = boards > 0 ? (Number(l.cost) || 0) / (boards * copies) : (Number(l.cost) || 0);
         const liveProduct = l.productId ? products.find((p) => p.id === l.productId) : null;
         const item = liveProduct?.sku || l.sizeLabel || "";
-        const isKnownRaw = products.some((p) => p.kind === "board" && p.role === "raw" && p.sku === item);
-        return { key: uid(), item, other: item !== "" && !isKnownRaw, boardCount: l.boardCount ?? "", copies: String(copies), costPerBoard: costPerBoard || "" };
+        const isKnownProduct = products.some((p) => p.sku === item);
+        return { key: uid(), item, other: item !== "" && !isKnownProduct, boardCount: l.boardCount ?? "", copies: String(copies), costPerBoard: costPerBoard || "" };
       })
     : [blankLine()];
 
@@ -2917,14 +3060,14 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, onClose, onCrea
   const [notes, setNotes] = useState(editingPO?.note || "");
   const [lines, setLines] = useState(initialLines);
 
-  const sizeOptions = products.filter((p) => p.kind === "board" && p.role === "raw").map((p) => p.sku);
+  const sizeOptions = products.map((p) => p.sku);
 
   const updateLine = (key, patch) => setLines(lines.map((l) => (l.key === key ? { ...l, ...patch } : l)));
   const removeLine = (key) => setLines(lines.length > 1 ? lines.filter((l) => l.key !== key) : lines);
 
-  // A line is "inventory" if it has a board count — that's what generates
-  // physical units and bumps the matching raw SKU. Lines without a board
-  // count are just recorded as a cost (parts, fees, whatever isn't stock).
+  // A line is "inventory" if it has a quantity — that's what bumps the
+  // matched SKU's on-hand. Lines without a quantity are just recorded as
+  // a cost (parts, fees, whatever isn't stock).
   const lineTotal = (l) => {
     const boards = Number(l.boardCount) || 0;
     const copies = Math.max(1, Math.floor(Number(l.copies) || 1));
@@ -2938,23 +3081,29 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, onClose, onCrea
   const canSubmit = supplierId && date && validLines.length > 0;
   const shipVia = shipViaChoice === "Other" ? shipViaOther : shipViaChoice;
 
-  const rawByExactSku = (text) => products.find((p) => p.kind === "board" && p.role === "raw" && p.sku === text) || null;
+  // Matches ANY product by exact SKU now — wood, paint, or packing — not
+  // just raw wood. Physical pallet "units" only make sense for wood
+  // board stock though, so those are still the only ones that generate
+  // trackable units below; a paint or packing match just bumps on-hand.
+  const matchAnyBySku = (text) => products.find((p) => p.sku === text) || null;
 
   const buildLinesAndUnits = (poId) => {
     const createdUnits = [];
     const boardsBySize = {};
     for (const l of validLines) {
-      const boardCount = Number(l.boardCount) || 0;
-      if (boardCount <= 0) continue; // non-inventory line — cost only, no units
+      const qty = Number(l.boardCount) || 0;
+      if (qty <= 0) continue; // non-inventory line — cost only, no units
       const copies = Math.max(1, Math.floor(Number(l.copies) || 1));
-      const matched = rawByExactSku(l.item);
-      if (matched) boardsBySize[matched.id] = (boardsBySize[matched.id] || 0) + boardCount * copies;
-      for (let i = 0; i < copies; i++) {
-        createdUnits.push({
-          id: uid(), poId, sizeLabel: l.item, productId: matched?.id || null,
-          boardCount, boardsRemaining: boardCount,
-          receivedDate: date,
-        });
+      const matched = matchAnyBySku(l.item);
+      if (matched) boardsBySize[matched.id] = (boardsBySize[matched.id] || 0) + qty * copies;
+      if (matched && matched.kind === "board") {
+        for (let i = 0; i < copies; i++) {
+          createdUnits.push({
+            id: uid(), poId, sizeLabel: l.item, productId: matched?.id || null,
+            boardCount: qty, boardsRemaining: qty,
+            receivedDate: date,
+          });
+        }
       }
     }
     // Sequential "1 of 14" numbering, grouped by size — spans every line
@@ -2975,7 +3124,7 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, onClose, onCrea
     const po = {
       id: poId, supplierId, date, shipVia, paymentStatus, paidVia,
       shippingCost: Number(shippingCost) || 0,
-      lines: validLines.map((l) => ({ sizeLabel: l.item, productId: rawByExactSku(l.item)?.id || null, boardCount: Number(l.boardCount) || 0, copies: Math.max(1, Math.floor(Number(l.copies) || 1)), cost: lineTotal(l) })),
+      lines: validLines.map((l) => ({ sizeLabel: l.item, productId: matchAnyBySku(l.item)?.id || null, boardCount: Number(l.boardCount) || 0, copies: Math.max(1, Math.floor(Number(l.copies) || 1)), cost: lineTotal(l) })),
       totalCost, note: notes,
     };
     if (isEditing) onUpdate({ original: editingPO, po, units: createdUnits, boardsBySize });
@@ -3048,12 +3197,17 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, onClose, onCrea
                       <input style={{ ...inputStyle, marginTop: 6 }} value={l.item} onChange={(e) => updateLine(l.key, { item: e.target.value })} placeholder="Describe what this is" />
                     )}
                   </Field>
-                  <Field label="Boards/unit" w={90}><input type="number" style={inputStyle} value={l.boardCount} onChange={(e) => updateLine(l.key, { boardCount: e.target.value })} /></Field>
-                  <Field label="× units" w={70}><input type="number" min="1" style={inputStyle} value={l.copies} onChange={(e) => updateLine(l.key, { copies: e.target.value })} /></Field>
-                  {isInventory ? (
-                    <>
-                      <Field label="Cost/board ($)" w={100}>
-                        <input type="number" style={inputStyle} value={l.costPerBoard} onChange={(e) => updateLine(l.key, { costPerBoard: e.target.value })} />
+                  {(() => {
+                    const matchedProduct = matchAnyBySku(l.item);
+                    const unitWord = matchedProduct ? (matchedProduct.category === "paint" ? "gal" : matchedProduct.kind === "board" ? "boards" : "units") : "boards";
+                    return (
+                      <>
+                        <Field label={`${unitWord}/unit`} w={90}><input type="number" style={inputStyle} value={l.boardCount} onChange={(e) => updateLine(l.key, { boardCount: e.target.value })} /></Field>
+                        <Field label="× units" w={70}><input type="number" min="1" style={inputStyle} value={l.copies} onChange={(e) => updateLine(l.key, { copies: e.target.value })} /></Field>
+                        {isInventory ? (
+                          <>
+                            <Field label={`Cost/${unitWord} ($)`} w={100}>
+                              <input type="number" style={inputStyle} value={l.costPerBoard} onChange={(e) => updateLine(l.key, { costPerBoard: e.target.value })} />
                       </Field>
                       <Field label="Total ($)" w={100}>
                         <input
@@ -3072,6 +3226,9 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, onClose, onCrea
                       <input type="number" style={inputStyle} value={l.costPerBoard} onChange={(e) => updateLine(l.key, { costPerBoard: e.target.value })} />
                     </Field>
                   )}
+                      </>
+                    );
+                  })()}
                   <button onClick={() => removeLine(l.key)} disabled={lines.length === 1} className="opacity-40 hover:opacity-100 disabled:opacity-15 mb-2"><Trash2 size={16} /></button>
                 </div>
               );
@@ -3906,6 +4063,9 @@ export default function App() {
     setWorkOrders(workOrders.filter((w) => w.id !== id));
     setActiveWOId(null);
   };
+  const pushWOThrough = (id) => {
+    setWorkOrders(workOrders.map((w) => (w.id === id ? { ...w, status: "shipped" } : w)));
+  };
 
   const activeWO = workOrders.find((w) => w.id === activeWOId) || null;
 
@@ -4086,9 +4246,10 @@ export default function App() {
               wo={activeWO} customers={customers} products={products}
               onChange={updateWO} onDelete={() => deleteWO(activeWO.id)} onBack={() => setActiveWOId(null)}
               team={team} whoWorking={whoWorking} setWhoWorking={setWhoWorking} onAddTeamMember={addTeamMember}
+              onUpdateCustomerSpec={(customerId, patch) => setCustomers(customers.map((c) => (c.id === customerId ? { ...c, spec: { ...c.spec, ...patch } } : c)))}
             />
           ) : (
-            <WorkOrderBoard workOrders={workOrders} customers={customers} onOpen={(id) => setActiveWOId(id)} onNew={newWorkOrder} onImport={() => setImportOpen(true)} />
+            <WorkOrderBoard workOrders={workOrders} customers={customers} onOpen={(id) => setActiveWOId(id)} onNew={newWorkOrder} onImport={() => setImportOpen(true)} onPushThrough={pushWOThrough} />
           )
         )}
         {tab === "orders" && ordersSubTab === "purchaseorders" && (
