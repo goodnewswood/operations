@@ -1245,17 +1245,17 @@ const STATUS_COLOR = {
 // editable per-order from there since not every order needs every step
 // (e.g. a sorted-only order skips milling entirely).
 const PROCESS_STEPS = [
-  { id: "sorting", label: "Sorting" },
-  { id: "sort", label: "Sort" },
-  { id: "trim", label: "Trim" },
+  { id: "sorting", label: "Sort" },
   { id: "metal", label: "Metal" },
   { id: "rip", label: "Rip" },
   { id: "resaw", label: "Resaw" },
-  { id: "mold", label: "Mold" },
   { id: "plane", label: "Plane" },
+  { id: "mold", label: "Mold" },
+  { id: "trim", label: "Trim" },
   { id: "brush", label: "Brush" },
-  { id: "box", label: "Box" },
-  { id: "palletize", label: "Palletize" },
+  { id: "paint", label: "Paint" },
+  { id: "distress", label: "Distress" },
+  { id: "pack", label: "Pack" },
   { id: "ship", label: "Ship" },
 ];
 const defaultSteps = () => PROCESS_STEPS.reduce((acc, s) => ({ ...acc, [s.id]: false }), {});
@@ -2713,6 +2713,7 @@ function WorkOrderPrintView({ wo, customer, products, onClose }) {
               <div><strong>WO #:</strong> {wo.number}</div>
               <div><strong>Date:</strong> {wo.date}</div>
               {wo.shipDate && <div><strong>Ship date:</strong> {wo.shipDate}</div>}
+              {wo.shipVia && <div><strong>Ship via:</strong> {wo.shipVia}</div>}
             </div>
           </div>
 
