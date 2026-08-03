@@ -5,7 +5,7 @@ import {
   Boxes, MapPin, AlertTriangle, Check, Clock, CircleDot, User,
   Ruler, Palette, StickyNote, ClipboardList, Truck, RefreshCw,
   Play, Pause, Square, Timer, CalendarDays, Tag, QrCode, Printer,
-  FileText, X, Search, Pencil, Star, Settings, Menu
+  FileText, X, Search, Pencil, Star, Settings, Menu, ExternalLink
 } from "lucide-react";
 
 /* ============================================================
@@ -43,6 +43,11 @@ const C = {
 };
 
 const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
+
+// Sales-side sister app — same Supabase data, adds quotes and converts
+// them to/from work orders here. See KEY.quotes-less note: Ops itself
+// only ever reads wo.quoteId (set by GNWS Office), never writes it.
+const OFFICE_URL = "https://gnws-office.vercel.app";
 
 /* ---------------- Shared storage keys ---------------- */
 const KEY = {
@@ -1598,6 +1603,15 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
               </select>
             )}
             {customer?.contact ? <div style={{ fontSize: 13, color: C.kraftDark }}>{customer.contact}</div> : null}
+            {wo.quoteId ? (
+              <a
+                href={`${OFFICE_URL}/?quote=${wo.quoteId}`} target="_blank" rel="noopener noreferrer"
+                className="mt-1 inline-flex items-center gap-1 text-xs hover:opacity-70"
+                style={{ fontFamily: MONO, color: C.kraftDark }}
+              >
+                <ExternalLink size={11} /> View Quote
+              </a>
+            ) : null}
           </div>
           <span className="px-3 py-1 rounded-sm text-sm font-bold" style={{ background: STATUS_COLOR[wo.status], fontFamily: MONO }}>
             {STATUS_LABEL[wo.status] || wo.status}
@@ -4210,6 +4224,15 @@ export default function App() {
                 </div>
                 <div className="text-xs mb-1.5" style={{ color: C.kraftDark, fontFamily: MONO, letterSpacing: "0.08em" }}>WHO'S WORKING</div>
                 <WhoSelect team={team} current={whoWorking} onChange={setWhoWorking} onAddMember={addTeamMember} />
+                <div className="mt-3 pt-3" style={{ borderTop: "1px solid #4a423a" }}>
+                  <a
+                    href={OFFICE_URL} target="_blank" rel="noopener noreferrer"
+                    className="flex items-center gap-1.5 text-sm font-bold hover:opacity-70"
+                    style={{ fontFamily: MONO, color: "#fff" }}
+                  >
+                    <ExternalLink size={13} /> GNWS Office
+                  </a>
+                </div>
                 </div>
               </>
             )}
