@@ -1253,7 +1253,8 @@ const PROCESS_STEPS = [
   { id: "resaw", label: "Resaw" },
   { id: "mold", label: "Mold" },
   { id: "plane", label: "Plane" },
-  { id: "brushBox", label: "Brush Box" },
+  { id: "brush", label: "Brush" },
+  { id: "box", label: "Box" },
   { id: "palletize", label: "Palletize" },
   { id: "ship", label: "Ship" },
 ];
