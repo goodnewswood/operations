@@ -2655,10 +2655,38 @@ const SHIPPER = {
 const LBS_PER_SF = 1.5;
 
 /* ---------------- Printable Work Order (8.5x11) ----------------
-   Shows every line item with its process-steps checked off — this is
-   the physical version of what's tracked on screen, so it stays useful
-   as a paper traveler if someone wants to hand-mark further steps as
-   they happen. */
+   A paper traveler for the crew: each line shows only the process
+   steps actually checked for that item (as blank boxes to mark off by
+   hand — the on-screen checked state means "this step applies," not
+   "already done"), plus the item's on-hand conversions (boards, boxes,
+   pallets, SF… whatever units that SKU's conversion graph reaches) and
+   any notes, so nobody has to flip back to the app on the floor. */
+
+const PRINT_UNIT_ORDER = ["sf", "board", "plank", "box", "pallet", "gal", "qt"];
+const fmtConv = (n) => (Math.round((Number(n) || 0) * 100) / 100).toLocaleString("en-US", { maximumFractionDigits: 2 });
+
+function lineConversions(product, qtySF) {
+  if (!product) return [{ unit: "sf", qty: Number(qtySF) || 0 }];
+  const units = product.category === "paint"
+    ? ["sf", "gal", "qt"]
+    : product.category === "packing"
+    ? [product.unitLabel || "ea"]
+    : (() => {
+        const graph = buildUnitGraph(product);
+        const visited = new Set(["sf"]);
+        const queue = ["sf"];
+        while (queue.length) {
+          const node = queue.shift();
+          const neighbors = graph[node] || {};
+          for (const next in neighbors) {
+            if (!visited.has(next)) { visited.add(next); queue.push(next); }
+          }
+        }
+        return Array.from(visited);
+      })();
+  const ordered = [...PRINT_UNIT_ORDER.filter((u) => units.includes(u)), ...units.filter((u) => !PRINT_UNIT_ORDER.includes(u))];
+  return ordered.map((u) => ({ unit: u, qty: convertQty(product, qtySF, "sf", u) }));
+}
 
 function WorkOrderPrintView({ wo, customer, products, onClose }) {
   return (
@@ -2701,37 +2729,46 @@ function WorkOrderPrintView({ wo, customer, products, onClose }) {
             </div>
           )}
 
-          <table className="w-full" style={{ borderCollapse: "collapse", fontSize: 10 }}>
-            <thead>
-              <tr style={{ background: "#eee" }}>
-                <th style={{ border: "1px solid #999", padding: 5, textAlign: "left", fontSize: 11 }}>Item</th>
-                <th style={{ border: "1px solid #999", padding: 5, textAlign: "right", fontSize: 11 }}>SF</th>
-                {PROCESS_STEPS.map((s) => (
-                  <th key={s.id} style={{ border: "1px solid #999", padding: 3, textAlign: "center", writingMode: "vertical-rl", transform: "rotate(180deg)", height: 70 }}>{s.label}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {(wo.lines || []).map((line) => {
-                const p = products.find((pr) => pr.id === line.productId);
-                const label = p ? p.sku : (line.desc || "Item");
-                return (
-                  <tr key={line.id}>
-                    <td style={{ border: "1px solid #999", padding: 5 }}>{label}</td>
-                    <td style={{ border: "1px solid #999", padding: 5, textAlign: "right" }}>{num(line.qtySF)}</td>
-                    {PROCESS_STEPS.map((s) => (
-                      <td key={s.id} style={{ border: "1px solid #999", padding: 3, textAlign: "center", fontSize: 14 }}>
-                        {line.steps && line.steps[s.id] ? "☑" : "☐"}
-                      </td>
+          {(!wo.lines || wo.lines.length === 0) && (
+            <div style={{ border: "1px solid #999", padding: 10, textAlign: "center", color: "#888" }}>No line items</div>
+          )}
+
+          {(wo.lines || []).map((line) => {
+            const p = products.find((pr) => pr.id === line.productId);
+            const checkedSteps = PROCESS_STEPS.filter((s) => line.steps && line.steps[s.id]);
+            const conversions = lineConversions(p, line.qtySF);
+            return (
+              <div key={line.id} style={{ border: "1px solid #999", padding: 8, marginBottom: 8, pageBreakInside: "avoid" }}>
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    {p && <div style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 13 }}>{p.sku}</div>}
+                    <div style={{ fontSize: 13, fontWeight: p ? 400 : 700 }}>{p ? p.name : (line.desc || "Item")}</div>
+                  </div>
+                  <div style={{ textAlign: "right", fontSize: 11 }}>
+                    {conversions.map((c) => `${fmtConv(c.qty)} ${unitLabel(c.unit)}`).join(" · ")}
+                  </div>
+                </div>
+
+                {(line.note || p?.otherNotes) && (
+                  <div className="mt-1" style={{ fontSize: 11, color: "#333" }}>
+                    {line.note && <div><strong>Order note:</strong> {line.note}</div>}
+                    {p?.otherNotes && <div><strong>Item note:</strong> {p.otherNotes}</div>}
+                  </div>
+                )}
+
+                {checkedSteps.length > 0 && (
+                  <div className="flex flex-wrap mt-2" style={{ gap: 12 }}>
+                    {checkedSteps.map((s) => (
+                      <div key={s.id} className="flex items-center" style={{ gap: 5 }}>
+                        <span style={{ width: 13, height: 13, border: "1.5px solid #000", display: "inline-block" }} />
+                        <span style={{ fontSize: 11 }}>{s.label}</span>
+                      </div>
                     ))}
-                  </tr>
-                );
-              })}
-              {(!wo.lines || wo.lines.length === 0) && (
-                <tr><td colSpan={2 + PROCESS_STEPS.length} style={{ border: "1px solid #999", padding: 10, textAlign: "center", color: "#888" }}>No line items</td></tr>
-              )}
-            </tbody>
-          </table>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>
