@@ -1825,32 +1825,13 @@ function ImportInvoiceModal({ customers, onClose, onImported }) {
         r.readAsDataURL(file);
       });
 
-      const prompt = `Extract structured data from this wholesale reclaimed-wood invoice or quote PDF. Respond with ONLY valid JSON, no markdown fences, no preamble, exactly this shape:
-{
-  "customerName": string,
-  "contactName": string,
-  "shipDate": string,
-  "notes": string,
-  "lines": [ { "description": string, "quantity": number, "unit": string } ]
-}
-"unit" should be "sf", "board", "plank", or "ea" — guess "sf" if it's unclear, since most line items here are priced per square foot. Use "" or [] for anything not present on the document. Do not include any dollar amounts anywhere in your output.`;
-
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
+      const response = await fetch("/api/parse-invoice", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-6",
-          max_tokens: 1200,
-          messages: [{
-            role: "user",
-            content: [
-              { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
-              { type: "text", text: prompt },
-            ],
-          }],
-        }),
+        body: JSON.stringify({ base64 }),
       });
       const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Server couldn't read the invoice");
       const textBlock = (data.content || []).find((b) => b.type === "text");
       if (!textBlock) throw new Error("No readable response came back");
       const cleaned = textBlock.text.replace(/```json|```/g, "").trim();
