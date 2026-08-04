@@ -1251,15 +1251,16 @@ const STATUS_COLOR = {
 // (e.g. a sorted-only order skips milling entirely).
 const PROCESS_STEPS = [
   { id: "sorting", label: "Sort" },
+  { id: "chop", label: "Chop" },
   { id: "metal", label: "Metal" },
   { id: "rip", label: "Rip" },
   { id: "resaw", label: "Resaw" },
   { id: "plane", label: "Plane" },
-  { id: "mold", label: "Mold" },
-  { id: "trim", label: "Trim" },
+  { id: "mold", label: "Mould" },
   { id: "brush", label: "Brush" },
   { id: "paint", label: "Paint" },
   { id: "distress", label: "Distress" },
+  { id: "trim", label: "Trim" },
   { id: "pack", label: "Pack" },
   { id: "ship", label: "Ship" },
 ];
