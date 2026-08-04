@@ -1064,6 +1064,21 @@ const SEED_VENDORS = [
 /* ---------------- Helpers ---------------- */
 
 const uid = () => Math.random().toString(36).slice(2, 9);
+// WO/PO/Quote numbers: "{prefix}-{year}-{dayOfYear}{seqInDay}" — e.g. the
+// first work order on day 206 of 2026 is "WO-2026-2061", the second is
+// "WO-2026-2062". Editable afterward — this only picks a starting value.
+function nextNumber(records, prefix) {
+  const now = new Date();
+  const year = now.getFullYear();
+  const dayOfYear = Math.floor((now - new Date(year, 0, 1)) / 86400000) + 1;
+  const dayStr = String(dayOfYear).padStart(3, "0");
+  const re = new RegExp(`^${prefix}-${year}-${dayStr}(\\d+)$`);
+  const maxSeq = records.reduce((max, r) => {
+    const m = re.exec(r.number || "");
+    return m ? Math.max(max, Number(m[1])) : max;
+  }, 0);
+  return `${prefix}-${year}-${dayStr}${maxSeq + 1}`;
+}
 // Resolves which raw product a sort-log entry refers to. Prefers the
 // stable rawProductId (immune to renaming the SKU later); falls back to
 // the legacy rawSku text match only for entries logged before this field
@@ -1588,7 +1603,10 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
       <div className="rounded-sm p-5 mb-4" style={{ background: C.ink, color: "#fff" }}>
         <div className="flex justify-between items-start flex-wrap gap-2">
           <div>
-            <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 800 }}>{wo.number}</div>
+            <input
+              style={{ ...inputStyle, background: "#2a241d", color: "#fff", borderColor: "#4a423a", fontFamily: MONO, fontSize: 22, fontWeight: 800, padding: "2px 6px", width: 220 }}
+              value={wo.number} onChange={(e) => update({ number: e.target.value })}
+            />
             {customer ? (
               <button onClick={() => update({ customerId: "" })} className="mt-1 text-left" title="Click to change customer">
                 <div style={{ fontSize: 16, fontWeight: 700 }}>{customer.company}</div>
@@ -1645,6 +1663,17 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
             </Btn>
           )}
         </div>
+      </div>
+
+      <div className="rounded-sm p-4 mb-4" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
+        <div className="flex flex-wrap gap-3">
+          <Field label="Ready by" w={160}><input type="date" style={inputStyle} value={wo.readyByDate || ""} onChange={(e) => update({ readyByDate: e.target.value })} /></Field>
+          <Field label="Ship date" w={160}><input type="date" style={inputStyle} value={wo.shipDate || ""} onChange={(e) => update({ shipDate: e.target.value })} /></Field>
+          <Field label="Ship via" w={160}><input style={inputStyle} value={wo.shipVia || ""} onChange={(e) => update({ shipVia: e.target.value })} placeholder="Dry van, pickup…" /></Field>
+        </div>
+        <Field label="General notes">
+          <textarea style={{ ...inputStyle, minHeight: 70, marginTop: 8 }} value={wo.notes || ""} onChange={(e) => update({ notes: e.target.value })} placeholder="Anything the crew needs to know…" />
+        </Field>
       </div>
 
       {customer && (
@@ -1729,16 +1758,6 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
         <div className="p-3">
           <Btn onClick={addLine}><Plus size={14} /> Add line</Btn>
         </div>
-      </div>
-
-      <div className="rounded-sm p-4 mb-4" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
-        <div className="flex flex-wrap gap-3">
-          <Field label="Ship date" w={160}><input type="date" style={inputStyle} value={wo.shipDate || ""} onChange={(e) => update({ shipDate: e.target.value })} /></Field>
-          <Field label="Ship via" w={160}><input style={inputStyle} value={wo.shipVia || ""} onChange={(e) => update({ shipVia: e.target.value })} placeholder="Dry van, pickup…" /></Field>
-        </div>
-        <Field label="General notes">
-          <textarea style={{ ...inputStyle, minHeight: 70, marginTop: 8 }} value={wo.notes || ""} onChange={(e) => update({ notes: e.target.value })} placeholder="Anything the crew needs to know…" />
-        </Field>
       </div>
 
       <div className="flex gap-2 mb-8 flex-wrap">
@@ -2727,6 +2746,7 @@ function WorkOrderPrintView({ wo, customer, products, onClose }) {
             <div style={{ textAlign: "right", fontSize: 12 }}>
               <div><strong>WO #:</strong> {wo.number}</div>
               <div><strong>Date:</strong> {wo.date}</div>
+              {wo.readyByDate && <div><strong>Ready by:</strong> {wo.readyByDate}</div>}
               {wo.shipDate && <div><strong>Ship date:</strong> {wo.shipDate}</div>}
               {wo.shipVia && <div><strong>Ship via:</strong> {wo.shipVia}</div>}
             </div>
@@ -3085,6 +3105,7 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, onClose, onCrea
       })
     : [blankLine()];
 
+  const [number, setNumber] = useState(editingPO?.number || "");
   const [supplierId, setSupplierId] = useState(editingPO?.supplierId || "");
   const [date, setDate] = useState(editingPO?.date || today());
   const [shipViaChoice, setShipViaChoice] = useState(initialShipChoice);
@@ -3161,6 +3182,7 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, onClose, onCrea
       shippingCost: Number(shippingCost) || 0,
       lines: validLines.map((l) => ({ sizeLabel: l.item, productId: matchAnyBySku(l.item)?.id || null, boardCount: Number(l.boardCount) || 0, copies: Math.max(1, Math.floor(Number(l.copies) || 1)), cost: lineTotal(l) })),
       totalCost, note: notes,
+      ...(isEditing ? { number } : {}),
     };
     if (isEditing) onUpdate({ original: editingPO, po, units: createdUnits, boardsBySize });
     else onCreate({ po, units: createdUnits, boardsBySize });
@@ -3174,7 +3196,10 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, onClose, onCrea
           <button onClick={onClose} className="opacity-60 hover:opacity-100"><X size={16} /></button>
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
+        {isEditing && (
+          <Field label="PO #"><input style={{ ...inputStyle, fontFamily: MONO }} value={number} onChange={(e) => setNumber(e.target.value)} /></Field>
+        )}
+        <div className="grid grid-cols-2 gap-3 mt-2">
           <Field label="Vendor" required>
             <select style={inputStyle} value={supplierId} onChange={(e) => setSupplierId(e.target.value)}>
               <option value="">— select vendor —</option>
@@ -3313,12 +3338,7 @@ function ReceivingTab({ suppliers, purchaseOrders, onPOChange, units, onUnitsCha
   // raw-size product's on-hand board count — that last part used to be a
   // disconnected manual step nobody was actually doing.
   const handleCreatePO = ({ po, units: createdUnits, boardsBySize }) => {
-    const year = new Date().getFullYear();
-    const maxSeq = purchaseOrders.reduce((max, p) => {
-      const m = /^PO-(\d{4})-(\d+)$/.exec(p.number || "");
-      return m && Number(m[1]) === year ? Math.max(max, Number(m[2])) : max;
-    }, 0);
-    const numberedPO = { ...po, number: `PO-${year}-${String(maxSeq + 1).padStart(3, "0")}` };
+    const numberedPO = { ...po, number: nextNumber(purchaseOrders, "PO") };
     runGrouped(() => {
       onPOChange([numberedPO, ...purchaseOrders]);
       onUnitsChange([...createdUnits, ...units]);
@@ -4074,15 +4094,10 @@ export default function App() {
   };
 
   const newWorkOrder = () => {
-    const year = new Date().getFullYear();
-    const maxSeq = workOrders.reduce((max, w) => {
-      const m = /^WO-(\d{4})-(\d+)$/.exec(w.number || "");
-      return m && Number(m[1]) === year ? Math.max(max, Number(m[2])) : max;
-    }, 0);
     const w = {
-      id: uid(), number: `WO-${year}-${String(maxSeq + 1).padStart(3, "0")}`,
+      id: uid(), number: nextNumber(workOrders, "WO"),
       customerId: "", customerName: "", status: "not_started", date: today(),
-      lines: [], shipDate: "", shipVia: "", notes: "",
+      lines: [], readyByDate: "", shipDate: "", shipVia: "", notes: "",
     };
     setWorkOrders([w, ...workOrders]);
     setActiveWOId(w.id);
@@ -4105,11 +4120,6 @@ export default function App() {
   const activeWO = workOrders.find((w) => w.id === activeWOId) || null;
 
   const handleImported = ({ parsed, matchedCustomerId, fileName }) => {
-    const year = new Date().getFullYear();
-    const maxSeq = workOrders.reduce((max, w) => {
-      const m = /^WO-(\d{4})-(\d+)$/.exec(w.number || "");
-      return m && Number(m[1]) === year ? Math.max(max, Number(m[2])) : max;
-    }, 0);
     const cust = customers.find((c) => c.id === matchedCustomerId);
     const lines = (parsed.lines || []).map((l) => ({
       id: uid(), productId: "", desc: l.description || "",
@@ -4121,10 +4131,10 @@ export default function App() {
       ? `⚠ No matching customer found for "${parsed.customerName}" — assign one above.`
       : "";
     const w = {
-      id: uid(), number: `WO-${year}-${String(maxSeq + 1).padStart(3, "0")}`,
+      id: uid(), number: nextNumber(workOrders, "WO"),
       customerId: matchedCustomerId || "", customerName: cust?.company || parsed.customerName || "",
       status: "not_started", date: today(),
-      lines, shipDate: parsed.shipDate || "", shipVia: "",
+      lines, readyByDate: "", shipDate: parsed.shipDate || "", shipVia: "",
       notes: [parsed.notes, `Imported from invoice: ${fileName}`, unmatchedFlag].filter(Boolean).join("\n"),
     };
     setWorkOrders([w, ...workOrders]);
