@@ -3641,14 +3641,11 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
             }}
           >
             <option value="">— Not tied to a specific unit —</option>
-            {availableUnits.map((u) => {
-              const po = purchaseOrders.find((p) => p.id === u.poId);
-              return (
-                <option key={u.id} value={u.id}>
-                  {po?.number ? `${po.number} · ` : ""}{u.sizeLabel}{u.seqTotal ? ` · ${u.seq} of ${u.seqTotal}` : ""} · {u.boardsRemaining} boards left
-                </option>
-              );
-            })}
+            {availableUnits.map((u) => (
+              <option key={u.id} value={u.id}>
+                {u.sizeLabel} · {u.id} · {u.boardsRemaining} boards left
+              </option>
+            ))}
           </select>
         </Field>
         {selectedUnit && (
