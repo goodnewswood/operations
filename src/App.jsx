@@ -3532,6 +3532,7 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
   const [toP, setToP] = useState("");
   const [toMill, setToMill] = useState("");
   const [toWaste, setToWaste] = useState("");
+  const [description, setDescription] = useState("");
   const sw = useStopwatch();
   const [manualEdit, setManualEdit] = useState(false);
   const [manualHMS, setManualHMS] = useState({ h: "0", m: "0", s: "0" });
@@ -3631,11 +3632,12 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
         workOrderId: workOrderId || "", workOrderNumber: wo?.number || "",
         unitId: unitId || "", rawProductId,
         rawBoards: rawIn, toN: Number(toN) || 0, toP: Number(toP) || 0, toMill: Number(toMill) || 0, toWaste: Number(toWaste) || 0,
+        description,
         seconds: sw.elapsed,
         startedAt: new Date().toISOString(),
       });
     });
-    setWorkOrderId(""); setUnitId(""); setRawProductId(""); setRawBoards(""); setToN(""); setToP(""); setToMill(""); setToWaste("");
+    setWorkOrderId(""); setUnitId(""); setRawProductId(""); setRawBoards(""); setToN(""); setToP(""); setToMill(""); setToWaste(""); setDescription("");
     sw.reset();
   };
 
@@ -3719,6 +3721,10 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
           </div>
         )}
 
+        <Field label="Description">
+          <textarea style={{ ...inputStyle, marginTop: 8, minHeight: 60 }} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Anything worth noting about this batch…" />
+        </Field>
+
         <div className="mt-4 pt-4" style={{ borderTop: `1px solid ${C.kraft}` }}>
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-1.5" style={{ fontWeight: 700, fontSize: 13 }}>
@@ -3801,6 +3807,7 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
                         {num(s.rawBoards)} bd → {num(s.toN)} {entryN?.sku || "?"} · {num(s.toP)} {entryP?.sku || "?"} · {num(s.toMill)} mill · {num(s.toWaste)} waste
                         {s.seconds ? ` · ${fmtDuration(s.seconds)}` : ""}
                       </div>
+                      {s.description && <div style={{ fontSize: 12, marginTop: 4 }}>{s.description}</div>}
                     </>
                   )}
                 </div>
@@ -3832,6 +3839,7 @@ function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, o
   const [workOrderId, setWorkOrderId] = useState("");
   const [creatingNew, setCreatingNew] = useState(false);
   const [newSku, setNewSku] = useState("");
+  const [description, setDescription] = useState("");
   const sw = useStopwatch();
   const [manualEdit, setManualEdit] = useState(false);
   const [manualHMS, setManualHMS] = useState({ h: "0", m: "0", s: "0" });
@@ -3884,11 +3892,12 @@ function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, o
         inboundProductId, inboundBoards: inBoards,
         outboundProductId, outboundBoards: outBoards,
         wasteBoards: wasteN,
+        description,
         seconds: sw.elapsed,
         startedAt: new Date().toISOString(),
       });
     });
-    setInboundProductId(""); setInboundBoards(""); setOutboundProductId(""); setOutboundBoards(""); setWasteBoards(""); setWorkOrderId("");
+    setInboundProductId(""); setInboundBoards(""); setOutboundProductId(""); setOutboundBoards(""); setWasteBoards(""); setWorkOrderId(""); setDescription("");
     sw.reset();
   };
 
@@ -3946,6 +3955,10 @@ function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, o
             <option value="">— Not tied to a specific WO —</option>
             {openWorkOrders.map((w) => <option key={w.id} value={w.id}>{w.number} · {w.customerName || "No customer"}</option>)}
           </select>
+        </Field>
+
+        <Field label="Description">
+          <textarea style={{ ...inputStyle, marginTop: 8, minHeight: 60 }} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Anything worth noting about this batch…" />
         </Field>
 
         <div className="mt-4 pt-4" style={{ borderTop: `1px solid ${C.kraft}` }}>
@@ -4008,6 +4021,7 @@ function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, o
                     {num(s.inboundBoards)} bd in → {num(s.outboundBoards)} out · {num(s.wasteBoards)} waste
                     {s.seconds ? ` · ${fmtDuration(s.seconds)}` : ""}
                   </div>
+                  {s.description && <div style={{ fontSize: 12, marginTop: 4 }}>{s.description}</div>}
                 </div>
               );
             })}
