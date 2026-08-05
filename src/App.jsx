@@ -3483,6 +3483,43 @@ function ReceivingTab({ suppliers, purchaseOrders, onPOChange, units, onUnitsCha
   );
 }
 
+// Landing screen for the Work tab — pick which process step you're doing,
+// then land on that step's log page. Sort keeps its existing dedicated
+// form (SortingTab, unchanged below); every other step shares one
+// generalized work-in-process log form (ProcessLogTab, further below).
+function WorkTab(props) {
+  const { jumpToUnitId } = props;
+  const [activeStep, setActiveStep] = useState(null);
+  useEffect(() => { if (jumpToUnitId) setActiveStep("sorting"); }, [jumpToUnitId]);
+
+  if (!activeStep) {
+    return (
+      <div className="max-w-2xl">
+        <div style={{ fontWeight: 800, fontSize: 16, marginBottom: 12 }}>What are you working on?</div>
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+          {PROCESS_STEPS.map((s) => (
+            <button
+              key={s.id} onClick={() => setActiveStep(s.id)}
+              className="rounded-sm py-4 text-center hover:opacity-85"
+              style={{ background: C.panel, border: `1px solid ${C.kraftDark}`, fontFamily: MONO, fontWeight: 700, fontSize: 14 }}
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  const back = () => setActiveStep(null);
+  return (
+    <div>
+      <div className="mb-3"><Btn onClick={back}><ChevronLeft size={14} /> All work types</Btn></div>
+      {activeStep === "sorting" ? <SortingTab {...props} /> : <ProcessLogTab {...props} step={activeStep} />}
+    </div>
+  );
+}
+
 function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSort, onDeleteSort, team, whoWorking, setWhoWorking, onAddTeamMember, workOrders, units, onUnitsChange, jumpToUnitId, runGrouped, purchaseOrders }) {
   const millStock = products.find((p) => p.role === "millStock");
   const rawProducts = products.filter((p) => p.kind === "board" && p.role === "raw");
@@ -3775,6 +3812,208 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
       {scannerOpen && (
         <QRScannerModal onClose={() => setScannerOpen(false)} onDecoded={handleScanned} />
       )}
+    </div>
+  );
+}
+
+// Generalized log page shared by every process step except Sort (which
+// keeps its own dedicated N/P-split form above). Each step consumes some
+// inbound board stock and produces a work-in-process (WIP) SKU — pick an
+// existing one or create a new one inline. Pack/Ship allow picking any
+// wood product as outbound (not just WIP) since they may target a
+// finished, sellable SKU rather than another intermediate stage.
+function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, onDeleteSort, team, whoWorking, setWhoWorking, onAddTeamMember, workOrders, runGrouped }) {
+  const stepDef = PROCESS_STEPS.find((s) => s.id === step);
+  const [inboundProductId, setInboundProductId] = useState("");
+  const [inboundBoards, setInboundBoards] = useState("");
+  const [outboundProductId, setOutboundProductId] = useState("");
+  const [outboundBoards, setOutboundBoards] = useState("");
+  const [wasteBoards, setWasteBoards] = useState("");
+  const [workOrderId, setWorkOrderId] = useState("");
+  const [creatingNew, setCreatingNew] = useState(false);
+  const [newSku, setNewSku] = useState("");
+  const sw = useStopwatch();
+  const [manualEdit, setManualEdit] = useState(false);
+  const [manualHMS, setManualHMS] = useState({ h: "0", m: "0", s: "0" });
+
+  const inboundOptions = products.filter((p) => p.kind === "board" && ["raw", "sortedN", "sortedP", "millStock", "wip"].includes(p.role));
+  const outboundOptions = (step === "pack" || step === "ship")
+    ? products.filter((p) => p.category === "wood" || p.role === "wip")
+    : products.filter((p) => p.role === "wip");
+
+  const inboundProduct = products.find((p) => p.id === inboundProductId);
+  const outboundProduct = products.find((p) => p.id === outboundProductId);
+
+  const applyManualTime = () => {
+    const h = Number(manualHMS.h) || 0, m = Number(manualHMS.m) || 0, s = Number(manualHMS.s) || 0;
+    sw.setManual(h * 3600 + m * 60 + s);
+    setManualEdit(false);
+  };
+
+  const createWipSku = () => {
+    const sku = newSku.trim();
+    if (!sku) return;
+    const p = { id: uid(), sku, name: sku, kind: "board", category: "wood", role: "wip", onHand: 0 };
+    onProductsChange([...products, p]);
+    setOutboundProductId(p.id);
+    setNewSku("");
+    setCreatingNew(false);
+  };
+
+  const inBoards = Number(inboundBoards) || 0;
+  const outBoards = Number(outboundBoards) || 0;
+  const wasteN = Number(wasteBoards) || 0;
+  const canSubmit = inBoards > 0 && whoWorking && inboundProductId && outboundProductId;
+  const openWorkOrders = workOrders.filter((w) => w.status !== "shipped");
+  const stepEntries = sortLog.filter((s) => s.step === step);
+
+  const submit = () => {
+    if (!canSubmit) return;
+    const wo = workOrders.find((w) => w.id === workOrderId);
+    runGrouped(() => {
+      onProductsChange(products.map((p) => {
+        if (p.id === inboundProductId) return { ...p, onHand: (Number(p.onHand) || 0) - inBoards };
+        if (p.id === outboundProductId) return { ...p, onHand: (Number(p.onHand) || 0) + outBoards };
+        return p;
+      }));
+      onLogSort({
+        id: uid(), date: today(), by: whoWorking,
+        batchLabel: `${stepDef?.label || step} — ${inboundProduct?.sku || "?"} → ${outboundProduct?.sku || "?"}`,
+        step,
+        workOrderId: workOrderId || "", workOrderNumber: wo?.number || "",
+        inboundProductId, inboundBoards: inBoards,
+        outboundProductId, outboundBoards: outBoards,
+        wasteBoards: wasteN,
+        seconds: sw.elapsed,
+        startedAt: new Date().toISOString(),
+      });
+    });
+    setInboundProductId(""); setInboundBoards(""); setOutboundProductId(""); setOutboundBoards(""); setWasteBoards(""); setWorkOrderId("");
+    sw.reset();
+  };
+
+  return (
+    <div className="max-w-2xl">
+      <div className="rounded-sm p-4 mb-4" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
+        <div className="flex items-center justify-between mb-3">
+          <div style={{ fontWeight: 800, fontSize: 16 }}>Log — {stepDef?.label || step}</div>
+        </div>
+
+        <Field label="Who's working on this" required>
+          <WhoSelect team={team} current={whoWorking} onChange={setWhoWorking} onAddMember={onAddTeamMember} />
+        </Field>
+
+        <div className="mt-3">
+          <Field label="Inbound stock" required>
+            <select style={{ ...inputStyle, marginTop: 8 }} value={inboundProductId} onChange={(e) => setInboundProductId(e.target.value)}>
+              <option value="">— Select inbound stock —</option>
+              {inboundOptions.map((p) => <option key={p.id} value={p.id}>{p.sku} (on hand: {num(p.onHand)} bd)</option>)}
+            </select>
+          </Field>
+          <Field label="Inbound boards" required><input type="number" style={{ ...inputStyle, marginTop: 8 }} value={inboundBoards} onChange={(e) => setInboundBoards(e.target.value)} /></Field>
+        </div>
+
+        <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${C.kraft}` }}>
+          <Field label="Outbound stock (SKU produced)" required>
+            {!creatingNew ? (
+              <select
+                style={{ ...inputStyle, marginTop: 8 }} value={outboundProductId}
+                onChange={(e) => {
+                  if (e.target.value === "__new__") { setCreatingNew(true); return; }
+                  setOutboundProductId(e.target.value);
+                }}
+              >
+                <option value="">— Select outbound SKU —</option>
+                {outboundOptions.map((p) => <option key={p.id} value={p.id}>{p.sku}{p.name && p.name !== p.sku ? ` — ${p.name}` : ""} (on hand: {num(p.onHand)} bd)</option>)}
+                <option value="__new__">+ Create new SKU…</option>
+              </select>
+            ) : (
+              <div className="mt-2 flex items-center gap-2">
+                <input style={inputStyle} placeholder="New SKU (e.g. 5, 548)" value={newSku} onChange={(e) => setNewSku(e.target.value)} />
+                <Btn kind="moss" onClick={createWipSku}><Check size={13} /> Create</Btn>
+                <Btn onClick={() => { setCreatingNew(false); setNewSku(""); }}><X size={13} /> Cancel</Btn>
+              </div>
+            )}
+          </Field>
+          <div className="grid grid-cols-2 gap-3 mt-2">
+            <Field label="Outbound boards" required><input type="number" style={inputStyle} value={outboundBoards} onChange={(e) => setOutboundBoards(e.target.value)} /></Field>
+            <Field label="Waste boards"><input type="number" style={inputStyle} value={wasteBoards} onChange={(e) => setWasteBoards(e.target.value)} /></Field>
+          </div>
+        </div>
+
+        <Field label="Which work order is this for?">
+          <select style={{ ...inputStyle, marginTop: 8 }} value={workOrderId} onChange={(e) => setWorkOrderId(e.target.value)}>
+            <option value="">— Not tied to a specific WO —</option>
+            {openWorkOrders.map((w) => <option key={w.id} value={w.id}>{w.number} · {w.customerName || "No customer"}</option>)}
+          </select>
+        </Field>
+
+        <div className="mt-4 pt-4" style={{ borderTop: `1px solid ${C.kraft}` }}>
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-1.5" style={{ fontWeight: 700, fontSize: 13 }}>
+              <Timer size={15} style={{ color: C.faint }} /> Time on this batch
+            </div>
+            <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 800, color: sw.running ? C.moss : C.ink }}>{fmtDuration(sw.elapsed)}</div>
+          </div>
+          <div className="flex gap-2">
+            {!sw.running ? (
+              <Btn kind="moss" onClick={sw.start}><Play size={13} /> {sw.elapsed > 0 ? "Resume" : "Start"}</Btn>
+            ) : (
+              <Btn kind="ghost" onClick={sw.pause}><Pause size={13} /> Pause</Btn>
+            )}
+            <Btn onClick={() => { setManualEdit(!manualEdit); const s = sw.elapsed; setManualHMS({ h: String(Math.floor(s / 3600)), m: String(Math.floor((s % 3600) / 60)), s: String(s % 60) }); }}>
+              <Clock size={13} /> Edit time
+            </Btn>
+            <Btn onClick={sw.reset}><RefreshCw size={13} /> Reset</Btn>
+          </div>
+          {manualEdit && (
+            <div className="mt-2 flex items-center gap-2">
+              <input type="number" style={{ ...inputStyle, width: 60 }} value={manualHMS.h} onChange={(e) => setManualHMS({ ...manualHMS, h: e.target.value })} /><span style={{ fontFamily: MONO, fontSize: 12 }}>h</span>
+              <input type="number" style={{ ...inputStyle, width: 60 }} value={manualHMS.m} onChange={(e) => setManualHMS({ ...manualHMS, m: e.target.value })} /><span style={{ fontFamily: MONO, fontSize: 12 }}>m</span>
+              <input type="number" style={{ ...inputStyle, width: 60 }} value={manualHMS.s} onChange={(e) => setManualHMS({ ...manualHMS, s: e.target.value })} /><span style={{ fontFamily: MONO, fontSize: 12 }}>s</span>
+              <Btn kind="primary" onClick={applyManualTime}><Check size={13} /> Set</Btn>
+            </div>
+          )}
+        </div>
+
+        <div className="mt-4">
+          <Btn kind="primary" onClick={submit} disabled={!canSubmit} big>
+            <Check size={16} /> Log this batch
+          </Btn>
+          {!inboundProductId && <div className="mt-2 text-xs" style={{ color: C.warn }}>Pick inbound stock above first.</div>}
+          {!outboundProductId && <div className="mt-2 text-xs" style={{ color: C.warn }}>Pick or create an outbound SKU above first.</div>}
+          {!whoWorking && <div className="mt-2 text-xs" style={{ color: C.warn }}>Pick your name above first.</div>}
+        </div>
+      </div>
+
+      <div className="rounded-sm p-4" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
+        <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 10 }}>Recent {stepDef?.label || step} Log</div>
+        {stepEntries.length === 0 ? (
+          <div className="text-sm text-center py-4" style={{ color: C.faint }}>Nothing logged yet.</div>
+        ) : (
+          <div className="space-y-2">
+            {stepEntries.slice(0, 15).map((s) => {
+              const inP = products.find((p) => p.id === s.inboundProductId);
+              const outP = products.find((p) => p.id === s.outboundProductId);
+              return (
+                <div key={s.id} className="px-3 py-2 rounded-sm text-sm" style={{ background: C.paper, border: `1px solid ${C.kraft}` }}>
+                  <div className="flex justify-between items-start gap-2">
+                    <span style={{ fontWeight: 700 }}>{inP?.sku || "?"} → {outP?.sku || "?"}{s.workOrderNumber ? ` · ${s.workOrderNumber}` : ""}</span>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>{s.date} · {s.by}</span>
+                      <button onClick={() => onDeleteSort(s)} title="Delete" className="opacity-50 hover:opacity-100"><Trash2 size={13} /></button>
+                    </div>
+                  </div>
+                  <div style={{ fontFamily: MONO, fontSize: 11, color: C.faint, marginTop: 2 }}>
+                    {num(s.inboundBoards)} bd in → {num(s.outboundBoards)} out · {num(s.wasteBoards)} waste
+                    {s.seconds ? ` · ${fmtDuration(s.seconds)}` : ""}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -4075,6 +4314,18 @@ export default function App() {
 
   const deleteSortEntry = (entry) => {
     runGrouped(() => {
+      // Generalized process-log entries (ProcessLogTab) reference exact
+      // product ids directly — no groupId indirection needed, unlike the
+      // Sort-specific path below which resolves by raw-size family.
+      if (entry.inboundProductId || entry.outboundProductId) {
+        setProducts((prev) => prev.map((p) => {
+          if (p.id === entry.inboundProductId) return { ...p, onHand: (Number(p.onHand) || 0) + (Number(entry.inboundBoards) || 0) };
+          if (p.id === entry.outboundProductId) return { ...p, onHand: (Number(p.onHand) || 0) - (Number(entry.outboundBoards) || 0) };
+          return p;
+        }));
+        setSortLog((prev) => prev.filter((s) => s.id !== entry.id));
+        return;
+      }
       setProducts((prev) => {
         const raw = resolveRawProduct(entry, prev);
         return prev.map((p) => {
@@ -4325,7 +4576,7 @@ export default function App() {
         )}
 
         {tab === "work" && (
-          <SortingTab
+          <WorkTab
             products={products} onProductsChange={setProducts}
             sortLog={sortLog} onLogSort={(s) => setSortLog([s, ...sortLog])}
             onUpdateSort={updateSortEntry} onDeleteSort={deleteSortEntry}
