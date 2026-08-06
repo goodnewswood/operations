@@ -3086,15 +3086,17 @@ function LabelPrintView({ units, supplierFor, onClose }) {
    matching raw-size product's on-hand board count — that last part used
    to be a manual, disconnected step. */
 
-function NewPurchaseOrderModal({ suppliers, products, editingPO, onClose, onCreate, onUpdate }) {
+function NewPurchaseOrderModal({ suppliers, products, editingPO, receivingPO, onClose, onCreate, onUpdate, onReceive }) {
   const blankLine = () => ({ key: uid(), item: "185", other: false, boardCount: "", copies: "1", costPerBoard: "" });
   const isEditing = !!editingPO;
+  const isReceiving = !!receivingPO;
+  const sourcePO = editingPO || receivingPO;
 
-  const initialShipChoice = editingPO
-    ? (["Leo/Allison", "3PL"].includes(editingPO.shipVia) ? editingPO.shipVia : (editingPO.shipVia ? "Other" : "Leo/Allison"))
+  const initialShipChoice = sourcePO
+    ? (["Leo/Allison", "3PL"].includes(sourcePO.shipVia) ? sourcePO.shipVia : (sourcePO.shipVia ? "Other" : "Leo/Allison"))
     : "Leo/Allison";
-  const initialLines = editingPO?.lines?.length
-    ? editingPO.lines.map((l) => {
+  const initialLines = sourcePO?.lines?.length
+    ? sourcePO.lines.map((l) => {
         const boards = Number(l.boardCount) || 0;
         const copies = Number(l.copies) || 1;
         const costPerBoard = boards > 0 ? (Number(l.cost) || 0) / (boards * copies) : (Number(l.cost) || 0);
@@ -3105,15 +3107,15 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, onClose, onCrea
       })
     : [blankLine()];
 
-  const [number, setNumber] = useState(editingPO?.number || "");
-  const [supplierId, setSupplierId] = useState(editingPO?.supplierId || "");
-  const [date, setDate] = useState(editingPO?.date || today());
+  const [number, setNumber] = useState(sourcePO?.number || "");
+  const [supplierId, setSupplierId] = useState(sourcePO?.supplierId || "");
+  const [date, setDate] = useState(sourcePO?.date || today());
   const [shipViaChoice, setShipViaChoice] = useState(initialShipChoice);
-  const [shipViaOther, setShipViaOther] = useState(initialShipChoice === "Other" ? editingPO?.shipVia || "" : "");
-  const [paymentStatus, setPaymentStatus] = useState(editingPO?.paymentStatus || "Unpaid");
-  const [paidVia, setPaidVia] = useState(editingPO?.paidVia || "");
-  const [shippingCost, setShippingCost] = useState(editingPO?.shippingCost || "");
-  const [notes, setNotes] = useState(editingPO?.note || "");
+  const [shipViaOther, setShipViaOther] = useState(initialShipChoice === "Other" ? sourcePO?.shipVia || "" : "");
+  const [paymentStatus, setPaymentStatus] = useState(sourcePO?.paymentStatus || "Unpaid");
+  const [paidVia, setPaidVia] = useState(sourcePO?.paidVia || "");
+  const [shippingCost, setShippingCost] = useState(sourcePO?.shippingCost || "");
+  const [notes, setNotes] = useState(sourcePO?.note || "");
   const [lines, setLines] = useState(initialLines);
 
   const sizeOptions = products.map((p) => p.sku);
@@ -3175,16 +3177,18 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, onClose, onCrea
 
   const submit = () => {
     if (!canSubmit) return;
-    const poId = isEditing ? editingPO.id : uid();
+    const poId = sourcePO ? sourcePO.id : uid();
     const { createdUnits, boardsBySize } = buildLinesAndUnits(poId);
     const po = {
       id: poId, supplierId, date, shipVia, paymentStatus, paidVia,
       shippingCost: Number(shippingCost) || 0,
       lines: validLines.map((l) => ({ sizeLabel: l.item, productId: matchAnyBySku(l.item)?.id || null, boardCount: Number(l.boardCount) || 0, copies: Math.max(1, Math.floor(Number(l.copies) || 1)), cost: lineTotal(l) })),
       totalCost, note: notes,
-      ...(isEditing ? { number } : {}),
+      status: isReceiving ? "received" : (sourcePO?.status || "received"),
+      ...(sourcePO ? { number } : {}),
     };
-    if (isEditing) onUpdate({ original: editingPO, po, units: createdUnits, boardsBySize });
+    if (isReceiving) onReceive({ original: receivingPO, po, units: createdUnits, boardsBySize });
+    else if (isEditing) onUpdate({ original: editingPO, po, units: createdUnits, boardsBySize });
     else onCreate({ po, units: createdUnits, boardsBySize });
   };
 
@@ -3192,11 +3196,17 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, onClose, onCrea
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 overflow-auto" style={{ background: "rgba(34,29,25,0.6)" }}>
       <div className="rounded-sm p-5 w-full max-w-2xl my-8" style={{ background: C.panel }}>
         <div className="flex items-center justify-between mb-3">
-          <div style={{ fontWeight: 800, fontSize: 16 }}>{isEditing ? "Edit purchase order" : "New purchase order"}</div>
+          <div style={{ fontWeight: 800, fontSize: 16 }}>{isReceiving ? "Receive shipment" : isEditing ? "Edit purchase order" : "New purchase order"}</div>
           <button onClick={onClose} className="opacity-60 hover:opacity-100"><X size={16} /></button>
         </div>
 
-        {isEditing && (
+        {isReceiving && (
+          <div className="mb-3 text-sm rounded-sm px-3 py-2" style={{ background: C.paper, border: `1px solid ${C.kraftDark}`, color: C.faint }}>
+            Confirm what actually showed up — adjust quantities below if they differ from what was ordered. Submitting will print labels and add this material to on-hand stock.
+          </div>
+        )}
+
+        {sourcePO && (
           <Field label="PO #"><input style={{ ...inputStyle, fontFamily: MONO }} value={number} onChange={(e) => setNumber(e.target.value)} /></Field>
         )}
         <div className="grid grid-cols-2 gap-3 mt-2">
@@ -3305,7 +3315,7 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, onClose, onCrea
             {isEditing && <div className="mt-1">If any of this PO's units have already been sorted from, their board counts won't change — only cost and other details will update.</div>}
           </div>
           <Btn kind="primary" onClick={submit} disabled={!canSubmit} big>
-            <Printer size={16} /> {isEditing ? "Save changes" : "Create PO & print labels"}
+            <Printer size={16} /> {isReceiving ? "Receive shipment & print labels" : isEditing ? "Save changes" : "Create PO & print labels"}
           </Btn>
         </div>
       </div>
@@ -3318,6 +3328,7 @@ function ReceivingTab({ suppliers, purchaseOrders, onPOChange, units, onUnitsCha
   const [printUnits, setPrintUnits] = useState(null);
   const [newPOOpen, setNewPOOpen] = useState(false);
   const [editingPO, setEditingPO] = useState(null);
+  const [receivingPO, setReceivingPO] = useState(null);
   const [openPOId, setOpenPOId] = useState(null);
 
   const removePO = (id) => {
@@ -3357,7 +3368,20 @@ function ReceivingTab({ suppliers, purchaseOrders, onPOChange, units, onUnitsCha
   // If any unit has already been partially or fully sorted from, we leave
   // units and inventory alone and only update the PO's own fields, so we
   // never silently erase real sorting history.
+  //
+  // A PO that's still just "ordered" (placed from GNWS Office, nothing
+  // physically received yet) has no units at all and never bumped
+  // on-hand — editing it here must only touch the PO's own fields, never
+  // units or inventory, or the revert-then-rebump math below would
+  // wrongly subtract stock that was never added. That case is handled by
+  // "Receive" (handleReceivePO), not by editing.
   const handleUpdatePO = ({ original, po, units: newUnits, boardsBySize }) => {
+    if (original.status === "ordered") {
+      onPOChange(purchaseOrders.map((p) => (p.id === original.id ? po : p)));
+      setEditingPO(null);
+      return;
+    }
+
     const poUnits = units.filter((u) => u.poId === original.id);
     const untouched = poUnits.every((u) => Number(u.boardsRemaining) === Number(u.boardCount));
 
@@ -3381,6 +3405,25 @@ function ReceivingTab({ suppliers, purchaseOrders, onPOChange, units, onUnitsCha
     });
     if (untouched && newUnits.length > 0) setPrintUnits(newUnits);
     setEditingPO(null);
+  };
+
+  // Turns an "ordered" PO (placed from GNWS Office, no physical units
+  // yet) into a "received" one: generates the QR-labeled units from
+  // whatever quantities were confirmed in the modal (may differ from
+  // what was originally ordered), bumps on-hand, and flips status —
+  // mirrors handleCreatePO but keeps the existing id/number instead of
+  // minting a new one.
+  const handleReceivePO = ({ original, po, units: newUnits, boardsBySize }) => {
+    runGrouped(() => {
+      onPOChange(purchaseOrders.map((p) => (p.id === original.id ? po : p)));
+      onUnitsChange([...newUnits, ...units]);
+      onProductsChange(products.map((p) => {
+        const bump = boardsBySize[p.id];
+        return bump ? { ...p, onHand: (Number(p.onHand) || 0) + bump } : p;
+      }));
+    });
+    setPrintUnits(newUnits);
+    setReceivingPO(null);
   };
 
   const outstandingCount = units.filter((u) => Number(u.boardsRemaining) > 0).length;
@@ -3407,19 +3450,26 @@ function ReceivingTab({ suppliers, purchaseOrders, onPOChange, units, onUnitsCha
               const poUnits = units.filter((u) => u.poId === po.id);
               const open = openPOId === po.id;
               const totalBoards = (po.lines || []).reduce((sum, l) => sum + (Number(l.boardCount) || 0) * (Number(l.copies) || 1), 0);
+              const isOrdered = po.status === "ordered";
               return (
-                <div key={po.id} className="rounded-sm overflow-hidden" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
+                <div key={po.id} className="rounded-sm overflow-hidden" style={{ background: C.panel, border: `1px solid ${isOrdered ? C.warn : C.kraftDark}` }}>
                   <button onClick={() => setOpenPOId(open ? null : po.id)} className="w-full text-left px-4 py-3 flex items-center justify-between gap-3">
                     <div>
                       <div style={{ fontWeight: 700, fontSize: 14 }}>{po.number ? `${po.number} · ` : ""}{sup?.name || "Unknown vendor"}</div>
                       <div className="text-xs mt-0.5" style={{ color: C.faint, fontFamily: MONO }}>
-                        {po.date} · {num(totalBoards)} boards · {poUnits.length} unit{poUnits.length === 1 ? "" : "s"}
+                        {po.date} · {num(totalBoards)} boards
+                        {!isOrdered ? ` · ${poUnits.length} unit${poUnits.length === 1 ? "" : "s"}` : ""}
                         {po.totalCost ? ` · $${Number(po.totalCost).toFixed(2)}` : ""}
                       </div>
                     </div>
-                    <span className="px-2 py-0.5 rounded-sm text-xs" style={{ fontFamily: MONO, background: po.paymentStatus === "Paid" ? C.moss : C.kraft, color: po.paymentStatus === "Paid" ? "#fff" : C.ink }}>
-                      {po.paymentStatus || "Unpaid"}
-                    </span>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {isOrdered && (
+                        <span className="px-2 py-0.5 rounded-sm text-xs" style={{ fontFamily: MONO, background: C.warn, color: "#fff" }}>Ordered</span>
+                      )}
+                      <span className="px-2 py-0.5 rounded-sm text-xs" style={{ fontFamily: MONO, background: po.paymentStatus === "Paid" ? C.moss : C.kraft, color: po.paymentStatus === "Paid" ? "#fff" : C.ink }}>
+                        {po.paymentStatus || "Unpaid"}
+                      </span>
+                    </div>
                   </button>
 
                   {open && (
@@ -3443,20 +3493,29 @@ function ReceivingTab({ suppliers, purchaseOrders, onPOChange, units, onUnitsCha
                         </div>
                       )}
 
-                      <div className="mt-3">
-                        <div className="text-xs mb-1" style={{ color: C.faint, fontFamily: MONO }}>RECEIVED UNITS</div>
-                        {poUnits.map((u) => (
-                          <div key={u.id} className="flex items-center justify-between px-2 py-1.5 text-sm" style={{ borderBottom: `1px solid ${C.kraft}` }}>
-                            <span style={{ fontFamily: MONO }}>{u.sizeLabel}{u.seqTotal ? ` · ${u.seq} of ${u.seqTotal}` : ""} · {num(u.boardsRemaining)}/{num(u.boardCount)} bd left</span>
-                            <div className="flex items-center gap-2">
-                              <button onClick={() => setPrintUnits([u])} title="Print label" className="opacity-60 hover:opacity-100"><Tag size={14} /></button>
-                              <button onClick={() => removeUnit(u.id)} className="opacity-40 hover:opacity-100"><Trash2 size={13} /></button>
+                      {isOrdered ? (
+                        <div className="mt-3 text-sm flex items-center gap-1.5" style={{ color: C.warn }}>
+                          <AlertTriangle size={13} /> Not yet received — nothing here has hit on-hand stock.
+                        </div>
+                      ) : (
+                        <div className="mt-3">
+                          <div className="text-xs mb-1" style={{ color: C.faint, fontFamily: MONO }}>RECEIVED UNITS</div>
+                          {poUnits.map((u) => (
+                            <div key={u.id} className="flex items-center justify-between px-2 py-1.5 text-sm" style={{ borderBottom: `1px solid ${C.kraft}` }}>
+                              <span style={{ fontFamily: MONO }}>{u.sizeLabel}{u.seqTotal ? ` · ${u.seq} of ${u.seqTotal}` : ""} · {num(u.boardsRemaining)}/{num(u.boardCount)} bd left</span>
+                              <div className="flex items-center gap-2">
+                                <button onClick={() => setPrintUnits([u])} title="Print label" className="opacity-60 hover:opacity-100"><Tag size={14} /></button>
+                                <button onClick={() => removeUnit(u.id)} className="opacity-40 hover:opacity-100"><Trash2 size={13} /></button>
+                              </div>
                             </div>
-                          </div>
-                        ))}
-                      </div>
+                          ))}
+                        </div>
+                      )}
 
                       <div className="mt-3 flex gap-2">
+                        {isOrdered && (
+                          <Btn kind="primary" onClick={() => setReceivingPO(po)}><Printer size={13} /> Receive shipment</Btn>
+                        )}
                         <Btn onClick={() => setEditingPO(po)}><Pencil size={13} /> Edit</Btn>
                         <Btn onClick={() => removePO(po.id)}><Trash2 size={13} /> Delete this PO</Btn>
                       </div>
@@ -3474,6 +3533,10 @@ function ReceivingTab({ suppliers, purchaseOrders, onPOChange, units, onUnitsCha
 
       {editingPO && (
         <NewPurchaseOrderModal suppliers={suppliers} products={products} editingPO={editingPO} onClose={() => setEditingPO(null)} onUpdate={handleUpdatePO} />
+      )}
+
+      {receivingPO && (
+        <NewPurchaseOrderModal suppliers={suppliers} products={products} receivingPO={receivingPO} onClose={() => setReceivingPO(null)} onReceive={handleReceivePO} />
       )}
 
       {printUnits && printUnits.length > 0 && (
