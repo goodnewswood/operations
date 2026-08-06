@@ -1293,7 +1293,10 @@ const fmtDuration = (seconds) => {
 };
 const hoursDecimal = (seconds) => (Number(seconds) || 0) / 3600;
 
-function WhoSelect({ team, current, onChange, onAddMember }) {
+// `onDark` is for the app header, where this sits on the dark ink bar and
+// needs light text. On a normal light panel it must use the standard input
+// colours — white-on-white is otherwise invisible.
+function WhoSelect({ team, current, onChange, onAddMember, onDark = false, big = false }) {
   const [adding, setAdding] = useState(false);
   const [newName, setNewName] = useState("");
   return (
@@ -1314,7 +1317,13 @@ function WhoSelect({ team, current, onChange, onAddMember }) {
         </div>
       ) : (
         <select
-          style={{ ...inputStyle, width: 140, padding: "4px 8px", fontSize: 13, background: "transparent", color: "#fff", borderColor: "#4a423a" }}
+          style={{
+            ...inputStyle,
+            width: big ? "100%" : 140,
+            padding: big ? "10px 12px" : "4px 8px",
+            fontSize: big ? 16 : 13,
+            ...(onDark ? { background: "transparent", color: "#fff", borderColor: "#4a423a" } : null),
+          }}
           value={current || ""}
           onChange={(e) => (e.target.value === "__add" ? setAdding(true) : onChange(e.target.value))}
         >
@@ -4240,6 +4249,495 @@ function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, o
   );
 }
 
+/* ---------------- Time clock ----------------
+   Separate from the per-batch stopwatches on the Work pages. Those
+   measure how long a specific job took; this measures who was on the
+   clock, which is what payroll runs off.
+
+   A shift is one record: clock-in, optional breaks, clock-out. An open
+   shift (clockOut === null) is someone currently on the clock, so
+   "who's working right now" is just a filter, not separate state. Break
+   time is subtracted from the paid total.
+
+   Everything is editable after the fact — people forget to clock out,
+   and a timesheet nobody can correct gets abandoned within a week. */
+
+const shiftBreakSeconds = (shift, now) =>
+  (shift.breaks || []).reduce((sum, b) => {
+    if (!b.start) return sum;
+    const end = b.end ? new Date(b.end).getTime() : (b.end === null && !shift.clockOut ? now : new Date(b.start).getTime());
+    return sum + Math.max(0, (end - new Date(b.start).getTime()) / 1000);
+  }, 0);
+
+// Paid seconds = wall time on the clock minus break time. An open shift
+// counts up to `now` so the running total ticks live.
+const shiftSeconds = (shift, now = Date.now()) => {
+  if (!shift.clockIn) return 0;
+  const start = new Date(shift.clockIn).getTime();
+  const end = shift.clockOut ? new Date(shift.clockOut).getTime() : now;
+  return Math.max(0, (end - start) / 1000 - shiftBreakSeconds(shift, now));
+};
+
+const openBreak = (shift) => (shift.breaks || []).find((b) => b.start && !b.end) || null;
+const isOnBreak = (shift) => !!openBreak(shift);
+
+const localDay = (iso) => {
+  const d = new Date(iso);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+const fmtClock = (iso) =>
+  iso ? new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }) : "—";
+
+// <input type="datetime-local"> wants local time with no zone suffix,
+// so we can't just slice an ISO string (that would show UTC).
+const toLocalInput = (iso) => {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+const fromLocalInput = (v) => (v ? new Date(v).toISOString() : null);
+
+// Monday-start week containing `dayStr`.
+const weekStart = (dayStr) => {
+  const d = new Date(`${dayStr}T12:00:00`);
+  const dow = (d.getDay() + 6) % 7;
+  d.setDate(d.getDate() - dow);
+  return localDay(d.toISOString());
+};
+const addDays = (dayStr, n) => {
+  const d = new Date(`${dayStr}T12:00:00`);
+  d.setDate(d.getDate() + n);
+  return localDay(d.toISOString());
+};
+const dayLabel = (dayStr) =>
+  new Date(`${dayStr}T12:00:00`).toLocaleDateString("en-US", { weekday: "short", month: "numeric", day: "numeric" });
+
+// Ticks once a second so open shifts show a live running total.
+function useNow(active) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [active]);
+  return now;
+}
+
+function TimeClockTab({ shifts, onChange, team, whoWorking, setWhoWorking, onAddTeamMember, runGrouped }) {
+  const [view, setView] = useState("clock");
+  const [day, setDay] = useState(today());
+  const [editingId, setEditingId] = useState(null);
+
+  const openShifts = shifts.filter((s) => !s.clockOut);
+  const now = useNow(openShifts.length > 0);
+
+  const mineOpen = shifts.find((s) => s.person === whoWorking && !s.clockOut) || null;
+
+  const clockIn = () => {
+    if (!whoWorking || mineOpen) return;
+    onChange([
+      { id: uid(), person: whoWorking, clockIn: new Date().toISOString(), clockOut: null, breaks: [], note: "" },
+      ...shifts,
+    ]);
+  };
+  const clockOut = () => {
+    if (!mineOpen) return;
+    const stamp = new Date().toISOString();
+    onChange(shifts.map((s) => (s.id === mineOpen.id
+      ? { ...s, clockOut: stamp, breaks: (s.breaks || []).map((b) => (b.end ? b : { ...b, end: stamp })) }
+      : s)));
+  };
+  const toggleBreak = () => {
+    if (!mineOpen) return;
+    const stamp = new Date().toISOString();
+    const running = openBreak(mineOpen);
+    onChange(shifts.map((s) => {
+      if (s.id !== mineOpen.id) return s;
+      const breaks = running
+        ? (s.breaks || []).map((b) => (b.start === running.start && !b.end ? { ...b, end: stamp } : b))
+        : [...(s.breaks || []), { id: uid(), start: stamp, end: null }];
+      return { ...s, breaks };
+    }));
+  };
+
+  const updateShift = (id, patch) =>
+    onChange(shifts.map((s) => (s.id === id ? { ...s, ...patch, edited: true } : s)));
+  const removeShift = (id) => onChange(shifts.filter((s) => s.id !== id));
+  const addManual = (person, forDay) => {
+    const start = new Date(`${forDay}T08:00:00`);
+    const end = new Date(`${forDay}T16:00:00`);
+    const s = {
+      id: uid(), person, clockIn: start.toISOString(), clockOut: end.toISOString(),
+      breaks: [], note: "", edited: true, manual: true,
+    };
+    onChange([s, ...shifts]);
+    setEditingId(s.id);
+  };
+
+  /* ---- Clock view: the crew-facing screen ---- */
+  const ClockView = () => {
+    const mineToday = shifts
+      .filter((s) => s.person === whoWorking && s.clockIn && localDay(s.clockIn) === today())
+      .sort((a, b) => new Date(b.clockIn) - new Date(a.clockIn));
+    const todaySec = mineToday.reduce((sum, s) => sum + shiftSeconds(s, now), 0);
+    const onBreakNow = mineOpen && isOnBreak(mineOpen);
+
+    return (
+      <div>
+        <div className="rounded-sm p-4 mb-4" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
+          <Field label="Who's clocking in" required>
+            <WhoSelect team={team} current={whoWorking} onChange={setWhoWorking} onAddMember={onAddTeamMember} big />
+          </Field>
+
+          {!whoWorking ? (
+            <div className="text-sm text-center py-6" style={{ color: C.faint }}>Pick your name to clock in.</div>
+          ) : (
+            <>
+              <div className="text-center py-5">
+                <div style={{ fontFamily: MONO, fontSize: 12, letterSpacing: "0.08em", color: C.faint }}>
+                  {mineOpen ? (onBreakNow ? "ON BREAK" : "ON THE CLOCK") : "CLOCKED OUT"}
+                </div>
+                <div style={{ fontFamily: MONO, fontSize: 44, fontWeight: 800, lineHeight: 1.1, color: onBreakNow ? C.gold : mineOpen ? C.moss : C.ink }}>
+                  {fmtDuration(mineOpen ? shiftSeconds(mineOpen, now) : todaySec)}
+                </div>
+                <div className="mt-1 text-sm" style={{ color: C.faint }}>
+                  {mineOpen
+                    ? `since ${fmtClock(mineOpen.clockIn)}${todaySec > shiftSeconds(mineOpen, now) ? ` · ${fmtDuration(todaySec)} today` : ""}`
+                    : todaySec > 0 ? "logged today" : "nothing logged today"}
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                {!mineOpen ? (
+                  <button
+                    onClick={clockIn}
+                    className="w-full rounded-sm font-bold"
+                    style={{ background: C.moss, color: "#fff", fontFamily: MONO, fontSize: 18, padding: "18px 12px", letterSpacing: "0.05em" }}
+                  >
+                    CLOCK IN
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      onClick={toggleBreak}
+                      className="w-full rounded-sm font-bold"
+                      style={{ background: onBreakNow ? C.moss : C.gold, color: "#fff", fontFamily: MONO, fontSize: 16, padding: "16px 12px", letterSpacing: "0.05em" }}
+                    >
+                      {onBreakNow ? "END BREAK" : "START BREAK"}
+                    </button>
+                    <button
+                      onClick={clockOut}
+                      className="w-full rounded-sm font-bold"
+                      style={{ background: C.redwood, color: "#fff", fontFamily: MONO, fontSize: 18, padding: "18px 12px", letterSpacing: "0.05em" }}
+                    >
+                      CLOCK OUT
+                    </button>
+                  </>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+
+        <div className="rounded-sm p-4 mb-4" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
+          <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 8 }}>
+            On the clock now {openShifts.length > 0 && <span style={{ fontFamily: MONO, color: C.faint, fontWeight: 400 }}>({openShifts.length})</span>}
+          </div>
+          {openShifts.length === 0 ? (
+            <div className="text-sm text-center py-4" style={{ color: C.faint }}>Nobody's clocked in.</div>
+          ) : (
+            <div className="space-y-2">
+              {openShifts.map((s) => {
+                const br = isOnBreak(s);
+                return (
+                  <div key={s.id} className="flex items-center justify-between px-3 py-2 rounded-sm" style={{ background: C.paper, border: `1px solid ${C.kraft}` }}>
+                    <div>
+                      <div style={{ fontWeight: 700 }}>{s.person}</div>
+                      <div style={{ fontFamily: MONO, fontSize: 11, color: br ? C.gold : C.faint }}>
+                        {br ? "on break · " : ""}in at {fmtClock(s.clockIn)}
+                      </div>
+                    </div>
+                    <div style={{ fontFamily: MONO, fontWeight: 800, color: br ? C.gold : C.moss }}>{fmtDuration(shiftSeconds(s, now))}</div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {mineToday.length > 0 && (
+          <div className="rounded-sm p-4" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
+            <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 8 }}>My shifts today</div>
+            <div className="space-y-1.5">
+              {mineToday.map((s) => (
+                <div key={s.id} className="flex justify-between items-center px-3 py-2 rounded-sm text-sm" style={{ background: C.paper }}>
+                  <span style={{ fontFamily: MONO }}>
+                    {fmtClock(s.clockIn)} – {s.clockOut ? fmtClock(s.clockOut) : "now"}
+                    {(s.breaks || []).length > 0 && <span style={{ color: C.faint }}> · {(s.breaks || []).length} break</span>}
+                  </span>
+                  <span style={{ fontFamily: MONO, fontWeight: 700 }}>{fmtDuration(shiftSeconds(s, now))}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  /* ---- Timesheet: one day, everyone, fully editable ---- */
+  const TimesheetView = () => {
+    const dayShifts = shifts
+      .filter((s) => s.clockIn && localDay(s.clockIn) === day)
+      .sort((a, b) => new Date(a.clockIn) - new Date(b.clockIn));
+    const people = [...new Set(dayShifts.map((s) => s.person))];
+    const dayTotal = dayShifts.reduce((sum, s) => sum + shiftSeconds(s, now), 0);
+
+    return (
+      <div>
+        <div className="flex flex-wrap items-end gap-2 mb-4">
+          <Field label="Day" w={170}>
+            <input type="date" style={inputStyle} value={day} onChange={(e) => setDay(e.target.value)} />
+          </Field>
+          <Btn onClick={() => setDay(addDays(day, -1))}>← Prev</Btn>
+          <Btn onClick={() => setDay(today())}>Today</Btn>
+          <Btn onClick={() => setDay(addDays(day, 1))}>Next →</Btn>
+        </div>
+
+        <div className="rounded-sm p-4 mb-3" style={{ background: C.ink, color: "#fff" }}>
+          <div className="flex justify-between items-center">
+            <span style={{ fontWeight: 800 }}>{dayLabel(day)}</span>
+            <span style={{ fontFamily: MONO, fontSize: 22, fontWeight: 800 }}>
+              {fmtDuration(dayTotal)} <span style={{ fontSize: 13, color: C.kraftDark }}>({hoursDecimal(dayTotal).toFixed(2)}h)</span>
+            </span>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap gap-2 mb-3">
+          {team.map((name) => (
+            <Btn key={name} onClick={() => addManual(name, day)}><Plus size={12} /> {name}</Btn>
+          ))}
+        </div>
+
+        {dayShifts.length === 0 ? (
+          <div className="rounded-sm p-8 text-center" style={{ background: C.panel, border: `1px dashed ${C.kraftDark}`, color: C.faint }}>
+            Nothing logged on {dayLabel(day)}. Use a name button above to add a shift by hand.
+          </div>
+        ) : (
+          people.map((person) => {
+            const rows = dayShifts.filter((s) => s.person === person);
+            const personSec = rows.reduce((sum, s) => sum + shiftSeconds(s, now), 0);
+            return (
+              <div key={person} className="rounded-sm mb-3 overflow-hidden" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
+                <div className="px-4 py-2 flex justify-between items-center" style={{ borderBottom: `1px solid ${C.kraft}` }}>
+                  <span style={{ fontWeight: 800 }}>{person}</span>
+                  <span style={{ fontFamily: MONO, fontWeight: 800 }}>
+                    {fmtDuration(personSec)} <span style={{ color: C.faint, fontWeight: 400 }}>({hoursDecimal(personSec).toFixed(2)}h)</span>
+                  </span>
+                </div>
+                {rows.map((s) => {
+                  const editing = editingId === s.id;
+                  const brSec = shiftBreakSeconds(s, now);
+                  return (
+                    <div key={s.id} style={{ borderTop: `1px solid ${C.kraft}` }}>
+                      <div className="px-4 py-2 flex items-center justify-between gap-2 flex-wrap">
+                        <div style={{ fontFamily: MONO, fontSize: 13 }}>
+                          {fmtClock(s.clockIn)} – {s.clockOut ? fmtClock(s.clockOut) : <span style={{ color: C.moss }}>on the clock</span>}
+                          {brSec > 0 && <span style={{ color: C.faint }}> · {fmtDuration(brSec)} break</span>}
+                          {s.edited && <span style={{ color: C.faint }}> · edited</span>}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span style={{ fontFamily: MONO, fontWeight: 700 }}>{fmtDuration(shiftSeconds(s, now))}</span>
+                          <button onClick={() => setEditingId(editing ? null : s.id)} className="opacity-50 hover:opacity-100" title="Edit"><Pencil size={13} /></button>
+                          <button onClick={() => removeShift(s.id)} className="opacity-40 hover:opacity-100" title="Delete"><Trash2 size={13} /></button>
+                        </div>
+                      </div>
+
+                      {editing && (
+                        <div className="px-4 pb-4 pt-1" style={{ background: C.paper }}>
+                          <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
+                            <Field label="Clocked in">
+                              <input
+                                type="datetime-local" style={inputStyle}
+                                value={toLocalInput(s.clockIn)}
+                                onChange={(e) => updateShift(s.id, { clockIn: fromLocalInput(e.target.value) })}
+                              />
+                            </Field>
+                            <Field label="Clocked out">
+                              <input
+                                type="datetime-local" style={inputStyle}
+                                value={toLocalInput(s.clockOut)}
+                                onChange={(e) => updateShift(s.id, { clockOut: fromLocalInput(e.target.value) })}
+                              />
+                            </Field>
+                            <Field label="Person">
+                              <select style={inputStyle} value={s.person} onChange={(e) => updateShift(s.id, { person: e.target.value })}>
+                                {[...new Set([...team, s.person])].map((n) => <option key={n} value={n}>{n}</option>)}
+                              </select>
+                            </Field>
+                          </div>
+                          {!s.clockOut && (
+                            <div className="mt-2">
+                              <Btn kind="moss" onClick={() => updateShift(s.id, { clockOut: new Date().toISOString() })}>
+                                <Check size={13} /> Close out now
+                              </Btn>
+                            </div>
+                          )}
+
+                          <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${C.kraft}` }}>
+                            <div className="flex items-center justify-between mb-1">
+                              <span className="text-xs" style={{ fontFamily: MONO, color: C.faint }}>BREAKS</span>
+                              <Btn onClick={() => updateShift(s.id, { breaks: [...(s.breaks || []), { id: uid(), start: s.clockIn, end: s.clockIn }] })}>
+                                <Plus size={12} /> Add break
+                              </Btn>
+                            </div>
+                            {(s.breaks || []).length === 0 ? (
+                              <div className="text-xs" style={{ color: C.faint }}>No breaks on this shift.</div>
+                            ) : (
+                              (s.breaks || []).map((b) => (
+                                <div key={b.id || b.start} className="flex items-end gap-2 flex-wrap mb-1">
+                                  <Field label="Break start" w={170}>
+                                    <input
+                                      type="datetime-local" style={inputStyle} value={toLocalInput(b.start)}
+                                      onChange={(e) => updateShift(s.id, { breaks: s.breaks.map((x) => (x === b ? { ...x, start: fromLocalInput(e.target.value) } : x)) })}
+                                    />
+                                  </Field>
+                                  <Field label="Break end" w={170}>
+                                    <input
+                                      type="datetime-local" style={inputStyle} value={toLocalInput(b.end)}
+                                      onChange={(e) => updateShift(s.id, { breaks: s.breaks.map((x) => (x === b ? { ...x, end: fromLocalInput(e.target.value) } : x)) })}
+                                    />
+                                  </Field>
+                                  <button onClick={() => updateShift(s.id, { breaks: s.breaks.filter((x) => x !== b) })} className="opacity-40 hover:opacity-100 mb-2"><Trash2 size={15} /></button>
+                                </div>
+                              ))
+                            )}
+                          </div>
+
+                          <Field label="Note">
+                            <input style={inputStyle} value={s.note || ""} onChange={(e) => updateShift(s.id, { note: e.target.value })} placeholder="Why this was edited, anything worth recording…" />
+                          </Field>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })
+        )}
+      </div>
+    );
+  };
+
+  /* ---- Payroll: one week, hours per person per day ---- */
+  const PayrollView = () => {
+    const start = weekStart(day);
+    const days = Array.from({ length: 7 }, (_, i) => addDays(start, i));
+    const weekShifts = shifts.filter((s) => s.clockIn && days.includes(localDay(s.clockIn)));
+    const people = [...new Set(weekShifts.map((s) => s.person))].sort();
+    const secFor = (person, d) =>
+      weekShifts.filter((s) => s.person === person && localDay(s.clockIn) === d)
+        .reduce((sum, s) => sum + shiftSeconds(s, now), 0);
+    const weekTotal = weekShifts.reduce((sum, s) => sum + shiftSeconds(s, now), 0);
+
+    const copyPayroll = () => {
+      const lines = [["Person", ...days.map(dayLabel), "Total (h)"].join("\t")];
+      people.forEach((p) => {
+        const daily = days.map((d) => hoursDecimal(secFor(p, d)).toFixed(2));
+        const total = days.reduce((sum, d) => sum + secFor(p, d), 0);
+        lines.push([p, ...daily, hoursDecimal(total).toFixed(2)].join("\t"));
+      });
+      navigator.clipboard?.writeText(lines.join("\n"));
+    };
+
+    return (
+      <div>
+        <div className="flex flex-wrap items-end gap-2 mb-4">
+          <Field label="Week of" w={170}>
+            <input type="date" style={inputStyle} value={day} onChange={(e) => setDay(e.target.value)} />
+          </Field>
+          <Btn onClick={() => setDay(addDays(day, -7))}>← Prev week</Btn>
+          <Btn onClick={() => setDay(today())}>This week</Btn>
+          <Btn onClick={() => setDay(addDays(day, 7))}>Next week →</Btn>
+          <Btn onClick={copyPayroll}><ClipboardList size={13} /> Copy for payroll</Btn>
+        </div>
+
+        <div className="rounded-sm p-4 mb-3" style={{ background: C.ink, color: "#fff" }}>
+          <div className="flex justify-between items-center flex-wrap gap-2">
+            <span style={{ fontWeight: 800 }}>{dayLabel(start)} – {dayLabel(addDays(start, 6))}</span>
+            <span style={{ fontFamily: MONO, fontSize: 22, fontWeight: 800 }}>{hoursDecimal(weekTotal).toFixed(2)}h</span>
+          </div>
+        </div>
+
+        {people.length === 0 ? (
+          <div className="rounded-sm p-8 text-center" style={{ background: C.panel, border: `1px dashed ${C.kraftDark}`, color: C.faint }}>
+            No time logged this week.
+          </div>
+        ) : (
+          <div className="rounded-sm overflow-x-auto" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
+            <table className="w-full" style={{ borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ background: C.kraft }}>
+                  <th className="text-left px-3 py-2" style={{ fontFamily: MONO, fontSize: 11, color: C.faint, whiteSpace: "nowrap" }}>PERSON</th>
+                  {days.map((d) => (
+                    <th key={d} className="px-2 py-2" style={{ fontFamily: MONO, fontSize: 11, color: d === today() ? C.ink : C.faint, whiteSpace: "nowrap" }}>
+                      {dayLabel(d)}
+                    </th>
+                  ))}
+                  <th className="px-3 py-2" style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>TOTAL</th>
+                </tr>
+              </thead>
+              <tbody>
+                {people.map((p) => {
+                  const total = days.reduce((sum, d) => sum + secFor(p, d), 0);
+                  return (
+                    <tr key={p} style={{ borderTop: `1px solid ${C.kraft}` }}>
+                      <td className="px-3 py-2" style={{ fontWeight: 700, whiteSpace: "nowrap" }}>{p}</td>
+                      {days.map((d) => {
+                        const sec = secFor(p, d);
+                        return (
+                          <td key={d} className="px-2 py-2 text-center" style={{ fontFamily: MONO, color: sec ? C.ink : C.kraftDark }}>
+                            {sec ? hoursDecimal(sec).toFixed(2) : "·"}
+                          </td>
+                        );
+                      })}
+                      <td className="px-3 py-2 text-right" style={{ fontFamily: MONO, fontWeight: 800, whiteSpace: "nowrap" }}>
+                        {hoursDecimal(total).toFixed(2)}h
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div className="max-w-3xl">
+      <div className="flex flex-wrap gap-1 mb-4">
+        {[["clock", "Clock", Timer], ["timesheet", "Timesheets", CalendarDays], ["payroll", "Payroll", ClipboardList]].map(([id, label, Icon]) => (
+          <button
+            key={id} onClick={() => setView(id)}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-sm text-xs"
+            style={{ fontFamily: MONO, background: view === id ? C.ink : "transparent", color: view === id ? "#fff" : C.faint, border: `1px solid ${view === id ? C.ink : C.kraftDark}` }}
+          >
+            <Icon size={13} /> {label}
+          </button>
+        ))}
+      </div>
+
+      {view === "clock" && <ClockView />}
+      {view === "timesheet" && <TimesheetView />}
+      {view === "payroll" && <PayrollView />}
+    </div>
+  );
+}
+
 function TimeTab({ sortLog, team, whoWorking, setWhoWorking, onAddTeamMember }) {
   const [date, setDate] = useState(today());
   const [view, setView] = useState("mine");
@@ -4336,6 +4834,7 @@ export default function App() {
   const [suppliers, _setSuppliers] = useState(SEED_VENDORS);
   const [purchaseOrders, _setPurchaseOrders] = useState([]);
   const [units, _setUnits] = useState([]);
+  const [shifts, _setShifts] = useState([]);
   const [goals, setGoals] = useState({ boardsPerHour: 100 });
 
   // --- Undo/redo history --------------------------------------------
@@ -4358,7 +4857,7 @@ export default function App() {
   const [historyCounts, setHistoryCounts] = useState({ undo: 0, redo: 0 });
 
   useEffect(() => {
-    latestRef.current = { customers, products, workOrders, sortLog, team, suppliers, purchaseOrders, units };
+    latestRef.current = { customers, products, workOrders, sortLog, team, suppliers, purchaseOrders, units, shifts };
   });
 
   const refreshHistoryCounts = () => setHistoryCounts({ undo: historyRef.current.length, redo: futureRef.current.length });
@@ -4390,6 +4889,7 @@ export default function App() {
     _setSuppliers(snap.suppliers);
     _setPurchaseOrders(snap.purchaseOrders);
     _setUnits(snap.units);
+    _setShifts(snap.shifts || []);
     skipHistoryRef.current = false;
   };
 
@@ -4432,6 +4932,7 @@ export default function App() {
   const setSuppliers = (v) => { pushHistory(); _setSuppliers(v); };
   const setPurchaseOrders = (v) => { pushHistory(); _setPurchaseOrders(v); };
   const setUnits = (v) => { pushHistory(); _setUnits(v); };
+  const setShifts = (v) => { pushHistory(); _setShifts(v); };
   const [whoWorking, setWhoWorking] = useState("");
   const [activeWOId, setActiveWOId] = useState(null);
   const [jumpToUnitId, setJumpToUnitId] = useState(null);
@@ -4466,6 +4967,7 @@ export default function App() {
       await tryLoad(KEY.suppliers, (d) => setSuppliers(Array.isArray(d) ? d : []));
       await tryLoad(KEY.purchaseOrders, (d) => setPurchaseOrders(Array.isArray(d) ? d : []));
       await tryLoad(KEY.units, (d) => setUnits(Array.isArray(d) ? d : []));
+      await tryLoad(KEY.timeLog, (d) => _setShifts(Array.isArray(d) ? d : []));
       await tryLoad(KEY.goals, (d) => setGoals(d && !Array.isArray(d) ? d : { boardsPerHour: 100 }));
       setLoaded(true);
     })();
@@ -4487,6 +4989,7 @@ export default function App() {
   useEffect(() => { if (loaded) saveKey(KEY.suppliers, suppliers); }, [suppliers, loaded]);
   useEffect(() => { if (loaded) saveKey(KEY.purchaseOrders, purchaseOrders); }, [purchaseOrders, loaded]);
   useEffect(() => { if (loaded) saveKey(KEY.units, units); }, [units, loaded]);
+  useEffect(() => { if (loaded) saveKey(KEY.timeLog, shifts); }, [shifts, loaded]);
   useEffect(() => { if (loaded) saveKey(KEY.goals, goals); }, [goals, loaded]);
 
   const addTeamMember = (name) => { if (!team.includes(name)) setTeam([...team, name]); };
@@ -4615,12 +5118,13 @@ export default function App() {
   };
 
   const tabs = [
-    { id: "dashboard", label: "Dashboard", icon: LayoutGrid },
-    { id: "work", label: "Work", icon: Scissors },
-    { id: "orders", label: "Orders", icon: ClipboardList },
-    { id: "inventory", label: "Inventory", icon: Boxes },
-    { id: "contacts", label: "Contacts", icon: Users },
-    { id: "reports", label: "Reports", icon: Timer },
+    { id: "dashboard", label: "Dashboard", short: "Home", icon: LayoutGrid },
+    { id: "work", label: "Work", short: "Work", icon: Scissors },
+    { id: "orders", label: "Orders", short: "Orders", icon: ClipboardList },
+    { id: "inventory", label: "Inventory", short: "Stock", icon: Boxes },
+    { id: "contacts", label: "Contacts", short: "People", icon: Users },
+    { id: "time", label: "Time", short: "Time", icon: Clock },
+    { id: "reports", label: "Reports", short: "Rates", icon: Timer },
   ];
 
   const [ordersSubTab, setOrdersSubTab] = useState("workorders");
@@ -4704,7 +5208,7 @@ export default function App() {
                   <span className="text-xs" style={{ color: C.kraftDark, fontFamily: MONO }}>{historyCounts.undo} / {historyCounts.redo}</span>
                 </div>
                 <div className="text-xs mb-1.5" style={{ color: C.kraftDark, fontFamily: MONO, letterSpacing: "0.08em" }}>WHO'S WORKING</div>
-                <WhoSelect team={team} current={whoWorking} onChange={setWhoWorking} onAddMember={addTeamMember} />
+                <WhoSelect team={team} current={whoWorking} onChange={setWhoWorking} onAddMember={addTeamMember} onDark />
                 <div className="mt-3 pt-3" style={{ borderTop: "1px solid #4a423a" }}>
                   <a
                     href={OFFICE_URL} target="_blank" rel="noopener noreferrer"
@@ -4720,7 +5224,7 @@ export default function App() {
           </div>
         </div>
         {!(tab === "orders" && ordersSubTab === "workorders" && activeWO) && (
-          <nav className="max-w-6xl mx-auto px-4 flex gap-1 overflow-x-auto">
+          <nav className="max-w-6xl mx-auto px-4 gap-1 overflow-x-auto hidden sm:flex">
             {orderedTabs.map((t) => (
               <button
                 key={t.id}
@@ -4746,7 +5250,40 @@ export default function App() {
         )}
       </header>
 
-      <main className="max-w-6xl mx-auto px-4 py-5">
+      {/* Phone navigation: a thumb-reachable bottom bar. The top tab strip
+          is hidden under `sm`, where it would need horizontal scrolling to
+          reach half the app. Tab order still comes from the same
+          user-reorderable list. */}
+      {!(tab === "orders" && ordersSubTab === "workorders" && activeWO) && (
+        <nav
+          className="sm:hidden fixed bottom-0 left-0 right-0 z-40 flex"
+          style={{
+            background: C.ink,
+            borderTop: `1px solid #4a423a`,
+            paddingBottom: "env(safe-area-inset-bottom)",
+          }}
+        >
+          {orderedTabs.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => { setTab(t.id); if (t.id === "orders" && ordersSubTab === "workorders") setActiveWOId(null); }}
+              className="flex flex-col items-center justify-center gap-0.5"
+              style={{
+                flex: "1 1 0", minWidth: 0, padding: "9px 2px 8px",
+                fontFamily: MONO, fontSize: 9, letterSpacing: 0,
+                background: tab === t.id ? "#2a241d" : "transparent",
+                color: tab === t.id ? "#fff" : C.kraftDark,
+                borderTop: `2px solid ${tab === t.id ? C.redwood : "transparent"}`,
+              }}
+            >
+              <t.icon size={19} />
+              {t.short || t.label}
+            </button>
+          ))}
+        </nav>
+      )}
+
+      <main className="max-w-6xl mx-auto px-4 py-5 pb-24 sm:pb-5">
         {tab === "dashboard" && (
           <Dashboard workOrders={workOrders} products={products} sortLog={sortLog} units={units} onOpenWO={(id) => { setActiveWOId(id); setTab("orders"); setOrdersSubTab("workorders"); }} goTab={setTab} goals={goals} onGoalsChange={setGoals} />
         )}
@@ -4831,6 +5368,13 @@ export default function App() {
           </div>
         )}
 
+        {tab === "time" && (
+          <TimeClockTab
+            shifts={shifts} onChange={setShifts} team={team}
+            whoWorking={whoWorking} setWhoWorking={setWhoWorking}
+            onAddTeamMember={addTeamMember} runGrouped={runGrouped}
+          />
+        )}
         {tab === "reports" && (
           <TimeTab sortLog={sortLog} team={team} whoWorking={whoWorking} setWhoWorking={setWhoWorking} onAddTeamMember={addTeamMember} />
         )}
