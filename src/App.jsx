@@ -1251,7 +1251,12 @@ function UnitSwitchInput({ product, value, canonicalUnit, onChange, displayUnit,
 // the per-line Process Steps checklist above tracks the real detail now.
 // This is just open vs. done, with a direct one-click way to push an
 // order through rather than clicking through stages that don't apply.
-const STATUS_FLOW = ["not_started", "shipped"];
+// The stages a job moves through on the floor. Labels and colours for the
+// middle stages have always existed here; the flow itself used to be
+// collapsed to just open/shipped, which made the board useless. Older work
+// orders carrying only "not_started"/"shipped" still land correctly on the
+// first and last columns, so no data migration is needed.
+const STATUS_FLOW = ["not_started", "sorting", "milling", "packed", "shipped"];
 const STATUS_LABEL = {
   not_started: "Open", sorting: "Sorting", milling: "Milling", packed: "Packed", shipped: "Shipped",
 };
@@ -1506,8 +1511,75 @@ function Dashboard({ workOrders, products, sortLog, units, onOpenWO, goTab, goal
   );
 }
 
-function WorkOrderBoard({ workOrders, customers, onOpen, onNew, onImport, onPushThrough }) {
+/* Kanban view of the shop floor: one column per pipeline stage, drag a
+   card between columns to move the job along. Same board the office side
+   sees, so both halves of the business describe a job the same way. */
+function WorkOrderKanban({ workOrders, onOpen, onStatusChange }) {
+  const [draggedId, setDraggedId] = useState(null);
+  const [overCol, setOverCol] = useState(null);
+
+  return (
+    <div className="flex gap-3 overflow-x-auto pb-2">
+      {STATUS_FLOW.map((status) => {
+        const col = workOrders.filter((w) => (w.status || "not_started") === status);
+        const isOver = overCol === status;
+        return (
+          <div
+            key={status}
+            onDragOver={(e) => { e.preventDefault(); setOverCol(status); }}
+            onDragLeave={() => setOverCol((x) => (x === status ? null : x))}
+            onDrop={(e) => {
+              e.preventDefault();
+              if (draggedId) onStatusChange(draggedId, status);
+              setDraggedId(null); setOverCol(null);
+            }}
+            className="rounded-sm shrink-0"
+            style={{
+              width: 240, minHeight: 240,
+              background: isOver ? "#fffaf0" : C.panel,
+              border: `1px solid ${isOver ? STATUS_COLOR[status] : C.kraftDark}`,
+              borderTop: `4px solid ${STATUS_COLOR[status]}`,
+            }}
+          >
+            <div className="px-3 py-2 flex items-center justify-between" style={{ borderBottom: `1px solid ${C.kraft}` }}>
+              <span style={{ fontFamily: MONO, fontSize: 11, letterSpacing: "0.06em", color: C.faint }}>
+                {STATUS_LABEL[status].toUpperCase()}
+              </span>
+              <span style={{ fontFamily: MONO, fontSize: 12, fontWeight: 800 }}>{col.length}</span>
+            </div>
+            <div className="p-2 space-y-2">
+              {col.length === 0 && <div className="text-center py-4 text-xs" style={{ color: C.faint }}>—</div>}
+              {col.map((w) => {
+                const late = w.readyByDate && w.readyByDate < today() && status !== "shipped";
+                return (
+                  <div
+                    key={w.id}
+                    draggable
+                    onDragStart={() => setDraggedId(w.id)}
+                    onDragEnd={() => { setDraggedId(null); setOverCol(null); }}
+                    onClick={() => onOpen(w.id)}
+                    className="rounded-sm px-2.5 py-2"
+                    style={{ background: C.paper, border: `1px solid ${C.kraft}`, cursor: "pointer", opacity: draggedId === w.id ? 0.4 : 1 }}
+                  >
+                    <div style={{ fontFamily: MONO, fontWeight: 700, fontSize: 12 }}>{w.number}</div>
+                    <div className="mt-0.5" style={{ fontSize: 12, color: C.faint }}>{w.customerName || "No customer"}</div>
+                    <div className="mt-1" style={{ fontFamily: MONO, fontSize: 11, color: late ? C.redwood : C.faint }}>
+                      {late ? "\u26a0 " : ""}{w.readyByDate ? `ready ${w.readyByDate}` : `${w.lines?.length || 0} line${(w.lines?.length || 0) === 1 ? "" : "s"}`}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function WorkOrderBoard({ workOrders, customers, onOpen, onNew, onImport, onPushThrough, onStatusChange }) {
   const [filter, setFilter] = useState("active");
+  const [view, setView] = useState("cards");
   const shown = workOrders.filter((w) => (filter === "active" ? w.status !== "shipped" : true));
 
   return (
@@ -1524,9 +1596,24 @@ function WorkOrderBoard({ workOrders, customers, onOpen, onNew, onImport, onPush
             {label}
           </button>
         ))}
+        <div className="flex rounded-sm overflow-hidden ml-auto" style={{ border: `1px solid ${C.kraftDark}` }}>
+          {[["cards", "Cards"], ["board", "Board"]].map(([id, label]) => (
+            <button
+              key={id} onClick={() => setView(id)}
+              className="px-3 py-1.5 text-xs"
+              style={{ fontFamily: MONO, background: view === id ? C.ink : "transparent", color: view === id ? "#fff" : C.faint }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
 
-      {shown.length === 0 ? (
+      {view === "board" && (
+        <WorkOrderKanban workOrders={shown} onOpen={onOpen} onStatusChange={onStatusChange} />
+      )}
+
+      {view === "cards" && (shown.length === 0 ? (
         <div className="rounded-sm p-10 text-center" style={{ background: C.panel, border: `1px dashed ${C.kraftDark}` }}>
           <div style={{ fontWeight: 800, fontSize: 18 }}>No work orders</div>
           <div className="mt-1 mb-4 text-sm" style={{ color: C.faint }}>Create one to get the crew started.</div>
@@ -1562,7 +1649,7 @@ function WorkOrderBoard({ workOrders, customers, onOpen, onNew, onImport, onPush
             </div>
           ))}
         </div>
-      )}
+      ))}
     </div>
   );
 }
@@ -1608,7 +1695,7 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
               value={wo.number} onChange={(e) => update({ number: e.target.value })}
             />
             {customer ? (
-              <button onClick={() => update({ customerId: "" })} className="mt-1 text-left" title="Click to change customer">
+              <button onClick={() => update({ customerId: "" })} className="mt-1 text-left block" title="Click to change customer">
                 <div style={{ fontSize: 16, fontWeight: 700 }}>{customer.company}</div>
               </button>
             ) : (
@@ -1622,6 +1709,22 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
               </select>
             )}
             {customer?.contact ? <div style={{ fontSize: 13, color: C.kraftDark }}>{customer.contact}</div> : null}
+            <div className="mt-2 flex flex-wrap gap-2">
+              <select
+                style={{ ...inputStyle, background: "#2a241d", color: "#fff", borderColor: "#4a423a", maxWidth: 240 }}
+                value={wo.brand || DEFAULT_BRAND} onChange={(e) => update({ brand: e.target.value })}
+                title="Which company this order prints under"
+              >
+                {Object.entries(BRANDS).map(([key, b]) => <option key={key} value={key}>{b.label}</option>)}
+              </select>
+              <select
+                style={{ ...inputStyle, background: "#2a241d", color: "#fff", borderColor: "#4a423a", maxWidth: 160 }}
+                value={wo.status || "not_started"} onChange={(e) => update({ status: e.target.value })}
+                title="Where this job is in the shop"
+              >
+                {STATUS_FLOW.map((st) => <option key={st} value={st}>{STATUS_LABEL[st]}</option>)}
+              </select>
+            </div>
             {wo.quoteId ? (
               <a
                 href={`${OFFICE_URL}/?quote=${wo.quoteId}`} target="_blank" rel="noopener noreferrer"
@@ -1909,17 +2012,23 @@ function ImportInvoiceModal({ customers, onClose, onImported }) {
 
 function CustomersTab({ customers, onChange }) {
   const [openId, setOpenId] = useState(null);
+  const [pinnedId, setPinnedId] = useState(null);
   const [sortBy, setSortBy] = useState("name");
   const update = (id, patch) => onChange(customers.map((c) => (c.id === id ? { ...c, ...patch } : c)));
   const updateSpec = (id, patch) => onChange(customers.map((c) => (c.id === id ? { ...c, spec: { ...c.spec, ...patch } } : c)));
   const remove = (id) => onChange(customers.filter((c) => c.id !== id));
   const add = () => {
     const c = { id: uid(), company: "New customer", contact: "", address: "", city: "", state: "", zip: "", country: "USA", phone: "", email: "", flags: "", favorite: false, spec: { minSize: "", maxSize: "", paintTolerance: "", knotTolerance: "", notes: "" } };
-    onChange([...customers, c]);
+    onChange([c, ...customers]);
     setOpenId(c.id);
+    setPinnedId(c.id);
   };
 
   const shown = customers.slice().sort((a, b) => {
+    // A just-created record floats to the top regardless of sort, so you
+    // never have to hunt for "New customer" alphabetically mid-list.
+    if (a.id === pinnedId) return -1;
+    if (b.id === pinnedId) return 1;
     const favDiff = Number(!!b.favorite) - Number(!!a.favorite);
     if (favDiff !== 0) return favDiff;
     const av = (sortBy === "city" ? a.city : a.company) || "";
@@ -2013,6 +2122,7 @@ function CustomersTab({ customers, onChange }) {
 }
 
 function InventoryTab({ products, onChange }) {
+  const [pinnedId, setPinnedId] = useState(null);
   const [group, setGroup] = useState("all");
   const [sortBy, setSortBy] = useState("name");
   const [openId, setOpenId] = useState(null);
@@ -2020,8 +2130,9 @@ function InventoryTab({ products, onChange }) {
   const remove = (id) => onChange(products.filter((p) => p.id !== id));
   const add = () => {
     const p = { id: uid(), sku: "NEW-SKU", name: "New item", kind: "each", category: "wood", unitLabel: "ea", onHand: 0 };
-    onChange([...products, p]);
+    onChange([p, ...products]);
     setOpenId(p.id);
+    setPinnedId(p.id);
   };
   const [unitPrefs, setUnitPrefs] = useState({});
   const [reorderUnitPrefs, setReorderUnitPrefs] = useState({});
@@ -2057,6 +2168,8 @@ function InventoryTab({ products, onChange }) {
 
   const filtered = products.filter((p) => group === "all" ? true : (p.category || "wood") === group);
   const shown = filtered.slice().sort((a, b) => {
+    if (a.id === pinnedId) return -1;
+    if (b.id === pinnedId) return 1;
     if (sortBy === "sf") return sfEquivalent(b) - sfEquivalent(a);
     return (a.name || a.sku || "").localeCompare(b.name || b.sku || "");
   });
@@ -2457,6 +2570,7 @@ function QRCode({ value, size = 96 }) {
 
 function VendorsTab({ suppliers, onChange }) {
   const [openId, setOpenId] = useState(null);
+  const [pinnedId, setPinnedId] = useState(null);
   const [sortBy, setSortBy] = useState("name");
   const [showHidden, setShowHidden] = useState(false);
   const update = (id, patch) => onChange(suppliers.map((s) => (s.id === id ? { ...s, ...patch } : s)));
@@ -2464,8 +2578,9 @@ function VendorsTab({ suppliers, onChange }) {
   const remove = (id) => onChange(suppliers.filter((s) => s.id !== id));
   const add = () => {
     const v = { id: uid(), name: "New vendor", altName: "", code: "", contact: "", phone: "", email: "", address: "", city: "", hidden: false, favorite: false, accountOwner: "", crews: "", has1099: false, payMethod: "", notes: "", pricing: {}, priceNotes: "" };
-    onChange([...suppliers, v]);
+    onChange([v, ...suppliers]);
     setOpenId(v.id);
+    setPinnedId(v.id);
   };
   const sizePriceFields = ["165", "166", "185", "186"];
 
@@ -2473,6 +2588,8 @@ function VendorsTab({ suppliers, onChange }) {
     .filter((s) => showHidden || !s.hidden)
     .slice()
     .sort((a, b) => {
+      if (a.id === pinnedId) return -1;
+      if (b.id === pinnedId) return 1;
       const favDiff = Number(!!b.favorite) - Number(!!a.favorite);
       if (favDiff !== 0) return favDiff;
       const av = (sortBy === "city" ? a.city : a.name) || "";
@@ -2681,6 +2798,16 @@ function QRScannerModal({ onClose, onDecoded }) {
    load description, and the consignee's address. No freight-charge
    terms, NMFC codes, etc. — those weren't asked for. */
 
+// Two brands the shop sells under — same address, different name and logo
+// on the printed paperwork depending on the customer segment. Mirrors the
+// same table in GNWS Office so a document looks identical from either app.
+const BRANDS = {
+  gnws: { label: "Good News Wood Salvation", name: "Good News Wood Salvation", logo: "/logos/gnws.png" },
+  ethica: { label: "Ethica Wood", name: "Ethica Wood", logo: "/logos/ethica.png" },
+};
+const DEFAULT_BRAND = "gnws";
+function brandFor(key) { return BRANDS[key] || BRANDS[DEFAULT_BRAND]; }
+
 const SHIPPER = {
   name: "Good News Wood Salvation",
   address: "15775 Celestial Valley Road",
@@ -2723,6 +2850,7 @@ function lineConversions(product, qtySF) {
 }
 
 function WorkOrderPrintView({ wo, customer, products, onClose }) {
+  const brand = brandFor(wo.brand);
   return (
     <div className="fixed inset-0 z-50 overflow-auto" style={{ background: "rgba(34,29,25,0.6)" }}>
       <style>{`
@@ -2742,7 +2870,21 @@ function WorkOrderPrintView({ wo, customer, products, onClose }) {
 
         <div id="wo-print-root" style={{ background: "#fff", color: "#000", padding: "0.4in", fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif" }}>
           <div className="flex items-center justify-between" style={{ borderBottom: "3px solid #000", paddingBottom: 10, marginBottom: 16 }}>
-            <div style={{ fontSize: 24, fontWeight: 900 }}>WORK ORDER</div>
+            <div className="flex items-center" style={{ gap: 12 }}>
+              <img
+                src={brand.logo} alt=""
+                style={{ height: 52, width: 52, objectFit: "contain" }}
+                onError={(e) => { e.currentTarget.style.display = "none"; }}
+              />
+              <div>
+                <div style={{ fontSize: 24, fontWeight: 900 }}>WORK ORDER</div>
+                <div style={{ fontSize: 12, marginTop: 4 }}>
+                  <div style={{ fontWeight: 700 }}>{brand.name}</div>
+                  <div>{SHIPPER.address}</div>
+                  <div>{SHIPPER.cityStateZip}</div>
+                </div>
+              </div>
+            </div>
             <div style={{ textAlign: "right", fontSize: 12 }}>
               <div><strong>WO #:</strong> {wo.number}</div>
               <div><strong>Date:</strong> {wo.date}</div>
@@ -3118,7 +3260,10 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, receivingPO, on
   const [notes, setNotes] = useState(sourcePO?.note || "");
   const [lines, setLines] = useState(initialLines);
 
-  const sizeOptions = products.map((p) => p.sku);
+  // De-duped: SKUs are free text and two products can end up sharing one.
+  // A duplicated <option> key breaks React's reconciliation, and a repeated
+  // entry in the picker is just confusing.
+  const sizeOptions = [...new Set(products.filter((p) => !p.archived).map((p) => p.sku))];
 
   const updateLine = (key, patch) => setLines(lines.map((l) => (l.key === key ? { ...l, ...patch } : l)));
   const removeLine = (key) => setLines(lines.length > 1 ? lines.filter((l) => l.key !== key) : lines);
@@ -4421,7 +4566,7 @@ export default function App() {
   const newWorkOrder = () => {
     const w = {
       id: uid(), number: nextNumber(workOrders, "WO"),
-      customerId: "", customerName: "", status: "not_started", date: today(),
+      customerId: "", customerName: "", status: "not_started", brand: DEFAULT_BRAND, date: today(),
       lines: [], readyByDate: "", shipDate: "", shipVia: "", notes: "",
     };
     setWorkOrders([w, ...workOrders]);
@@ -4628,7 +4773,7 @@ export default function App() {
               onUpdateCustomerSpec={(customerId, patch) => setCustomers(customers.map((c) => (c.id === customerId ? { ...c, spec: { ...c.spec, ...patch } } : c)))}
             />
           ) : (
-            <WorkOrderBoard workOrders={workOrders} customers={customers} onOpen={(id) => setActiveWOId(id)} onNew={newWorkOrder} onImport={() => setImportOpen(true)} onPushThrough={pushWOThrough} />
+            <WorkOrderBoard workOrders={workOrders} customers={customers} onOpen={(id) => setActiveWOId(id)} onNew={newWorkOrder} onImport={() => setImportOpen(true)} onPushThrough={pushWOThrough} onStatusChange={(id, status) => setWorkOrders(workOrders.map((w) => (w.id === id ? { ...w, status } : w)))} />
           )
         )}
         {tab === "orders" && ordersSubTab === "purchaseorders" && (
