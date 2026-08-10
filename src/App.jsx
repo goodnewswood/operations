@@ -3299,6 +3299,10 @@ function LabelPrintView({ units, supplierFor, onClose }) {
    "185"), which is how the vendor sheet is organised. */
 const skuSizeKey = (sku) => (/^(\d{3})/.exec(String(sku || "")) || [])[1] || null;
 
+// Wood arrives on pallets that need a scannable label; paint and packing
+// don't. Missing category is treated as wood, matching the rest of the app.
+const producesUnits = (product) => !!product && (product.category || "wood") === "wood";
+
 // Boards per pallet for a SKU, falling back to a same-size sibling
 // (185RAW borrows 185N's 300) so one unfilled field doesn't break the
 // auto-fill for the whole size family.
@@ -3444,7 +3448,14 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, receivingPO, on
       const copies = Math.max(1, Math.floor(Number(l.copies) || 1));
       const matched = matchAnyBySku(l.item);
       if (matched) boardsBySize[matched.id] = (boardsBySize[matched.id] || 0) + qty * copies;
-      if (matched && matched.kind === "board") {
+      // Physical pallet units (and therefore printable labels) are for wood
+      // coming in, which is what `category` says. This used to test
+      // `kind === "board"` — but `kind` describes how quantities are
+      // entered, and anything added through Inventory's "Add item" defaults
+      // to "each". A wood SKU created that way silently produced no unit
+      // and no label while still bumping on-hand, so the PO looked right
+      // and the pallet had nothing to print.
+      if (matched && producesUnits(matched)) {
         for (let i = 0; i < copies; i++) {
           createdUnits.push({
             id: uid(), poId, sizeLabel: l.item, productId: matched?.id || null,
@@ -3607,6 +3618,26 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, receivingPO, on
                         </label>
                       ))}
                     </div>
+                    {(() => {
+                      const mp = matchAnyBySku(l.item);
+                      const qty = Number(l.boardCount) || 0;
+                      if (!l.item.trim() || qty <= 0) return null;
+                      if (!mp) return (
+                        <span className="text-xs flex items-center gap-1" style={{ color: C.warn, fontFamily: MONO }}>
+                          <AlertTriangle size={11} /> "{l.item}" isn't an inventory SKU — cost only, no labels or stock
+                        </span>
+                      );
+                      if (!producesUnits(mp)) return (
+                        <span className="text-xs flex items-center gap-1" style={{ color: C.faint, fontFamily: MONO }}>
+                          {mp.category} item — adds to stock, no pallet labels
+                        </span>
+                      );
+                      return (
+                        <span className="text-xs" style={{ color: C.faint, fontFamily: MONO }}>
+                          {Math.max(1, Math.floor(Number(l.copies) || 1))} label{Math.max(1, Math.floor(Number(l.copies) || 1)) === 1 ? "" : "s"} will print
+                        </span>
+                      );
+                    })()}
                     {supplierId && l.item && vendorPriceFor(supplier, l.item, l.painted) == null && (
                       <span className="text-xs flex items-center gap-1" style={{ color: C.warn, fontFamily: MONO }}>
                         <AlertTriangle size={11} /> no {l.painted ? "painted" : ""} price on file for {supplier?.name} — enter it by hand
