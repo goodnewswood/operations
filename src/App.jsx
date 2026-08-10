@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import jsQR from "jsqr";
 import {
   Plus, Trash2, ChevronLeft, Users, Package, LayoutGrid, Scissors,
-  Boxes, MapPin, AlertTriangle, Check, Clock, CircleDot, User,
+  Boxes, MapPin, AlertTriangle, Check, Clock, CircleDot, User, Copy,
   Ruler, Palette, StickyNote, ClipboardList, Truck, RefreshCw,
   Play, Pause, Square, Timer, CalendarDays, Tag, QrCode, Printer,
   FileText, X, Search, Pencil, Star, Settings, Menu, ExternalLink
@@ -1827,7 +1827,9 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
                   }}
                 >
                   <option value="">Custom / describe below…</option>
-                  {products.map((pr) => <option key={pr.id} value={pr.id}>{pr.sku} — {pr.name}</option>)}
+                  {products.slice().sort(bySkuFavouritesFirst).map((pr) => (
+                    <option key={pr.id} value={pr.id}>{pr.favorite ? "★ " : ""}{pr.sku} — {pr.name}</option>
+                  ))}
                 </select>
                 {!line.productId && (
                   <input style={{ ...inputStyle, marginBottom: 4 }} placeholder="Describe item" value={line.desc || ""} onChange={(e) => updateLine(line.id, { desc: e.target.value })} />
@@ -2162,16 +2164,29 @@ function CustomersTab({ customers, onChange }) {
 
 function InventoryTab({ products, onChange }) {
   const [pinnedId, setPinnedId] = useState(null);
+  const [sortTouched, setSortTouched] = useState(false);
   const [group, setGroup] = useState("all");
   const [sortBy, setSortBy] = useState("name");
   const [openId, setOpenId] = useState(null);
   const update = (id, patch) => onChange(products.map((p) => (p.id === id ? { ...p, ...patch } : p)));
   const remove = (id) => onChange(products.filter((p) => p.id !== id));
   const add = () => {
-    const p = { id: uid(), sku: "NEW-SKU", name: "New item", kind: "each", category: "wood", unitLabel: "ea", onHand: 0 };
+    const p = { id: uid(), sku: "NEW-SKU", name: "New item", kind: "board", category: "wood", unitLabel: "ea", onHand: 0 };
     onChange([p, ...products]);
     setOpenId(p.id);
     setPinnedId(p.id);
+    setSortTouched(false);
+  };
+  // Copies everything except identity and stock — a duplicate is for
+  // "same spec, different size/colour", so carrying on-hand over would be
+  // inventing stock that isn't there.
+  const duplicate = (src) => {
+    const copy = { ...src, id: uid(), sku: `${src.sku}-COPY`, onHand: 0, favorite: false };
+    delete copy.groupId;
+    onChange([copy, ...products]);
+    setOpenId(copy.id);
+    setPinnedId(copy.id);
+    setSortTouched(false);
   };
   const [unitPrefs, setUnitPrefs] = useState({});
   const [reorderUnitPrefs, setReorderUnitPrefs] = useState({});
@@ -2207,9 +2222,16 @@ function InventoryTab({ products, onChange }) {
 
   const filtered = products.filter((p) => group === "all" ? true : (p.category || "wood") === group);
   const shown = filtered.slice().sort((a, b) => {
-    if (a.id === pinnedId) return -1;
-    if (b.id === pinnedId) return 1;
+    // A just-created item floats to the top so it isn't buried — but only
+    // until you pick a sort, otherwise it looks like the list won't sort.
+    if (!sortTouched) {
+      if (a.id === pinnedId) return -1;
+      if (b.id === pinnedId) return 1;
+    }
     if (sortBy === "sf") return sfEquivalent(b) - sfEquivalent(a);
+    if (sortBy === "sku") return bySkuFavouritesFirst(a, b);
+    const fav = Number(!!b.favorite) - Number(!!a.favorite);
+    if (fav !== 0) return fav;
     return (a.name || a.sku || "").localeCompare(b.name || b.sku || "");
   });
 
@@ -2227,9 +2249,9 @@ function InventoryTab({ products, onChange }) {
           </button>
         ))}
         <span className="text-xs" style={{ color: C.faint, fontFamily: MONO, marginLeft: 8 }}>SORT BY</span>
-        {[["name", "Name"], ["sf", "Square Feet"]].map(([id, label]) => (
+        {[["sku", "SKU"], ["name", "Name"], ["sf", "Square Feet"]].map(([id, label]) => (
           <button
-            key={id} onClick={() => setSortBy(id)}
+            key={id} onClick={() => { setSortBy(id); setSortTouched(true); }}
             className="px-3 py-1.5 rounded-sm text-xs"
             style={{ fontFamily: MONO, background: sortBy === id ? C.ink : "transparent", color: sortBy === id ? "#fff" : C.faint, border: `1px solid ${sortBy === id ? C.ink : C.kraftDark}` }}
           >
@@ -2254,6 +2276,13 @@ function InventoryTab({ products, onChange }) {
             return (
               <div key={p.id} style={{ borderBottom: `1px solid ${C.kraft}` }}>
                 <div className="px-4 py-2.5 flex items-center gap-3">
+                  <button
+                    onClick={() => update(p.id, { favorite: !p.favorite })}
+                    title={p.favorite ? "Unfavourite" : "Favourite — keeps it at the top of every picker"}
+                    className="shrink-0" style={{ color: p.favorite ? C.gold : C.kraftDark }}
+                  >
+                    <Star size={16} fill={p.favorite ? C.gold : "none"} />
+                  </button>
                   <button onClick={() => setOpenId(open ? null : p.id)} className="text-left flex-1 min-w-0">
                     <div className="flex items-baseline gap-2 flex-wrap">
                       <span style={{ fontFamily: MONO, fontWeight: 700, fontSize: 14 }}>{p.sku}</span>
@@ -2293,6 +2322,7 @@ function InventoryTab({ products, onChange }) {
                       />
                     </div>
                   )}
+                  <button onClick={() => duplicate(p)} title="Duplicate this item" className="opacity-40 hover:opacity-100 shrink-0"><Copy size={14} /></button>
                   <button onClick={() => remove(p.id)} className="opacity-40 hover:opacity-100 shrink-0"><Trash2 size={14} /></button>
                 </div>
 
@@ -3297,6 +3327,15 @@ function LabelPrintView({ units, supplierFor, onClose }) {
 
    A SKU's size is its leading three digits (185RAW, 185N, 185P are all
    "185"), which is how the vendor sheet is organised. */
+/* The one ordering used by every SKU list and picker in the app:
+   favourites first, then everything else, each block alphabetised by SKU.
+   Numeric-aware so 5 sorts before 48, and 165 before 1650. */
+const bySkuFavouritesFirst = (a, b) => {
+  const fav = Number(!!b.favorite) - Number(!!a.favorite);
+  if (fav !== 0) return fav;
+  return String(a.sku || "").localeCompare(String(b.sku || ""), undefined, { numeric: true, sensitivity: "base" });
+};
+
 const skuSizeKey = (sku) => (/^(\d{3})/.exec(String(sku || "")) || [])[1] || null;
 
 // Wood arrives on pallets that need a scannable label; paint and packing
@@ -3328,10 +3367,9 @@ function vendorPriceFor(supplier, sku, painted) {
 }
 
 function NewPurchaseOrderModal({ suppliers, products, editingPO, receivingPO, onClose, onCreate, onUpdate, onReceive }) {
-  // Default to a real SKU — "185" on its own matches no product, so the
-  // picker rendered blank and neither auto-fill had anything to key off.
-  const defaultItem = () => (products.find((p) => p.sku === "185RAW") || products.find((p) => p.kind === "board") || products[0])?.sku || "";
-  const blankLine = () => ({ key: uid(), item: defaultItem(), other: false, boardCount: "", copies: "1", costPerBoard: "", painted: false });
+  // New lines start empty and make you choose — pre-selecting a SKU meant a
+  // half-filled line could be submitted as whatever happened to be default.
+  const blankLine = () => ({ key: uid(), item: "", other: false, boardCount: "", copies: "1", costPerBoard: "", painted: false });
   const isEditing = !!editingPO;
   const isReceiving = !!receivingPO;
   const sourcePO = editingPO || receivingPO;
@@ -3365,7 +3403,17 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, receivingPO, on
   // De-duped: SKUs are free text and two products can end up sharing one.
   // A duplicated <option> key breaks React's reconciliation, and a repeated
   // entry in the picker is just confusing.
-  const sizeOptions = [...new Set(products.filter((p) => !p.archived).map((p) => p.sku))];
+  // Favourites first, then everything else, each alphabetised — the buyer's
+  // usual sizes sit at the top instead of being hunted for.
+  const sizeOptions = (() => {
+    const seen = new Set();
+    return products
+      .filter((p) => !p.archived)
+      .slice()
+      .sort(bySkuFavouritesFirst)
+      .filter((p) => (seen.has(p.sku) ? false : (seen.add(p.sku), true)))
+      .map((p) => ({ sku: p.sku, favorite: !!p.favorite }));
+  })();
 
   const supplier = suppliers.find((x) => x.id === supplierId);
 
@@ -3563,7 +3611,8 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, receivingPO, on
                         else updateLine(l.key, { other: false, item: e.target.value });
                       }}
                     >
-                      {sizeOptions.map((code) => <option key={code} value={code}>{code}</option>)}
+                      <option value="">— Select SKU —</option>
+                      {sizeOptions.map((o) => <option key={o.sku} value={o.sku}>{o.favorite ? "★ " : ""}{o.sku}</option>)}
                       <option value="__other__">Other (not inventory)…</option>
                     </select>
                     {l.other && (
@@ -3946,7 +3995,7 @@ function SkuPicker({ products, value, onChange, onCreate, placeholder = "— Sel
   const [creating, setCreating] = useState(false);
   const [newSku, setNewSku] = useState("");
 
-  const sorted = products.slice().sort((a, b) => (a.sku || "").localeCompare(b.sku || "", undefined, { numeric: true }));
+  const sorted = products.slice().sort(bySkuFavouritesFirst);
 
   const create = () => {
     const sku = newSku.trim();
@@ -3982,7 +4031,7 @@ function SkuPicker({ products, value, onChange, onCreate, placeholder = "— Sel
       <option value="">{placeholder}</option>
       {sorted.map((p) => (
         <option key={p.id} value={p.id}>
-          {p.sku}{p.name && p.name !== p.sku ? ` — ${p.name}` : ""} ({num(p.onHand)} on hand)
+          {p.favorite ? "★ " : ""}{p.sku}{p.name && p.name !== p.sku ? ` — ${p.name}` : ""} ({num(p.onHand)} on hand)
         </option>
       ))}
       <option value="__new__">+ Create new SKU…</option>
@@ -4167,7 +4216,7 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
             <option value="">— Not tied to a specific unit —</option>
             {availableUnits.map((u) => (
               <option key={u.id} value={u.id}>
-                {u.sizeLabel} · {u.id} · {u.boardsRemaining} boards left
+                {u.sizeLabel} · {purchaseOrders.find((po) => po.id === u.poId)?.number || "no PO"} · {u.boardsRemaining} boards left
               </option>
             ))}
           </select>
