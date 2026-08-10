@@ -5095,6 +5095,57 @@ function TimeTab({ sortLog, team, whoWorking, setWhoWorking, onAddTeamMember }) 
   );
 }
 
+/* ---------------- Concurrent-save merge ----------------
+   Every collection lives in one row as a whole JSON array, and each app
+   holds that array in memory and writes all of it on any edit. With two
+   tabs open (Ops and Office, or a phone and a laptop) that's last-writer-
+   wins: whoever saves second silently erases everything the other one
+   added. It really happens — six SKUs created at different times vanished
+   together in one save.
+
+   So a save is now a three-way merge instead of an overwrite. We keep the
+   version we loaded as a baseline; at save time we re-read the row and
+   reconcile:
+     - records we added or changed  -> ours wins
+     - records only they added      -> kept
+     - records we explicitly deleted -> removed (absent from ours but
+                                       present in the baseline)
+   Anything we never touched is left exactly as they left it. */
+
+function mergeCollections(baseline, ours, theirs) {
+  if (!Array.isArray(ours) || !Array.isArray(theirs)) return ours;
+  const keyed = (arr) => {
+    const m = new Map();
+    for (const r of arr) { if (r && r.id != null) m.set(r.id, r); }
+    return m;
+  };
+  // Anything without a stable id can't be reconciled; fall back to ours.
+  if (ours.some((r) => !r || r.id == null) || theirs.some((r) => !r || r.id == null)) return ours;
+
+  const base = keyed(Array.isArray(baseline) ? baseline : []);
+  const mine = keyed(ours);
+  const yours = keyed(theirs);
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+  const result = [];
+  const taken = new Set();
+  // Walk their order first so records we never saw keep their position.
+  for (const r of theirs) {
+    if (base.has(r.id) && !mine.has(r.id)) continue;        // we deleted it
+    const ourRow = mine.get(r.id);
+    if (!ourRow) { result.push(r); taken.add(r.id); continue; }
+    const baseRow = base.get(r.id);
+    const weChanged = !baseRow || !same(baseRow, ourRow);
+    result.push(weChanged ? ourRow : r);
+    taken.add(r.id);
+  }
+  // Then anything we added that they've never seen.
+  for (const r of ours) {
+    if (!taken.has(r.id) && !yours.has(r.id)) result.push(r);
+  }
+  return result;
+}
+
 export default function App() {
   const [loaded, setLoaded] = useState(false);
   const [tab, setTab] = useState("dashboard");
@@ -5210,6 +5261,9 @@ export default function App() {
   const [jumpToUnitId, setJumpToUnitId] = useState(null);
   const [importOpen, setImportOpen] = useState(false);
   const saveTimers = useRef({});
+  // Baseline per key: what this tab last saw in storage. Used to tell our
+  // own edits apart from another tab's when merging at save time.
+  const baselineRef = useRef({});
 
   useEffect(() => {
     try {
@@ -5226,6 +5280,9 @@ export default function App() {
           const res = await window.storage.get(key, true);
           if (res && res.value) {
             const d = JSON.parse(res.value);
+            // Remember exactly what we loaded — saves diff against this to
+            // tell our edits apart from another session's.
+            baselineRef.current[key] = d;
             if (Array.isArray(d) && d.length) setter(d);
             else if (!Array.isArray(d)) setter(d);
           }
@@ -5248,8 +5305,27 @@ export default function App() {
   const saveKey = (key, value) => {
     if (saveTimers.current[key]) clearTimeout(saveTimers.current[key]);
     saveTimers.current[key] = setTimeout(async () => {
-      try { await window.storage.set(key, JSON.stringify(value), true); }
-      catch (e) { console.error("Save failed for", key, e); }
+      try {
+        let toWrite = value;
+        if (Array.isArray(value)) {
+          let remote = null;
+          try {
+            const res = await window.storage.get(key, true);
+            if (res && res.value) remote = JSON.parse(res.value);
+          } catch (e) { /* nothing stored yet — ours is the first write */ }
+          if (Array.isArray(remote)) {
+            const baseline = baselineRef.current[key];
+            const merged = mergeCollections(baseline, value, remote);
+            // Only bother reporting when the other side actually had something new.
+            if (JSON.stringify(merged) !== JSON.stringify(value)) {
+              console.info("[merge] %s: reconciled with a change from another session", key);
+            }
+            toWrite = merged;
+          }
+        }
+        await window.storage.set(key, JSON.stringify(toWrite), true);
+        baselineRef.current[key] = toWrite;
+      } catch (e) { console.error("Save failed for", key, e); }
     }, 500);
   };
 
