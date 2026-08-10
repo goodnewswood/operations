@@ -1663,10 +1663,21 @@ function WorkOrderBoard({ workOrders, customers, onOpen, onNew, onImport, onPush
   );
 }
 
+// One-line summary of a spec, for collapsed headers and the printed sheet.
+const specSummary = (spec) => {
+  if (!spec) return "";
+  return [
+    spec.minSize && `min ${spec.minSize}`,
+    spec.maxSize && `max ${spec.maxSize}`,
+    spec.paintTolerance,
+    spec.knotTolerance,
+    spec.notes,
+  ].filter(Boolean).join(" · ");
+};
+
 function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, team, whoWorking, setWhoWorking, onAddTeamMember, onUpdateCustomerSpec }) {
   const customer = customers.find((c) => c.id === wo.customerId);
   const update = (patch) => onChange({ ...wo, ...patch });
-  const updateSpec = (patch) => { if (customer) onUpdateCustomerSpec(customer.id, patch); };
   const [bolOpen, setBolOpen] = useState(false);
   const [woPrintOpen, setWoPrintOpen] = useState(false);
   const [palletModalOpen, setPalletModalOpen] = useState(false);
@@ -1674,6 +1685,7 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
 
   const updateLine = (lineId, patch) => update({ lines: wo.lines.map((l) => (l.id === lineId ? { ...l, ...patch } : l)) });
   const removeLine = (lineId) => update({ lines: wo.lines.filter((l) => l.id !== lineId) });
+  const updateLineSpec = (line, patch) => updateLine(line.id, { spec: { ...(line.spec || {}), ...patch } });
   const addLine = () => update({
     lines: [...(wo.lines || []), {
       id: uid(), productId: "", desc: "",
@@ -1687,8 +1699,6 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
   const pushThrough = () => update({ status: "shipped" });
   const reopen = () => update({ status: "not_started" });
 
-  const spec = customer?.spec || {};
-  const hasSpec = spec.minSize || spec.maxSize || spec.paintTolerance || spec.knotTolerance || spec.notes;
 
   return (
     <div className="max-w-3xl mx-auto">
@@ -1788,25 +1798,6 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
         </Field>
       </div>
 
-      {customer && (
-        <div className="rounded-sm p-4 mb-4" style={{ background: "#FBF6EC", border: `2px solid ${C.gold}` }}>
-          <div className="flex items-center gap-2 mb-2">
-            <ClipboardList size={16} style={{ color: C.gold }} />
-            <div style={{ fontWeight: 800, fontSize: 15 }}>Customer Spec — check while sorting/milling</div>
-          </div>
-          <div className="grid gap-2 sm:grid-cols-2">
-            <Field label="Min size"><input style={inputStyle} value={spec.minSize || ""} onChange={(e) => updateSpec({ minSize: e.target.value })} placeholder='e.g. 4" face' /></Field>
-            <Field label="Max size"><input style={inputStyle} value={spec.maxSize || ""} onChange={(e) => updateSpec({ maxSize: e.target.value })} placeholder='e.g. 8" face' /></Field>
-          </div>
-          <Field label="Paint tolerance"><input style={inputStyle} value={spec.paintTolerance || ""} onChange={(e) => updateSpec({ paintTolerance: e.target.value })} placeholder="e.g. one side painted OK" /></Field>
-          <Field label="Knot / defect tolerance"><input style={inputStyle} value={spec.knotTolerance || ""} onChange={(e) => updateSpec({ knotTolerance: e.target.value })} placeholder="e.g. no knots over 1 inch" /></Field>
-          <Field label="Other notes"><textarea style={{ ...inputStyle, minHeight: 60 }} value={spec.notes || ""} onChange={(e) => updateSpec({ notes: e.target.value })} /></Field>
-          <div className="mt-2 text-xs italic" style={{ color: C.faint }}>
-            Editing here updates {customer.company}'s spec everywhere — it's shared, not just for this order. Anything that doesn't meet spec goes to Mill Stock or Waste.
-          </div>
-        </div>
-      )}
-
       <div className="rounded-sm overflow-hidden mb-4" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
         <div className="px-4 py-3 flex items-center justify-between" style={{ borderBottom: `1px solid ${C.kraftDark}` }}>
           <span style={{ fontWeight: 800 }}>What to pull / make</span>
@@ -1851,6 +1842,45 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
                   width={110}
                 />
                 <input className="mt-2" style={inputStyle} placeholder="Note for this line" value={line.note || ""} onChange={(e) => updateLine(line.id, { note: e.target.value })} />
+
+                {/* Spec lives on the line, not the customer. One order can mix
+                    items with completely different requirements, and a
+                    customer-wide spec both hid that and quietly rewrote every
+                    other order for the same customer when edited. */}
+                <div className="mt-2 rounded-sm" style={{ background: "#FBF6EC", border: `1px solid ${C.gold}` }}>
+                  <button
+                    onClick={() => updateLine(line.id, { specOpen: !line.specOpen })}
+                    className="w-full flex items-center justify-between px-3 py-2 text-left"
+                  >
+                    <span className="flex items-center gap-1.5" style={{ fontWeight: 700, fontSize: 12, color: C.gold }}>
+                      <ClipboardList size={13} /> Spec for this item
+                    </span>
+                    <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>
+                      {specSummary(line.spec) || "none set"} {line.specOpen ? "▲" : "▼"}
+                    </span>
+                  </button>
+                  {line.specOpen && (
+                    <div className="px-3 pb-3">
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <Field label="Min size"><input style={inputStyle} value={line.spec?.minSize || ""} onChange={(e) => updateLineSpec(line, { minSize: e.target.value })} placeholder='e.g. 4" face' /></Field>
+                        <Field label="Max size"><input style={inputStyle} value={line.spec?.maxSize || ""} onChange={(e) => updateLineSpec(line, { maxSize: e.target.value })} placeholder='e.g. 8" face' /></Field>
+                      </div>
+                      <Field label="Paint tolerance"><input style={inputStyle} value={line.spec?.paintTolerance || ""} onChange={(e) => updateLineSpec(line, { paintTolerance: e.target.value })} placeholder="e.g. one side painted OK" /></Field>
+                      <Field label="Knot / defect tolerance"><input style={inputStyle} value={line.spec?.knotTolerance || ""} onChange={(e) => updateLineSpec(line, { knotTolerance: e.target.value })} placeholder="e.g. no knots over 1 inch" /></Field>
+                      <Field label="Other spec notes"><textarea style={{ ...inputStyle, minHeight: 50 }} value={line.spec?.notes || ""} onChange={(e) => updateLineSpec(line, { notes: e.target.value })} /></Field>
+                      {customer?.spec && specSummary(customer.spec) && (
+                        <button
+                          onClick={() => updateLine(line.id, { spec: { ...customer.spec } })}
+                          className="mt-2 text-xs underline"
+                          style={{ color: C.faint }}
+                        >
+                          Copy {customer.company}'s saved spec into this item
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+
                 <div className="mt-2 grid grid-cols-3 sm:grid-cols-4 gap-1.5">
                   {PROCESS_STEPS.map((s) => (
                     <label key={s.id} className="flex items-center gap-1.5 text-xs" style={{ color: C.faint }}>
@@ -2835,6 +2865,19 @@ const LBS_PER_SF = 1.5;
 const PRINT_UNIT_ORDER = ["sf", "board", "plank", "box", "pallet", "gal", "qt"];
 const fmtConv = (n) => (Math.round((Number(n) || 0) * 100) / 100).toLocaleString("en-US", { maximumFractionDigits: 2 });
 
+// Spec now lives per line item rather than per customer, so the printed
+// sheet shows it next to the item the crew is actually working on.
+const specLine = (spec) => {
+  if (!spec) return "";
+  return [
+    spec.minSize && `min ${spec.minSize}`,
+    spec.maxSize && `max ${spec.maxSize}`,
+    spec.paintTolerance,
+    spec.knotTolerance,
+    spec.notes,
+  ].filter(Boolean).join(" · ");
+};
+
 function lineConversions(product, qtySF) {
   if (!product) return [{ unit: "sf", qty: Number(qtySF) || 0 }];
   const units = product.category === "paint"
@@ -2936,10 +2979,15 @@ function WorkOrderPrintView({ wo, customer, products, onClose }) {
                   </div>
                 </div>
 
-                {(line.note || p?.otherNotes) && (
+                {(line.note || p?.otherNotes || specLine(line.spec)) && (
                   <div className="mt-1" style={{ fontSize: 11, color: "#333" }}>
                     {line.note && <div><strong>Order note:</strong> {line.note}</div>}
                     {p?.otherNotes && <div><strong>Item note:</strong> {p.otherNotes}</div>}
+                    {specLine(line.spec) && (
+                      <div style={{ marginTop: 2, padding: "3px 6px", border: "1px solid #999", background: "#f4f4f4" }}>
+                        <strong>Spec:</strong> {specLine(line.spec)}
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -3737,6 +3785,64 @@ function WorkTab(props) {
   );
 }
 
+/* ---------------- SKU picker ----------------
+   Every stock picker on the shop floor uses this: it lists ALL products,
+   not a role-filtered subset. The old filters (raw-only inbound,
+   WIP-only outbound) meant the crew physically could not log real work —
+   sorting or milling something that didn't already have a SKU in the
+   right category was simply unselectable. Anything can be consumed and
+   anything can be produced, and if the SKU doesn't exist yet it can be
+   created right here rather than making someone stop and go set up
+   inventory first. -------------------------------------------------- */
+
+function SkuPicker({ products, value, onChange, onCreate, placeholder = "— Select SKU —", newRole = "wip" }) {
+  const [creating, setCreating] = useState(false);
+  const [newSku, setNewSku] = useState("");
+
+  const sorted = products.slice().sort((a, b) => (a.sku || "").localeCompare(b.sku || "", undefined, { numeric: true }));
+
+  const create = () => {
+    const sku = newSku.trim();
+    if (!sku) return;
+    const p = { id: uid(), sku, name: sku, kind: "board", category: "wood", role: newRole, onHand: 0 };
+    onCreate(p);
+    onChange(p.id);
+    setNewSku("");
+    setCreating(false);
+  };
+
+  if (creating) {
+    return (
+      <div className="flex items-center gap-2 flex-wrap" style={{ marginTop: 8 }}>
+        <input
+          autoFocus style={{ ...inputStyle, flex: "1 1 160px" }}
+          placeholder="New SKU name" value={newSku}
+          onChange={(e) => setNewSku(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") create(); if (e.key === "Escape") { setCreating(false); setNewSku(""); } }}
+        />
+        <Btn kind="moss" onClick={create}><Check size={13} /> Create</Btn>
+        <Btn onClick={() => { setCreating(false); setNewSku(""); }}><X size={13} /> Cancel</Btn>
+      </div>
+    );
+  }
+
+  return (
+    <select
+      style={{ ...inputStyle, marginTop: 8 }}
+      value={value || ""}
+      onChange={(e) => (e.target.value === "__new__" ? setCreating(true) : onChange(e.target.value))}
+    >
+      <option value="">{placeholder}</option>
+      {sorted.map((p) => (
+        <option key={p.id} value={p.id}>
+          {p.sku}{p.name && p.name !== p.sku ? ` — ${p.name}` : ""} ({num(p.onHand)} on hand)
+        </option>
+      ))}
+      <option value="__new__">+ Create new SKU…</option>
+    </select>
+  );
+}
+
 function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSort, onDeleteSort, team, whoWorking, setWhoWorking, onAddTeamMember, workOrders, units, onUnitsChange, jumpToUnitId, runGrouped, purchaseOrders }) {
   const millStock = products.find((p) => p.role === "millStock");
   const rawProducts = products.filter((p) => p.kind === "board" && p.role === "raw");
@@ -3760,8 +3866,22 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
   const [scanError, setScanError] = useState("");
 
   const rawProduct = products.find((p) => p.id === rawProductId);
-  const nProduct = products.find((p) => p.groupId === rawProduct?.groupId && p.role === "sortedN");
-  const pProduct = products.find((p) => p.groupId === rawProduct?.groupId && p.role === "sortedP");
+  // Where the sorted boards land. These used to be derived purely from the
+  // inbound SKU's size family, which meant sorting anything without a
+  // pre-wired family silently credited nothing — the counts were logged but
+  // no product's on-hand moved. They're explicit now, defaulted to the
+  // family siblings when those exist so the common case still needs no
+  // extra clicks.
+  const [toNProductId, setToNProductId] = useState("");
+  const [toPProductId, setToPProductId] = useState("");
+  const familyN = products.find((p) => rawProduct?.groupId && p.groupId === rawProduct.groupId && p.role === "sortedN");
+  const familyP = products.find((p) => rawProduct?.groupId && p.groupId === rawProduct.groupId && p.role === "sortedP");
+  const nProduct = products.find((p) => p.id === toNProductId) || familyN;
+  const pProduct = products.find((p) => p.id === toPProductId) || familyP;
+
+  // Picking a different inbound SKU re-defaults the destinations to that
+  // SKU's family; anything hand-picked stays put until then.
+  useEffect(() => { setToNProductId(""); setToPProductId(""); }, [rawProductId]);
 
   useEffect(() => { if (jumpToUnitId) setUnitId(jumpToUnitId); }, [jumpToUnitId]);
 
@@ -3848,13 +3968,14 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
         id: uid(), date: today(), by: whoWorking, batchLabel: autoLabel,
         workOrderId: workOrderId || "", workOrderNumber: wo?.number || "",
         unitId: unitId || "", rawProductId,
+        toNProductId: nProduct?.id || "", toPProductId: pProduct?.id || "",
         rawBoards: rawIn, toN: Number(toN) || 0, toP: Number(toP) || 0, toMill: Number(toMill) || 0, toWaste: Number(toWaste) || 0,
         description,
         seconds: sw.elapsed,
         startedAt: new Date().toISOString(),
       });
     });
-    setWorkOrderId(""); setUnitId(""); setRawProductId(""); setRawBoards(""); setToN(""); setToP(""); setToMill(""); setToWaste(""); setDescription("");
+    setWorkOrderId(""); setUnitId(""); setRawProductId(""); setRawBoards(""); setToN(""); setToP(""); setToMill(""); setToWaste(""); setDescription(""); setToNProductId(""); setToPProductId("");
     sw.reset();
   };
 
@@ -3908,13 +4029,14 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
           <div className="mt-1 text-xs" style={{ color: C.faint, fontFamily: MONO }}>Unit {selectedUnit.id} · received {selectedUnit.receivedDate}</div>
         )}
 
-        <Field label="Which size are you sorting?" required>
-          <select style={{ ...inputStyle, marginTop: 8 }} value={rawProductId} onChange={(e) => setRawProductId(e.target.value)}>
-            <option value="">— Select raw size —</option>
-            {rawProducts.map((p) => <option key={p.id} value={p.id}>{p.sku} (on hand: {num(p.onHand)} bd)</option>)}
-          </select>
+        <Field label="What are you sorting?" required>
+          <SkuPicker
+            products={products} value={rawProductId} onChange={setRawProductId}
+            onCreate={(np) => onProductsChange([...products, np])}
+            placeholder="— Select what's coming in —" newRole="raw"
+          />
         </Field>
-        <div className="text-xs mt-1" style={{ color: C.faint }}>Picking a unit above fills this in automatically — change it here if it's wrong.</div>
+        <div className="text-xs mt-1" style={{ color: C.faint }}>Picking a unit above fills this in automatically — change it here if it's wrong. Any SKU can be sorted; create one on the spot if it doesn't exist yet.</div>
 
         <Field label="Which work order is this for?">
           <select style={{ ...inputStyle, marginTop: 8 }} value={workOrderId} onChange={(e) => setWorkOrderId(e.target.value)}>
@@ -3925,11 +4047,43 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
 
         <Field label="Raw boards brought in" required><input type="number" style={{ ...inputStyle, marginTop: 8 }} value={rawBoards} onChange={(e) => setRawBoards(e.target.value)} /></Field>
 
-        <div className="grid grid-cols-2 gap-3 mt-3">
-          <Field label={`→ ${nProduct?.sku || "?"} boards (no paint)`}><input type="number" style={inputStyle} value={toN} onChange={(e) => setToN(e.target.value)} /></Field>
-          <Field label={`→ ${pProduct?.sku || "?"} boards (one side painted)`}><input type="number" style={inputStyle} value={toP} onChange={(e) => setToP(e.target.value)} /></Field>
-          <Field label="→ Mill Stock boards (slush)"><input type="number" style={inputStyle} value={toMill} onChange={(e) => setToMill(e.target.value)} /></Field>
-          <Field label="→ Waste boards"><input type="number" style={inputStyle} value={toWaste} onChange={(e) => setToWaste(e.target.value)} /></Field>
+        <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${C.kraft}` }}>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 2 }}>What did it sort into?</div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <Field label="Sorted to (no paint)">
+                <SkuPicker
+                  products={products} value={nProduct?.id || ""} onChange={setToNProductId}
+                  onCreate={(np) => onProductsChange([...products, np])}
+                  placeholder="— Select destination —" newRole="sortedN"
+                />
+              </Field>
+              <Field label={`→ ${nProduct?.sku || "boards"}`}>
+                <input type="number" style={{ ...inputStyle, marginTop: 8 }} value={toN} onChange={(e) => setToN(e.target.value)} />
+              </Field>
+            </div>
+            <div>
+              <Field label="Sorted to (one side painted)">
+                <SkuPicker
+                  products={products} value={pProduct?.id || ""} onChange={setToPProductId}
+                  onCreate={(np) => onProductsChange([...products, np])}
+                  placeholder="— Select destination —" newRole="sortedP"
+                />
+              </Field>
+              <Field label={`→ ${pProduct?.sku || "boards"}`}>
+                <input type="number" style={{ ...inputStyle, marginTop: 8 }} value={toP} onChange={(e) => setToP(e.target.value)} />
+              </Field>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3 mt-3">
+            <Field label="→ Mill Stock boards (slush)"><input type="number" style={inputStyle} value={toMill} onChange={(e) => setToMill(e.target.value)} /></Field>
+            <Field label="→ Waste boards"><input type="number" style={inputStyle} value={toWaste} onChange={(e) => setToWaste(e.target.value)} /></Field>
+          </div>
+          {((Number(toN) > 0 && !nProduct) || (Number(toP) > 0 && !pProduct)) && (
+            <div className="mt-2 text-xs flex items-center gap-1" style={{ color: C.warn, fontFamily: MONO }}>
+              <AlertTriangle size={12} /> Pick a destination SKU for those boards, or they won't be added to any inventory.
+            </div>
+          )}
         </div>
 
         {mismatch && (
@@ -4054,17 +4208,11 @@ function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, o
   const [outboundBoards, setOutboundBoards] = useState("");
   const [wasteBoards, setWasteBoards] = useState("");
   const [workOrderId, setWorkOrderId] = useState("");
-  const [creatingNew, setCreatingNew] = useState(false);
-  const [newSku, setNewSku] = useState("");
   const [description, setDescription] = useState("");
   const sw = useStopwatch();
   const [manualEdit, setManualEdit] = useState(false);
   const [manualHMS, setManualHMS] = useState({ h: "0", m: "0", s: "0" });
 
-  const inboundOptions = products.filter((p) => p.kind === "board" && ["raw", "sortedN", "sortedP", "millStock", "wip"].includes(p.role));
-  const outboundOptions = (step === "pack" || step === "ship")
-    ? products.filter((p) => p.category === "wood" || p.role === "wip")
-    : products.filter((p) => p.role === "wip");
 
   const inboundProduct = products.find((p) => p.id === inboundProductId);
   const outboundProduct = products.find((p) => p.id === outboundProductId);
@@ -4073,16 +4221,6 @@ function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, o
     const h = Number(manualHMS.h) || 0, m = Number(manualHMS.m) || 0, s = Number(manualHMS.s) || 0;
     sw.setManual(h * 3600 + m * 60 + s);
     setManualEdit(false);
-  };
-
-  const createWipSku = () => {
-    const sku = newSku.trim();
-    if (!sku) return;
-    const p = { id: uid(), sku, name: sku, kind: "board", category: "wood", role: "wip", onHand: 0 };
-    onProductsChange([...products, p]);
-    setOutboundProductId(p.id);
-    setNewSku("");
-    setCreatingNew(false);
   };
 
   const inBoards = Number(inboundBoards) || 0;
@@ -4131,35 +4269,22 @@ function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, o
 
         <div className="mt-3">
           <Field label="Inbound stock" required>
-            <select style={{ ...inputStyle, marginTop: 8 }} value={inboundProductId} onChange={(e) => setInboundProductId(e.target.value)}>
-              <option value="">— Select inbound stock —</option>
-              {inboundOptions.map((p) => <option key={p.id} value={p.id}>{p.sku} (on hand: {num(p.onHand)} bd)</option>)}
-            </select>
+            <SkuPicker
+              products={products} value={inboundProductId} onChange={setInboundProductId}
+              onCreate={(np) => onProductsChange([...products, np])}
+              placeholder="— Select what's going in —"
+            />
           </Field>
           <Field label="Inbound boards" required><input type="number" style={{ ...inputStyle, marginTop: 8 }} value={inboundBoards} onChange={(e) => setInboundBoards(e.target.value)} /></Field>
         </div>
 
         <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${C.kraft}` }}>
           <Field label="Outbound stock (SKU produced)" required>
-            {!creatingNew ? (
-              <select
-                style={{ ...inputStyle, marginTop: 8 }} value={outboundProductId}
-                onChange={(e) => {
-                  if (e.target.value === "__new__") { setCreatingNew(true); return; }
-                  setOutboundProductId(e.target.value);
-                }}
-              >
-                <option value="">— Select outbound SKU —</option>
-                {outboundOptions.map((p) => <option key={p.id} value={p.id}>{p.sku}{p.name && p.name !== p.sku ? ` — ${p.name}` : ""} (on hand: {num(p.onHand)} bd)</option>)}
-                <option value="__new__">+ Create new SKU…</option>
-              </select>
-            ) : (
-              <div className="mt-2 flex items-center gap-2">
-                <input style={inputStyle} placeholder="New SKU (e.g. 5, 548)" value={newSku} onChange={(e) => setNewSku(e.target.value)} />
-                <Btn kind="moss" onClick={createWipSku}><Check size={13} /> Create</Btn>
-                <Btn onClick={() => { setCreatingNew(false); setNewSku(""); }}><X size={13} /> Cancel</Btn>
-              </div>
-            )}
+            <SkuPicker
+              products={products} value={outboundProductId} onChange={setOutboundProductId}
+              onCreate={(np) => onProductsChange([...products, np])}
+              placeholder="— Select what's coming out —"
+            />
           </Field>
           <div className="grid grid-cols-2 gap-3 mt-2">
             <Field label="Outbound boards" required><input type="number" style={inputStyle} value={outboundBoards} onChange={(e) => setOutboundBoards(e.target.value)} /></Field>
@@ -5012,16 +5137,20 @@ export default function App() {
           // the updated entry's effect using ITS group — these can differ if
           // someone corrects which size was actually sorted. Matching by
           // groupId/role means this still works even if SKUs got renamed.
+          const origN = original.toNProductId;
+          const origP = original.toPProductId;
+          const updN = updated.toNProductId;
+          const updP = updated.toPProductId;
           if (origRaw) {
             if (p.id === origRaw.id) onHand += Number(original.rawBoards) || 0;
-            if (p.groupId === origRaw.groupId && p.role === "sortedN") onHand -= Number(original.toN) || 0;
-            if (p.groupId === origRaw.groupId && p.role === "sortedP") onHand -= Number(original.toP) || 0;
+            if (origN ? p.id === origN : (p.groupId === origRaw.groupId && p.role === "sortedN")) onHand -= Number(original.toN) || 0;
+            if (origP ? p.id === origP : (p.groupId === origRaw.groupId && p.role === "sortedP")) onHand -= Number(original.toP) || 0;
           }
           if (p.role === "millStock") onHand -= Number(original.toMill) || 0;
           if (newRaw) {
             if (p.id === newRaw.id) onHand -= Number(updated.rawBoards) || 0;
-            if (p.groupId === newRaw.groupId && p.role === "sortedN") onHand += Number(updated.toN) || 0;
-            if (p.groupId === newRaw.groupId && p.role === "sortedP") onHand += Number(updated.toP) || 0;
+            if (updN ? p.id === updN : (p.groupId === newRaw.groupId && p.role === "sortedN")) onHand += Number(updated.toN) || 0;
+            if (updP ? p.id === updP : (p.groupId === newRaw.groupId && p.role === "sortedP")) onHand += Number(updated.toP) || 0;
           }
           if (p.role === "millStock") onHand += Number(updated.toMill) || 0;
           return onHand === (Number(p.onHand) || 0) ? p : { ...p, onHand };
@@ -5053,12 +5182,17 @@ export default function App() {
       }
       setProducts((prev) => {
         const raw = resolveRawProduct(entry, prev);
+        // Newer Sort entries record exactly which SKUs the boards went to.
+        // Older ones don't, so fall back to resolving by size family.
+        const nId = entry.toNProductId || prev.find((p) => raw && p.groupId === raw.groupId && p.role === "sortedN")?.id;
+        const pId = entry.toPProductId || prev.find((p) => raw && p.groupId === raw.groupId && p.role === "sortedP")?.id;
         return prev.map((p) => {
-          if (raw && p.id === raw.id) return { ...p, onHand: (Number(p.onHand) || 0) + (Number(entry.rawBoards) || 0) };
-          if (raw && p.groupId === raw.groupId && p.role === "sortedN") return { ...p, onHand: (Number(p.onHand) || 0) - (Number(entry.toN) || 0) };
-          if (raw && p.groupId === raw.groupId && p.role === "sortedP") return { ...p, onHand: (Number(p.onHand) || 0) - (Number(entry.toP) || 0) };
-          if (p.role === "millStock") return { ...p, onHand: (Number(p.onHand) || 0) - (Number(entry.toMill) || 0) };
-          return p;
+          let onHand = Number(p.onHand) || 0;
+          if (raw && p.id === raw.id) onHand += Number(entry.rawBoards) || 0;
+          if (nId && p.id === nId) onHand -= Number(entry.toN) || 0;
+          if (pId && p.id === pId) onHand -= Number(entry.toP) || 0;
+          if (p.role === "millStock") onHand -= Number(entry.toMill) || 0;
+          return onHand === (Number(p.onHand) || 0) ? p : { ...p, onHand };
         });
       });
       setUnits((prev) => prev.map((u) => (u.id === entry.unitId ? { ...u, boardsRemaining: Math.max(0, (Number(u.boardsRemaining) || 0) + (Number(entry.rawBoards) || 0)) } : u)));
