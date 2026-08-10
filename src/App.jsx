@@ -5876,12 +5876,17 @@ export default function App() {
     if (!silent) { setSyncState("synced"); setTimeout(() => setSyncState("idle"), 1200); }
   };
 
-  const writeKey = async (key, value) => {
+  // `base` is the version the value being written was derived from. It must
+  // be passed in rather than read at write time: a save queued before a
+  // sync would otherwise merge against the *post*-sync baseline, and every
+  // row the sync pulled in would look like something we had deleted — and
+  // get dropped. That silently ate five SKUs before it was caught.
+  const writeKey = async (key, value, base) => {
     let toWrite = value;
     if (Array.isArray(value)) {
       const remote = await readKey(key);
       if (Array.isArray(remote)) {
-        const merged = mergeCollections(baselineRef.current[key], value, remote);
+        const merged = mergeCollections(base, value, remote);
         if (JSON.stringify(merged) !== JSON.stringify(value)) {
           console.info("[merge] %s: reconciled with a change from another session", key);
         }
@@ -5900,9 +5905,9 @@ export default function App() {
     setSyncState("saving");
     for (const key of keys) {
       if (saveTimers.current[key]) { clearTimeout(saveTimers.current[key]); delete saveTimers.current[key]; }
-      const value = pendingRef.current[key];
+      const { value, base } = pendingRef.current[key];
       delete pendingRef.current[key];
-      try { await writeKey(key, value); }
+      try { await writeKey(key, value, base); }
       catch (e) { console.error("Save failed for", key, e); }
     }
     setSyncState("synced");
@@ -5925,14 +5930,15 @@ export default function App() {
   }, []);
 
   const saveKey = (key, value) => {
-    pendingRef.current[key] = value;
+    // Capture the baseline now, while it still matches the value.
+    pendingRef.current[key] = { value, base: pendingRef.current[key]?.base ?? baselineRef.current[key] };
     if (saveTimers.current[key]) clearTimeout(saveTimers.current[key]);
     saveTimers.current[key] = setTimeout(async () => {
       delete saveTimers.current[key];
-      const v = pendingRef.current[key];
+      const { value: v, base } = pendingRef.current[key];
       delete pendingRef.current[key];
       setSyncState("saving");
-      try { await writeKey(key, v); }
+      try { await writeKey(key, v, base); }
       catch (e) { console.error("Save failed for", key, e); }
       setSyncState("synced");
       setTimeout(() => setSyncState((x) => (x === "synced" ? "idle" : x)), 1200);
