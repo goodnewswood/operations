@@ -5195,6 +5195,49 @@ function mergeCollections(baseline, ours, theirs) {
   return result;
 }
 
+/* Sync status + manual controls. Lives in the header so it's on every
+   page: a dot for save state, "Save" to push pending edits immediately,
+   and "Sync" to pull the latest. Turns into a prompt when another
+   session has moved ahead and this tab has unsaved work. */
+function SyncBar({ state, remoteAhead, lastSyncedAt, onSave, onSync, compact }) {
+  const label = state === "saving" ? "Saving…" : state === "synced" ? "Saved" : remoteAhead ? "Out of date" : "Up to date";
+  const dot = state === "saving" ? C.gold : remoteAhead ? C.warn : C.moss;
+  const ago = lastSyncedAt ? Math.round((Date.now() - lastSyncedAt) / 1000) : null;
+  return (
+    <div className="flex items-center gap-2">
+      {!compact && (
+        <span
+          className="flex items-center gap-1.5"
+          style={{ fontFamily: MONO, fontSize: 11, color: remoteAhead ? C.warn : "rgba(255,255,255,0.65)" }}
+          title={ago != null ? `Last synced ${ago}s ago` : ""}
+        >
+          <span style={{ width: 7, height: 7, borderRadius: 99, background: dot, display: "inline-block" }} />
+          {label}
+        </span>
+      )}
+      <button
+        onClick={onSave} title="Save now"
+        className="flex items-center gap-1 px-2 py-1 rounded-sm hover:opacity-80"
+        style={{ fontFamily: MONO, fontSize: 11, color: "#fff", border: "1px solid #4a423a" }}
+      >
+        <Check size={12} /> Save
+      </button>
+      <button
+        onClick={onSync} title="Pull the latest data from the other devices"
+        className="flex items-center gap-1 px-2 py-1 rounded-sm hover:opacity-80"
+        style={{
+          fontFamily: MONO, fontSize: 11,
+          color: remoteAhead ? "#fff" : "#fff",
+          background: remoteAhead ? C.warn : "transparent",
+          border: `1px solid ${remoteAhead ? C.warn : "#4a423a"}`,
+        }}
+      >
+        <RefreshCw size={12} /> Sync
+      </button>
+    </div>
+  );
+}
+
 export default function App() {
   const [loaded, setLoaded] = useState(false);
   const [tab, setTab] = useState("dashboard");
@@ -5322,61 +5365,164 @@ export default function App() {
     } catch (e) { /* no-op if URL access is unavailable */ }
   }, []);
 
+  /* ---- Storage sync ------------------------------------------------
+     Collections are pulled and pushed through one table, so a tab that
+     has been sitting open all day shows whatever it loaded that morning.
+     Saving merges (see mergeCollections) so nothing is lost, but the
+     screen can still be out of date, which is its own hazard on a shop
+     floor. So this tab watches for changes from other sessions and says
+     so, and you can pull or push on demand from the header. ---------- */
+
+  // One list drives loading, syncing and saving, so a collection can't be
+  // wired into one and forgotten in another.
+  const COLLECTIONS = [
+    { key: KEY.customers, set: _setCustomers, get: () => customers, arr: true },
+    { key: KEY.products, set: _setProducts, get: () => products, arr: true },
+    { key: KEY.workOrders, set: _setWorkOrders, get: () => workOrders, arr: true },
+    { key: KEY.sortLog, set: _setSortLog, get: () => sortLog, arr: true },
+    { key: KEY.team, set: _setTeam, get: () => team, arr: true },
+    { key: KEY.suppliers, set: _setSuppliers, get: () => suppliers, arr: true },
+    { key: KEY.purchaseOrders, set: _setPurchaseOrders, get: () => purchaseOrders, arr: true },
+    { key: KEY.units, set: _setUnits, get: () => units, arr: true },
+    { key: KEY.timeLog, set: _setShifts, get: () => shifts, arr: true },
+    { key: KEY.goals, set: (d) => setGoals(d && !Array.isArray(d) ? d : { boardsPerHour: 100 }), get: () => goals, arr: false },
+  ];
+  const collectionsRef = useRef(COLLECTIONS);
+  collectionsRef.current = COLLECTIONS;
+
+  const [syncState, setSyncState] = useState("idle"); // idle | saving | synced
+  const [remoteAhead, setRemoteAhead] = useState(false);
+  const [lastSyncedAt, setLastSyncedAt] = useState(null);
+  const pendingRef = useRef({});
+  const loadedRef = useRef(false);
+
+  const readKey = async (key) => {
+    try {
+      const res = await window.storage.get(key, true);
+      return res && res.value ? JSON.parse(res.value) : null;
+    } catch (e) { return null; }
+  };
+
+  // Pull everything down, replacing what's on screen. Safe to call any
+  // time: pending edits are flushed first so nothing in flight is lost.
+  const syncNow = async ({ silent = false } = {}) => {
+    if (!silent) setSyncState("saving");
+    await flushSaves();
+    for (const c of collectionsRef.current) {
+      const d = await readKey(c.key);
+      if (d == null) continue;
+      baselineRef.current[c.key] = d;
+      if (c.arr) { if (Array.isArray(d)) c.set(d); }
+      else c.set(d);
+    }
+    setRemoteAhead(false);
+    setLastSyncedAt(Date.now());
+    if (!silent) { setSyncState("synced"); setTimeout(() => setSyncState("idle"), 1200); }
+  };
+
+  const writeKey = async (key, value) => {
+    let toWrite = value;
+    if (Array.isArray(value)) {
+      const remote = await readKey(key);
+      if (Array.isArray(remote)) {
+        const merged = mergeCollections(baselineRef.current[key], value, remote);
+        if (JSON.stringify(merged) !== JSON.stringify(value)) {
+          console.info("[merge] %s: reconciled with a change from another session", key);
+        }
+        toWrite = merged;
+      }
+    }
+    await window.storage.set(key, JSON.stringify(toWrite), true);
+    baselineRef.current[key] = toWrite;
+    return toWrite;
+  };
+
+  // Write anything still waiting on its debounce, right now.
+  const flushSaves = async () => {
+    const keys = Object.keys(pendingRef.current);
+    if (!keys.length) return;
+    setSyncState("saving");
+    for (const key of keys) {
+      if (saveTimers.current[key]) { clearTimeout(saveTimers.current[key]); delete saveTimers.current[key]; }
+      const value = pendingRef.current[key];
+      delete pendingRef.current[key];
+      try { await writeKey(key, value); }
+      catch (e) { console.error("Save failed for", key, e); }
+    }
+    setSyncState("synced");
+    setTimeout(() => setSyncState((v) => (v === "synced" ? "idle" : v)), 1200);
+  };
+
   useEffect(() => {
     (async () => {
-      const tryLoad = async (key, setter) => {
-        try {
-          const res = await window.storage.get(key, true);
-          if (res && res.value) {
-            const d = JSON.parse(res.value);
-            // Remember exactly what we loaded — saves diff against this to
-            // tell our edits apart from another session's.
-            baselineRef.current[key] = d;
-            if (Array.isArray(d) && d.length) setter(d);
-            else if (!Array.isArray(d)) setter(d);
-          }
-        } catch (e) { /* not found yet — seed stands */ }
-      };
-      await tryLoad(KEY.customers, setCustomers);
-      await tryLoad(KEY.products, setProducts);
-      await tryLoad(KEY.workOrders, (d) => setWorkOrders(Array.isArray(d) ? d : []));
-      await tryLoad(KEY.sortLog, (d) => setSortLog(Array.isArray(d) ? d : []));
-      await tryLoad(KEY.team, setTeam);
-      await tryLoad(KEY.suppliers, (d) => setSuppliers(Array.isArray(d) ? d : []));
-      await tryLoad(KEY.purchaseOrders, (d) => setPurchaseOrders(Array.isArray(d) ? d : []));
-      await tryLoad(KEY.units, (d) => setUnits(Array.isArray(d) ? d : []));
-      await tryLoad(KEY.timeLog, (d) => _setShifts(Array.isArray(d) ? d : []));
-      await tryLoad(KEY.goals, (d) => setGoals(d && !Array.isArray(d) ? d : { boardsPerHour: 100 }));
+      for (const c of collectionsRef.current) {
+        const d = await readKey(c.key);
+        if (d == null) continue;
+        baselineRef.current[c.key] = d;
+        if (c.arr) { if (Array.isArray(d) && d.length) c.set(d); }
+        else c.set(d);
+      }
+      setLastSyncedAt(Date.now());
+      loadedRef.current = true;
       setLoaded(true);
     })();
   }, []);
 
   const saveKey = (key, value) => {
+    pendingRef.current[key] = value;
     if (saveTimers.current[key]) clearTimeout(saveTimers.current[key]);
     saveTimers.current[key] = setTimeout(async () => {
-      try {
-        let toWrite = value;
-        if (Array.isArray(value)) {
-          let remote = null;
-          try {
-            const res = await window.storage.get(key, true);
-            if (res && res.value) remote = JSON.parse(res.value);
-          } catch (e) { /* nothing stored yet — ours is the first write */ }
-          if (Array.isArray(remote)) {
-            const baseline = baselineRef.current[key];
-            const merged = mergeCollections(baseline, value, remote);
-            // Only bother reporting when the other side actually had something new.
-            if (JSON.stringify(merged) !== JSON.stringify(value)) {
-              console.info("[merge] %s: reconciled with a change from another session", key);
-            }
-            toWrite = merged;
-          }
-        }
-        await window.storage.set(key, JSON.stringify(toWrite), true);
-        baselineRef.current[key] = toWrite;
-      } catch (e) { console.error("Save failed for", key, e); }
+      delete saveTimers.current[key];
+      const v = pendingRef.current[key];
+      delete pendingRef.current[key];
+      setSyncState("saving");
+      try { await writeKey(key, v); }
+      catch (e) { console.error("Save failed for", key, e); }
+      setSyncState("synced");
+      setTimeout(() => setSyncState((x) => (x === "synced" ? "idle" : x)), 1200);
     }, 500);
   };
+
+  // Poll for other sessions' writes. If nothing local is pending we just
+  // pull them in; if the user has unsaved edits we flag it and let them
+  // choose, rather than yanking the screen out from under them.
+  useEffect(() => {
+    if (!loaded) return;
+    const id = setInterval(async () => {
+      if (document.hidden) return;
+      const busy = Object.keys(pendingRef.current).length > 0;
+      let ahead = false;
+      for (const c of collectionsRef.current) {
+        const d = await readKey(c.key);
+        if (d == null) continue;
+        if (JSON.stringify(d) !== JSON.stringify(baselineRef.current[c.key])) { ahead = true; break; }
+      }
+      if (!ahead) { setRemoteAhead(false); return; }
+      if (busy) setRemoteAhead(true);
+      else await syncNow({ silent: true });
+    }, 20000);
+    return () => clearInterval(id);
+  }, [loaded]);
+
+  // Don't lose the last few hundred milliseconds of typing on a refresh.
+  // Leaving: push anything still on its debounce so a refresh or an app
+  // switch can't drop the last half-second of typing.
+  // Coming back: pull straight away rather than waiting out the poll —
+  // picking a phone back up after an hour is exactly when the screen is
+  // most likely to be stale.
+  useEffect(() => {
+    const onHide = () => { if (Object.keys(pendingRef.current).length) flushSaves(); };
+    const onVisibility = () => {
+      if (document.hidden) onHide();
+      else if (loadedRef.current) syncNow({ silent: true });
+    };
+    window.addEventListener("beforeunload", onHide);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("beforeunload", onHide);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, []);
 
   useEffect(() => { if (loaded) saveKey(KEY.customers, customers); }, [customers, loaded]);
   useEffect(() => { if (loaded) saveKey(KEY.products, products); }, [products, loaded]);
@@ -5582,6 +5728,10 @@ export default function App() {
             <span style={{ fontWeight: 900, letterSpacing: "0.08em", fontSize: 16 }}>GNWS OPS</span>
           </div>
           <div className="flex items-center gap-2 relative">
+            <SyncBar
+              state={syncState} remoteAhead={remoteAhead} lastSyncedAt={lastSyncedAt}
+              onSave={flushSaves} onSync={() => syncNow()}
+            />
             <button onClick={() => setSettingsOpen(true)} title="Settings" className="p-1.5 rounded-sm hover:opacity-70" style={{ border: "1px solid #4a423a" }}>
               <Settings size={15} />
             </button>
