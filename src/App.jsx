@@ -5,7 +5,8 @@ import {
   Boxes, MapPin, AlertTriangle, Check, Clock, CircleDot, User, Copy,
   Ruler, Palette, StickyNote, ClipboardList, Truck, RefreshCw,
   Play, Pause, Square, Timer, CalendarDays, Tag, QrCode, Printer,
-  FileText, X, Search, Pencil, Star, Settings, Menu, ExternalLink
+  FileText, X, Search, Pencil, Star, Settings, Menu, ExternalLink,
+  Archive, RotateCcw, GripVertical
 } from "lucide-react";
 
 /* ============================================================
@@ -1334,6 +1335,171 @@ const hoursDecimal = (seconds) => (Number(seconds) || 0) / 3600;
    The focused box keeps whatever you literally typed rather than being
    re-derived, otherwise typing "12" pallets would convert after the "1"
    and rewrite the box out from under you. */
+const Badge = ({ children, color }) => (
+  <span className="px-2 py-0.5 rounded-sm text-xs font-bold" style={{ background: color, color: "#fff", fontFamily: MONO }}>{children}</span>
+);
+
+/* ---------------- DataTable: the one list layout every tab uses ----------
+   Every browsable collection in this app (customers, vendors, inventory,
+   quotes, sales orders, work orders, purchase orders) renders through
+   this, so they all sort, search, and archive the same way.
+
+   - Click a column header to sort by it; click again to flip direction.
+   - Drag a row by its grip to hand-order it; dragging always switches the
+     view back to "manual" order (same array-splice mechanic as GNWS Ops's
+     nav-tab reordering).
+   - `pinnedId` floats a just-created row to the very top regardless of
+     sort, so a new record never gets buried alphabetically mid-list.
+   - Archiving is opt-in per tab (`onToggleArchive`): archived rows drop
+     out of the list until "Show archived" is ticked, instead of being
+     deleted outright. -------------------------------------------------- */
+
+function DataTable({
+  items, setItems, columns, onRowClick, keyFor = (x) => x.id,
+  searchable, searchText, pinnedId,
+  isArchived, onToggleArchive, archiveLabel = "archived",
+  emptyText = "Nothing here yet.",
+}) {
+  const [sortBy, setSortBy] = useState("manual");
+  const [sortDir, setSortDir] = useState("asc");
+  const [draggedId, setDraggedId] = useState(null);
+  const [query, setQuery] = useState("");
+  const [showArchived, setShowArchived] = useState(false);
+
+  const archivedCount = isArchived ? items.filter(isArchived).length : 0;
+
+  let working = items;
+  if (isArchived && !showArchived) working = working.filter((x) => !isArchived(x) || keyFor(x) === pinnedId);
+  if (searchable && query.trim()) {
+    const q = query.trim().toLowerCase();
+    working = working.filter((x) => (searchText ? searchText(x) : "").toLowerCase().includes(q));
+  }
+
+  const sortCol = columns.find((c) => c.id === sortBy);
+  let shown = sortCol
+    ? working.slice().sort((a, b) => {
+        const av = sortCol.sortValue(a);
+        const bv = sortCol.sortValue(b);
+        const cmp = typeof av === "number" && typeof bv === "number"
+          ? av - bv
+          : String(av).localeCompare(String(bv), undefined, { numeric: true });
+        return sortDir === "asc" ? cmp : -cmp;
+      })
+    : working;
+
+  if (pinnedId) {
+    const pinned = shown.find((x) => keyFor(x) === pinnedId);
+    if (pinned) shown = [pinned, ...shown.filter((x) => keyFor(x) !== pinnedId)];
+  }
+
+  const reorder = (targetId) => {
+    if (!draggedId || draggedId === targetId || !setItems) return;
+    const dragged = items.find((x) => keyFor(x) === draggedId);
+    const without = items.filter((x) => keyFor(x) !== draggedId);
+    const targetIndex = without.findIndex((x) => keyFor(x) === targetId);
+    without.splice(targetIndex === -1 ? without.length : targetIndex, 0, dragged);
+    setItems(without);
+    setSortBy("manual");
+  };
+
+  const toggleSort = (colId) => {
+    if (sortBy === colId) setSortDir(sortDir === "asc" ? "desc" : "asc");
+    else { setSortBy(colId); setSortDir("asc"); }
+  };
+
+  const showToolbar = searchable || archivedCount > 0;
+
+  return (
+    <div>
+      {showToolbar && (
+        <div className="flex flex-wrap items-center gap-3 mb-2">
+          {searchable && (
+            <div className="relative" style={{ flex: "1 1 240px", maxWidth: 360 }}>
+              <Search size={13} style={{ position: "absolute", left: 9, top: 10, color: C.faint }} />
+              <input
+                style={{ ...inputStyle, paddingLeft: 28, fontSize: 13 }}
+                placeholder="Search…" value={query} onChange={(e) => setQuery(e.target.value)}
+              />
+            </div>
+          )}
+          {archivedCount > 0 && (
+            <label className="flex items-center gap-1.5 text-xs" style={{ color: C.faint, fontFamily: MONO }}>
+              <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
+              Show {archiveLabel} ({archivedCount})
+            </label>
+          )}
+        </div>
+      )}
+
+      <div className="rounded-sm overflow-hidden overflow-x-auto" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
+        <table className="w-full" style={{ borderCollapse: "collapse", fontSize: 13 }}>
+          <thead>
+            <tr style={{ background: C.kraft }}>
+              {setItems && <th style={{ width: 28 }}></th>}
+              {columns.map((c) => (
+                <th
+                  key={c.id} onClick={() => c.sortValue && toggleSort(c.id)}
+                  className="text-left px-3 py-2"
+                  style={{ fontFamily: MONO, fontSize: 11, letterSpacing: "0.05em", color: C.faint, cursor: c.sortValue ? "pointer" : "default", userSelect: "none", whiteSpace: "nowrap" }}
+                >
+                  {c.label}{sortBy === c.id ? (sortDir === "asc" ? " ▲" : " ▼") : ""}
+                </th>
+              ))}
+              {onToggleArchive && <th style={{ width: 34 }}></th>}
+            </tr>
+          </thead>
+          <tbody>
+            {shown.length === 0 && (
+              <tr><td colSpan={columns.length + 2} className="px-4 py-8 text-center text-sm" style={{ color: C.faint }}>
+                {query.trim() ? `No matches for "${query.trim()}".` : emptyText}
+              </td></tr>
+            )}
+            {shown.map((item) => {
+              const id = keyFor(item);
+              const archived = isArchived ? isArchived(item) : false;
+              return (
+                <tr
+                  key={id}
+                  draggable={!!setItems}
+                  onDragStart={() => setDraggedId(id)}
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={(e) => { e.preventDefault(); reorder(id); setDraggedId(null); }}
+                  onDragEnd={() => setDraggedId(null)}
+                  onClick={() => onRowClick(item)}
+                  style={{
+                    borderBottom: `1px solid ${C.kraft}`, cursor: "pointer",
+                    opacity: draggedId === id ? 0.4 : archived ? 0.5 : 1,
+                    background: id === pinnedId ? "#fffaf0" : undefined,
+                  }}
+                >
+                  {setItems && (
+                    <td className="px-2 text-center" style={{ color: C.kraftDark, cursor: "grab" }} onClick={(e) => e.stopPropagation()}>
+                      <GripVertical size={14} />
+                    </td>
+                  )}
+                  {columns.map((c) => (
+                    <td key={c.id} className="px-3 py-2">{c.render(item)}</td>
+                  ))}
+                  {onToggleArchive && (
+                    <td className="px-2 text-center" onClick={(e) => { e.stopPropagation(); onToggleArchive(item); }}>
+                      <button
+                        title={archived ? `Restore from ${archiveLabel}` : `Move to ${archiveLabel}`}
+                        className="opacity-40 hover:opacity-100"
+                      >
+                        {archived ? <RotateCcw size={13} /> : <Archive size={13} />}
+                      </button>
+                    </td>
+                  )}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function MultiUnitQty({ product, value, onChange, disabled }) {
   const [editing, setEditing] = useState(null); // { unit, raw }
   const canonical = canonicalUnitFor(product);
@@ -2247,83 +2413,414 @@ function CustomersTab({ customers, onChange }) {
   );
 }
 
-function InventoryTab({ products, onChange }) {
-  const [pinnedId, setPinnedId] = useState(null);
-  const [sortTouched, setSortTouched] = useState(false);
+/* Which units a SKU can meaningfully be counted in, and the two it shows
+   by default. Categories differ in how the floor actually counts them:
+   rough wood moves in boards and pallets, milled stock in planks and
+   boxes, paint in gallons, packaging in whatever the roll/box is called.
+
+   Only units with a real conversion are offered — otherwise picking
+   "planks" on a SKU with no plank conversion would read 1:1 and imply a
+   relationship that was never configured. */
+const CATEGORY_UNITS = {
+  wood: ["board", "pallet"],
+  milled: ["plank", "box"],
+  paint: ["gal", "qt"],
+  packing: [],
+};
+
+function unitOptionsFor(product) {
+  const canonical = canonicalUnitFor(product);
+  const graph = buildUnitGraph(product);
+  return [canonical, ...Object.keys(graph).filter((u) => u !== canonical)];
+}
+
+function defaultUnitsFor(product) {
+  const opts = unitOptionsFor(product);
+  const wanted = (CATEGORY_UNITS[product.category || "wood"] || []).filter((u) => opts.includes(u));
+  const rest = opts.filter((u) => !wanted.includes(u));
+  return [...wanted, ...rest].slice(0, 2);
+}
+
+/* Two editable quantity boxes on one row, each with its own unit picker.
+   Type into either and the stored on-hand updates; the other box follows.
+   The chosen units are saved on the product, so a SKU keeps whichever
+   pair makes sense for it. */
+function TwoUnitCell({ product, value, onChange, onUnitsChange }) {
+  const [editing, setEditing] = useState(null);
+  const canonical = canonicalUnitFor(product);
+  const opts = unitOptionsFor(product);
+  const saved = (product.displayUnits || []).filter((u) => opts.includes(u));
+  const [u1, u2] = saved.length ? [saved[0], saved[1]] : defaultUnitsFor(product);
+
+  const show = (u) => {
+    if (!u) return "";
+    if (editing && editing.unit === u) return editing.raw;
+    const q = convertQty(product, value, canonical, u);
+    if (!Number.isFinite(q)) return "";
+    const dp = u === "board" || u === "plank" ? 0 : 2;
+    return String(Math.round(q * 10 ** dp) / 10 ** dp);
+  };
+
+  const box = (u, slot) => {
+    if (!u) return null;
+    return (
+      <span key={slot} className="flex items-center gap-1">
+        <input
+          type="number"
+          style={{ ...inputStyle, width: 66, padding: "3px 5px", fontSize: 13, textAlign: "right", fontFamily: MONO, fontWeight: 700 }}
+          value={show(u)}
+          onClick={(e) => e.stopPropagation()}
+          onFocus={() => setEditing({ unit: u, raw: show(u) })}
+          onBlur={() => setEditing(null)}
+          onChange={(e) => {
+            setEditing({ unit: u, raw: e.target.value });
+            const asCanonical = convertQty(product, e.target.value, u, canonical);
+            onChange(Number.isFinite(asCanonical) ? asCanonical : 0);
+          }}
+        />
+        <select
+          style={{ ...inputStyle, width: 72, padding: "3px 2px", fontSize: 11 }}
+          value={u}
+          onClick={(e) => e.stopPropagation()}
+          onChange={(e) => {
+            const next = slot === 0 ? [e.target.value, u2] : [u1, e.target.value];
+            onUnitsChange(next.filter(Boolean));
+          }}
+        >
+          {opts.map((o) => <option key={o} value={o}>{unitLabel(o)}</option>)}
+        </select>
+      </span>
+    );
+  };
+
+  // Deliberately no wrapping: letting these stack doubles every row height
+  // and turns a 45-SKU list into a scroll marathon.
+  return <span className="flex items-center gap-1.5" style={{ whiteSpace: "nowrap" }}>{[box(u1, 0), box(u2, 1)]}</span>;
+}
+
+/* ---------------- Inventory ----------------
+   Same list-and-detail shape as GNWS Office: a sortable, searchable table
+   with archive, and a full-page editor behind each row. The old accordion
+   made you scroll a 45-row list to find anything and expanded editors
+   inline, which pushed everything else off screen. */
+
+function InventoryDetail({ product, products, onChange, onBack, onDelete, onDuplicate }) {
+  const p = product;
+  const category = p.category || "wood";
+  const canonicalUnit = canonicalUnitFor(p);
+  const [reorderUnit, setReorderUnit] = useState(canonicalUnit);
+  const update = (patch) => onChange({ ...p, ...patch });
+
+  const updateConversion = (key, patch) =>
+    update({ conversions: (p.conversions || []).map((c) => (c.key === key ? { ...c, ...patch } : c)) });
+  const addConversion = () =>
+    update({ conversions: [...(p.conversions || []), { key: uid(), qtyA: "", unitA: "board", qtyB: "", unitB: "" }] });
+  const removeConversion = (key) =>
+    update({ conversions: (p.conversions || []).filter((c) => c.key !== key) });
+  const updateDims = (patch) => {
+    const merged = { ...p, ...patch };
+    const w = Number(merged.widthIn) || 0;
+    const l = Number(merged.lengthIn) || 0;
+    const extra = w > 0 && l > 0 ? { sfPerBoard: Math.round(((w * l) / 144) * 1000) / 1000 } : {};
+    update({ ...patch, ...extra });
+  };
+
+  return (
+    <div className="max-w-3xl mx-auto">
+      <div className="flex items-center justify-between mb-4">
+        <Btn onClick={onBack}><ChevronLeft size={14} /> All inventory</Btn>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => update({ favorite: !p.favorite })}
+            title={p.favorite ? "Unfavourite" : "Favourite — keeps it at the top of every picker"}
+            style={{ color: p.favorite ? C.gold : C.kraftDark }}
+          >
+            <Star size={18} fill={p.favorite ? C.gold : "none"} />
+          </button>
+          {p.archived && <Badge color={C.faint}>Archived</Badge>}
+        </div>
+      </div>
+
+      <div className="rounded-sm p-5 mb-4" style={{ background: C.ink, color: "#fff" }}>
+        <div className="grid gap-2 sm:grid-cols-2">
+          <Field label="SKU">
+            <input
+              style={{ ...inputStyle, background: "#2a241d", color: "#fff", borderColor: "#4a423a", fontFamily: MONO, fontWeight: 800 }}
+              value={p.sku} onChange={(e) => update({ sku: e.target.value })}
+            />
+          </Field>
+          <Field label="Name">
+            <input
+              style={{ ...inputStyle, background: "#2a241d", color: "#fff", borderColor: "#4a423a" }}
+              value={p.name} onChange={(e) => update({ name: e.target.value })}
+            />
+          </Field>
+        </div>
+      </div>
+
+      <div className="rounded-sm p-4 mb-4 space-y-2" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
+        <Field label="Category">
+          <select style={inputStyle} value={category} onChange={(e) => update({ category: e.target.value })}>
+            <option value="wood">Wood (boards, pallets)</option>
+            <option value="milled">Milled wood (planks, boxes)</option>
+            <option value="paint">Paint</option>
+            <option value="packing">Packaging</option>
+          </select>
+        </Field>
+
+        {category === "packing" ? (
+          <Field label="On hand">
+            <div className="flex items-center gap-1">
+              <input type="number" style={{ ...inputStyle, textAlign: "right", fontFamily: MONO }} value={p.onHand ?? ""} onChange={(e) => update({ onHand: e.target.value })} />
+              <input style={{ ...inputStyle, width: 70, fontSize: 12 }} value={p.unitLabel || ""} placeholder="ea" onChange={(e) => update({ unitLabel: e.target.value })} />
+            </div>
+          </Field>
+        ) : (
+          <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
+            <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, color: C.gold }}>On hand</div>
+            <MultiUnitQty product={p} value={p.onHand} onChange={(v) => update({ onHand: v })} />
+            <div className="text-xs mt-1" style={{ color: C.faint }}>
+              Type into whichever unit you counted in — the others follow.
+            </div>
+          </div>
+        )}
+
+        {(category === "wood" || category === "milled") && (
+          <>
+            <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
+              <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, color: C.gold }}>Dimensions</div>
+              <div className="grid grid-cols-3 gap-2">
+                <Field label="Thickness (in)"><input type="number" style={inputStyle} value={p.thickness ?? ""} placeholder="—" onChange={(e) => update({ thickness: e.target.value })} /></Field>
+                <Field label="Width (in)"><input type="number" style={inputStyle} value={p.widthIn ?? ""} placeholder="—" onChange={(e) => updateDims({ widthIn: e.target.value })} /></Field>
+                <Field label="Length (in)"><input type="number" style={inputStyle} value={p.lengthIn ?? ""} placeholder="—" onChange={(e) => updateDims({ lengthIn: e.target.value })} /></Field>
+              </div>
+            </div>
+
+            <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
+              <div className="grid grid-cols-2 gap-2">
+                <Field label="SF per board"><input type="number" style={inputStyle} value={p.sfPerBoard ?? ""} placeholder="—" onChange={(e) => update({ sfPerBoard: e.target.value })} /></Field>
+                <Field label="Boards per pallet"><input type="number" style={inputStyle} value={p.boardsPerUnit ?? ""} placeholder="—" onChange={(e) => update({ boardsPerUnit: e.target.value })} /></Field>
+                {/* Milled stock is counted in planks and boxes, so those two
+                    conversions get their own fields rather than having to be
+                    hand-built in the conversions list below. */}
+                <Field label="Planks per board"><input type="number" style={inputStyle} value={p.planksPerBoard ?? ""} placeholder="—" onChange={(e) => update({ planksPerBoard: e.target.value })} /></Field>
+                <Field label="Boards per box"><input type="number" style={inputStyle} value={p.boardsPerBox ?? ""} placeholder="—" onChange={(e) => update({ boardsPerBox: e.target.value })} /></Field>
+              </div>
+            </div>
+
+            <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
+              <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, color: C.gold }}>Packing &amp; Conversions</div>
+              <div className="text-xs mb-2" style={{ color: C.faint }}>"[Qty] [Unit] per [Qty] [Unit]" — e.g. 40 boards per 1 Box. Pick from units this SKU already has, or type a brand new one.</div>
+              <datalist id={`units-${p.id}`}>
+                {unitsFor(p).map((u) => <option key={u} value={u} />)}
+              </datalist>
+              <div className="space-y-2">
+                {(p.conversions || []).map((c) => (
+                  <div key={c.key} className="flex items-end gap-2 flex-wrap">
+                    <Field label="Qty" w={70}><input type="number" style={inputStyle} value={c.qtyA ?? ""} onChange={(e) => updateConversion(c.key, { qtyA: e.target.value })} /></Field>
+                    <Field label="Unit" w={110}><input list={`units-${p.id}`} style={inputStyle} value={c.unitA ?? ""} placeholder="board" onChange={(e) => updateConversion(c.key, { unitA: e.target.value })} /></Field>
+                    <span className="text-xs pb-2" style={{ color: C.faint, fontFamily: MONO }}>PER</span>
+                    <Field label="Qty" w={70}><input type="number" style={inputStyle} value={c.qtyB ?? ""} onChange={(e) => updateConversion(c.key, { qtyB: e.target.value })} /></Field>
+                    <Field label="Unit" w={110}><input list={`units-${p.id}`} style={inputStyle} value={c.unitB ?? ""} placeholder="e.g. Box, Skid" onChange={(e) => updateConversion(c.key, { unitB: e.target.value })} /></Field>
+                    <button onClick={() => removeConversion(c.key)} className="opacity-40 hover:opacity-100 mb-2"><Trash2 size={16} /></button>
+                  </div>
+                ))}
+              </div>
+              <Btn onClick={addConversion}><Plus size={14} /> Add Conversion</Btn>
+            </div>
+
+            <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
+              <Field label="Painted with">
+                <select
+                  style={{ ...inputStyle, marginTop: 8 }}
+                  value={p.paintProductId || ""}
+                  onChange={(e) => update({ paintProductId: e.target.value })}
+                >
+                  <option value="">— Not painted (natural / brushed) —</option>
+                  {products.filter((x) => x.category === "paint").map((x) => (
+                    <option key={x.id} value={x.id}>{x.sku} — {x.name}</option>
+                  ))}
+                </select>
+              </Field>
+              <div className="text-xs mt-1" style={{ color: C.faint }}>
+                Ties this SKU to the colour it's finished in, so the crew doesn't have to remember which
+                Graphene Stone goes with which product. It prints on the work order.
+              </div>
+            </div>
+          </>
+        )}
+
+        {category === "paint" && (
+          <Field label="SF per gallon"><input type="number" style={inputStyle} value={p.sfPerGallon ?? ""} placeholder="250" onChange={(e) => update({ sfPerGallon: e.target.value })} /></Field>
+        )}
+
+        <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
+          <Field label="Reorder at">
+            <UnitSwitchInput
+              product={p} value={p.reorderPoint || 0} canonicalUnit={canonicalUnit}
+              onChange={(v) => update({ reorderPoint: v })}
+              displayUnit={reorderUnit} onDisplayUnitChange={setReorderUnit}
+              width={110}
+            />
+          </Field>
+          <div className="text-xs mt-1" style={{ color: C.faint }}>Flag this item when on-hand drops to or below this amount — pick whichever unit makes sense (boards, SF, pallets, gallons…).</div>
+        </div>
+
+        <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, color: C.gold }}>Process Steps (defaults for this SKU)</div>
+          <div className="text-xs mb-2" style={{ color: C.faint }}>Check whatever this product normally goes through — new work order lines for this SKU start with these checked, editable per order.</div>
+          <div className="grid grid-cols-3 sm:grid-cols-4 gap-1.5">
+            {PROCESS_STEPS.map((st) => (
+              <label key={st.id} className="flex items-center gap-1.5 text-xs">
+                <input
+                  type="checkbox" checked={!!(p.steps && p.steps[st.id])}
+                  onChange={(e) => update({ steps: { ...(p.steps || defaultSteps()), [st.id]: e.target.checked } })}
+                />
+                {st.label}
+              </label>
+            ))}
+          </div>
+        </div>
+
+        <Field label="Other notes (bundle sizes, odd conversions, anything else worth remembering)">
+          <textarea style={{ ...inputStyle, minHeight: 50 }} value={p.otherNotes || ""} onChange={(e) => update({ otherNotes: e.target.value })} />
+        </Field>
+      </div>
+
+      <div className="flex gap-2 mb-8 flex-wrap">
+        <Btn onClick={onDuplicate}><Copy size={13} /> Duplicate</Btn>
+        <Btn onClick={() => update({ archived: !p.archived })}>
+          {p.archived ? <><RotateCcw size={13} /> Restore</> : <><Archive size={13} /> Archive</>}
+        </Btn>
+        <Btn onClick={onDelete}><Trash2 size={13} /> Delete permanently</Btn>
+      </div>
+    </div>
+  );
+}
+
+function InventoryTab({ products, onChange, activeId, setActiveId }) {
   const [group, setGroup] = useState("all");
-  const [sortBy, setSortBy] = useState("name");
-  const [openId, setOpenId] = useState(null);
-  const update = (id, patch) => onChange(products.map((p) => (p.id === id ? { ...p, ...patch } : p)));
-  const remove = (id) => onChange(products.filter((p) => p.id !== id));
+  const [pinnedId, setPinnedId] = useState(null);
+  const active = products.find((p) => p.id === activeId) || null;
+
+  const updateOne = (p) => onChange(products.map((x) => (x.id === p.id ? p : x)));
+  const remove = (id) => { onChange(products.filter((p) => p.id !== id)); setActiveId(null); };
   const add = () => {
     const p = { id: uid(), sku: "NEW-SKU", name: "New item", kind: "board", category: "wood", unitLabel: "ea", onHand: 0 };
     onChange([p, ...products]);
-    setOpenId(p.id);
     setPinnedId(p.id);
-    setSortTouched(false);
+    setActiveId(p.id);
   };
-  // Copies everything except identity and stock — a duplicate is for
-  // "same spec, different size/colour", so carrying on-hand over would be
-  // inventing stock that isn't there.
+  // Same spec, different size or colour — identity and stock deliberately
+  // not carried over, since copying on-hand would invent stock.
   const duplicate = (src) => {
     const copy = { ...src, id: uid(), sku: `${src.sku}-COPY`, onHand: 0, favorite: false };
     delete copy.groupId;
     onChange([copy, ...products]);
-    setOpenId(copy.id);
     setPinnedId(copy.id);
-    setSortTouched(false);
+    setActiveId(copy.id);
   };
-  const [unitPrefs, setUnitPrefs] = useState({});
-  const [reorderUnitPrefs, setReorderUnitPrefs] = useState({});
 
-  const updateConversion = (pid, key, patch) => {
-    const prod = products.find((p) => p.id === pid);
-    const convs = (prod?.conversions || []).map((c) => (c.key === key ? { ...c, ...patch } : c));
-    update(pid, { conversions: convs });
-  };
-  const addConversion = (pid) => {
-    const prod = products.find((p) => p.id === pid);
-    update(pid, { conversions: [...(prod?.conversions || []), { key: uid(), qtyA: "", unitA: "board", qtyB: "", unitB: "" }] });
-  };
-  const removeConversion = (pid, key) => {
-    const prod = products.find((p) => p.id === pid);
-    update(pid, { conversions: (prod?.conversions || []).filter((c) => c.key !== key) });
-  };
-  // Width × Length ÷ 144 = SF per board — one-directional: editing
-  // dimensions recalculates SF/board, but editing SF/board directly
-  // never touches the dimensions back.
-  const updateDims = (pid, patch) => {
-    const prod = products.find((p) => p.id === pid);
-    const merged = { ...prod, ...patch };
-    const w = Number(merged.widthIn) || 0;
-    const l = Number(merged.lengthIn) || 0;
-    const extra = w > 0 && l > 0 ? { sfPerBoard: Math.round(((w * l) / 144) * 1000) / 1000 } : {};
-    update(pid, { ...patch, ...extra });
-  };
+  if (active) {
+    return (
+      <InventoryDetail
+        product={active} products={products} onChange={updateOne}
+        onBack={() => setActiveId(null)}
+        onDelete={() => remove(active.id)}
+        onDuplicate={() => duplicate(active)}
+      />
+    );
+  }
 
   const sfEquivalent = (p) => (p.category === "packing" ? 0 : convertQty(p, p.onHand, canonicalUnitFor(p), "sf"));
   const needsReorder = (p) => Number(p.reorderPoint) > 0 && (Number(p.onHand) || 0) <= Number(p.reorderPoint);
+  const filtered = products
+    .filter((p) => (group === "all" ? true : (p.category || "wood") === group))
+    .slice()
+    .sort(bySkuFavouritesFirst);
 
-  const filtered = products.filter((p) => group === "all" ? true : (p.category || "wood") === group);
-  const shown = filtered.slice().sort((a, b) => {
-    // A just-created item floats to the top so it isn't buried — but only
-    // until you pick a sort, otherwise it looks like the list won't sort.
-    if (!sortTouched) {
-      if (a.id === pinnedId) return -1;
-      if (b.id === pinnedId) return 1;
-    }
-    if (sortBy === "sf") return sfEquivalent(b) - sfEquivalent(a);
-    if (sortBy === "sku") return bySkuFavouritesFirst(a, b);
-    const fav = Number(!!b.favorite) - Number(!!a.favorite);
-    if (fav !== 0) return fav;
-    return (a.name || a.sku || "").localeCompare(b.name || b.sku || "");
-  });
+  const columns = [
+    {
+      id: "sku", label: "SKU",
+      render: (p) => (
+        <span className="flex items-center gap-1.5">
+          <button
+            onClick={(e) => { e.stopPropagation(); updateOne({ ...p, favorite: !p.favorite }); }}
+            title={p.favorite ? "Unfavourite" : "Favourite — keeps it at the top of every picker"}
+            style={{ color: p.favorite ? C.gold : C.kraftDark }}
+          >
+            <Star size={13} fill={p.favorite ? C.gold : "none"} />
+          </button>
+          <span style={{ fontFamily: MONO, fontWeight: 700 }}>{p.sku}</span>
+        </span>
+      ),
+      sortValue: (p) => `${p.favorite ? "0" : "1"}${p.sku || ""}`,
+    },
+    { id: "name", label: "Name", render: (p) => p.name || "—", sortValue: (p) => p.name || "" },
+    {
+      id: "category", label: "Category",
+      render: (p) => <span className="text-xs px-1.5 rounded-sm" style={{ background: C.kraft, color: C.faint, fontFamily: MONO }}>{p.category || "wood"}</span>,
+      sortValue: (p) => p.category || "wood",
+    },
+    {
+      // Editable straight from the list — two boxes, each with its own unit,
+      // so you can count in whatever the pallet is actually stacked in.
+      id: "onHand", label: "On hand",
+      render: (p) => (p.category === "packing" ? (
+        <span className="flex items-center gap-1">
+          <input
+            type="number"
+            style={{ ...inputStyle, width: 78, padding: "4px 6px", textAlign: "right", fontFamily: MONO, fontWeight: 700 }}
+            value={p.onHand ?? ""}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => updateOne({ ...p, onHand: e.target.value })}
+          />
+          <input
+            style={{ ...inputStyle, width: 62, padding: "4px 6px", fontSize: 11 }}
+            value={p.unitLabel || ""} placeholder="rolls"
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => updateOne({ ...p, unitLabel: e.target.value })}
+          />
+        </span>
+      ) : (
+        <TwoUnitCell
+          product={p} value={p.onHand}
+          onChange={(v) => updateOne({ ...p, onHand: v })}
+          onUnitsChange={(u) => updateOne({ ...p, displayUnits: u })}
+        />
+      )),
+      sortValue: (p) => Number(p.onHand) || 0,
+    },
+    {
+      id: "sf", label: "≈ SF",
+      render: (p) => (p.category === "packing" ? "—" : <span style={{ fontFamily: MONO, fontSize: 12, color: C.faint }}>{num(sfEquivalent(p), 0)}</span>),
+      sortValue: (p) => sfEquivalent(p),
+    },
+    {
+      id: "flag", label: "",
+      render: (p) => (needsReorder(p) ? (
+        <span className="text-xs flex items-center gap-1" style={{ color: C.redwood, fontFamily: MONO }}><AlertTriangle size={11} /> reorder</span>
+      ) : null),
+      sortValue: (p) => (needsReorder(p) ? 0 : 1),
+    },
+    {
+      id: "dup", label: "",
+      render: (p) => (
+        <button onClick={(e) => { e.stopPropagation(); duplicate(p); }} title="Duplicate this item" className="opacity-40 hover:opacity-100">
+          <Copy size={13} />
+        </button>
+      ),
+    },
+  ];
 
   return (
-    <div>
+    <div className="max-w-5xl mx-auto">
+      <div className="flex items-center justify-between mb-3">
+        <div style={{ fontWeight: 800, fontSize: 18 }}>Inventory</div>
+        <Btn kind="primary" onClick={add}><Plus size={14} /> New item</Btn>
+      </div>
       <div className="flex flex-wrap items-center gap-2 mb-3">
-        <Btn kind="primary" onClick={add}><Plus size={14} /> Add item</Btn>
-        {[["all", "All"], ["wood", "Wood"], ["paint", "Paint"], ["packing", "Packing"]].map(([id, label]) => (
+        {[["all", "All"], ["wood", "Wood"], ["milled", "Milled"], ["paint", "Paint"], ["packing", "Packaging"]].map(([id, label]) => (
           <button
             key={id} onClick={() => setGroup(id)}
             className="px-3 py-1.5 rounded-sm text-xs"
@@ -2332,217 +2829,19 @@ function InventoryTab({ products, onChange }) {
             {label}
           </button>
         ))}
-        <span className="text-xs" style={{ color: C.faint, fontFamily: MONO, marginLeft: 8 }}>SORT BY</span>
-        {[["sku", "SKU"], ["name", "Name"], ["sf", "Square Feet"]].map(([id, label]) => (
-          <button
-            key={id} onClick={() => { setSortBy(id); setSortTouched(true); }}
-            className="px-3 py-1.5 rounded-sm text-xs"
-            style={{ fontFamily: MONO, background: sortBy === id ? C.ink : "transparent", color: sortBy === id ? "#fff" : C.faint, border: `1px solid ${sortBy === id ? C.ink : C.kraftDark}` }}
-          >
-            {label}
-          </button>
-        ))}
       </div>
-
-      <div className="rounded-sm overflow-hidden" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
-        {shown.length === 0 ? (
-          <div className="px-4 py-8 text-center text-sm" style={{ color: C.faint }}>No items to show.</div>
-        ) : (
-          shown.map((p) => {
-            const category = p.category || "wood";
-            const canonicalUnit = canonicalUnitFor(p);
-            const displayUnit = unitPrefs[p.id] || canonicalUnit;
-            const sfEq = sfEquivalent(p);
-            const open = openId === p.id;
-            const reorderDisplayUnit = reorderUnitPrefs[p.id] || canonicalUnit;
-            const flagged = needsReorder(p);
-
-            return (
-              <div key={p.id} style={{ borderBottom: `1px solid ${C.kraft}` }}>
-                <div className="px-4 py-2.5 flex items-center gap-3">
-                  <button
-                    onClick={() => update(p.id, { favorite: !p.favorite })}
-                    title={p.favorite ? "Unfavourite" : "Favourite — keeps it at the top of every picker"}
-                    className="shrink-0" style={{ color: p.favorite ? C.gold : C.kraftDark }}
-                  >
-                    <Star size={16} fill={p.favorite ? C.gold : "none"} />
-                  </button>
-                  <button onClick={() => setOpenId(open ? null : p.id)} className="text-left flex-1 min-w-0">
-                    <div className="flex items-baseline gap-2 flex-wrap">
-                      <span style={{ fontFamily: MONO, fontWeight: 700, fontSize: 14 }}>{p.sku}</span>
-                      <span className="text-xs" style={{ color: C.faint }}>{p.name}</span>
-                      <span className="text-xs px-1.5 rounded-sm" style={{ background: C.kraft, color: C.faint, fontFamily: MONO }}>{category}</span>
-                      {flagged && (
-                        <span className="text-xs flex items-center gap-1" style={{ color: C.redwood, fontFamily: MONO }}>
-                          <AlertTriangle size={11} /> reorder
-                        </span>
-                      )}
-                    </div>
-                    {category !== "packing" && (
-                      <div className="text-xs mt-0.5" style={{ color: C.faint, fontFamily: MONO }}>≈ {num(sfEq, 0)} SF on hand</div>
-                    )}
-                  </button>
-
-                  {category === "packing" ? (
-                    <div className="flex items-center gap-1 shrink-0">
-                      <input
-                        type="number" style={{ ...inputStyle, width: 80, textAlign: "right", fontFamily: MONO, color: Number(p.onHand) <= 0 ? C.redwood : C.ink, fontWeight: 700 }}
-                        value={p.onHand ?? ""} onChange={(e) => update(p.id, { onHand: e.target.value })}
-                      />
-                      <input
-                        style={{ ...inputStyle, width: 55, fontSize: 11, padding: "4px 6px" }}
-                        value={p.unitLabel || ""} placeholder="ea"
-                        onChange={(e) => update(p.id, { unitLabel: e.target.value })}
-                      />
-                    </div>
-                  ) : (
-                    <div className="shrink-0">
-                      <UnitSwitchInput
-                        product={p} value={p.onHand} canonicalUnit={canonicalUnit}
-                        onChange={(v) => update(p.id, { onHand: v })}
-                        displayUnit={displayUnit}
-                        onDisplayUnitChange={(u) => setUnitPrefs({ ...unitPrefs, [p.id]: u })}
-                        width={90}
-                      />
-                    </div>
-                  )}
-                  <button onClick={() => duplicate(p)} title="Duplicate this item" className="opacity-40 hover:opacity-100 shrink-0"><Copy size={14} /></button>
-                  <button onClick={() => remove(p.id)} className="opacity-40 hover:opacity-100 shrink-0"><Trash2 size={14} /></button>
-                </div>
-
-                {open && (
-                  <div className="px-4 pb-4 space-y-2" style={{ background: C.paper }}>
-                    <div className="grid grid-cols-2 gap-2">
-                      <Field label="SKU"><input style={{ ...inputStyle, fontFamily: MONO }} value={p.sku} onChange={(e) => update(p.id, { sku: e.target.value })} /></Field>
-                      <Field label="Name"><input style={inputStyle} value={p.name} onChange={(e) => update(p.id, { name: e.target.value })} /></Field>
-                    </div>
-                    <Field label="Category">
-                      <select style={inputStyle} value={category} onChange={(e) => update(p.id, { category: e.target.value })}>
-                        <option value="wood">Wood</option>
-                        <option value="paint">Paint</option>
-                        <option value="packing">Packing</option>
-                      </select>
-                    </Field>
-
-                    {category !== "packing" && (
-                      <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
-                        <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, color: C.gold }}>On hand</div>
-                        <MultiUnitQty product={p} value={p.onHand} onChange={(v) => update(p.id, { onHand: v })} />
-                        <div className="text-xs mt-1" style={{ color: C.faint }}>
-                          Type into whichever unit you counted in — the others follow.
-                        </div>
-                      </div>
-                    )}
-
-                    {category === "wood" && (
-                      <>
-                        <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
-                          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, color: C.gold }}>Dimensions</div>
-                          <div className="grid grid-cols-3 gap-2">
-                            <Field label="Thickness (in)"><input type="number" style={inputStyle} value={p.thickness ?? ""} placeholder="—" onChange={(e) => update(p.id, { thickness: e.target.value })} /></Field>
-                            <Field label="Width (in)"><input type="number" style={inputStyle} value={p.widthIn ?? ""} placeholder="—" onChange={(e) => updateDims(p.id, { widthIn: e.target.value })} /></Field>
-                            <Field label="Length (in)"><input type="number" style={inputStyle} value={p.lengthIn ?? ""} placeholder="—" onChange={(e) => updateDims(p.id, { lengthIn: e.target.value })} /></Field>
-                          </div>
-                        </div>
-
-                        <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
-                          <div className="grid grid-cols-2 gap-2">
-                            <Field label="SF per board"><input type="number" style={inputStyle} value={p.sfPerBoard ?? ""} placeholder="—" onChange={(e) => update(p.id, { sfPerBoard: e.target.value })} /></Field>
-                            <Field label="Boards per pallet"><input type="number" style={inputStyle} value={p.boardsPerUnit ?? ""} placeholder="—" onChange={(e) => update(p.id, { boardsPerUnit: e.target.value })} /></Field>
-                          </div>
-                        </div>
-
-                        <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
-                          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, color: C.gold }}>Packing & Conversions</div>
-                          <div className="text-xs mb-2" style={{ color: C.faint }}>"[Qty] [Unit] per [Qty] [Unit]" — e.g. 40 boards per 1 Box. Pick from units this SKU already has, or type a brand new one.</div>
-                          <datalist id={`units-${p.id}`}>
-                            {unitsFor(p).map((u) => <option key={u} value={u} />)}
-                          </datalist>
-                          <div className="space-y-2">
-                            {(p.conversions || []).map((c) => (
-                              <div key={c.key} className="flex items-end gap-2 flex-wrap">
-                                <Field label="Qty" w={70}><input type="number" style={inputStyle} value={c.qtyA ?? ""} onChange={(e) => updateConversion(p.id, c.key, { qtyA: e.target.value })} /></Field>
-                                <Field label="Unit" w={110}><input list={`units-${p.id}`} style={inputStyle} value={c.unitA ?? ""} placeholder="board" onChange={(e) => updateConversion(p.id, c.key, { unitA: e.target.value })} /></Field>
-                                <span className="text-xs pb-2" style={{ color: C.faint, fontFamily: MONO }}>PER</span>
-                                <Field label="Qty" w={70}><input type="number" style={inputStyle} value={c.qtyB ?? ""} onChange={(e) => updateConversion(p.id, c.key, { qtyB: e.target.value })} /></Field>
-                                <Field label="Unit" w={110}><input list={`units-${p.id}`} style={inputStyle} value={c.unitB ?? ""} placeholder="e.g. Box, Skid" onChange={(e) => updateConversion(p.id, c.key, { unitB: e.target.value })} /></Field>
-                                <button onClick={() => removeConversion(p.id, c.key)} className="opacity-40 hover:opacity-100 mb-2"><Trash2 size={16} /></button>
-                              </div>
-                            ))}
-                          </div>
-                          <Btn onClick={() => addConversion(p.id)}><Plus size={14} /> Add Conversion</Btn>
-                        </div>
-                      </>
-                    )}
-
-                    {category === "paint" && (
-                      <Field label="SF per gallon"><input type="number" style={inputStyle} value={p.sfPerGallon ?? ""} placeholder="250" onChange={(e) => update(p.id, { sfPerGallon: e.target.value })} /></Field>
-                    )}
-
-                    <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
-                      <Field label="Reorder at">
-                        <UnitSwitchInput
-                          product={p} value={p.reorderPoint || 0} canonicalUnit={canonicalUnit}
-                          onChange={(v) => update(p.id, { reorderPoint: v })}
-                          displayUnit={reorderDisplayUnit}
-                          onDisplayUnitChange={(u) => setReorderUnitPrefs({ ...reorderUnitPrefs, [p.id]: u })}
-                          width={90}
-                        />
-                      </Field>
-                      <div className="text-xs mt-1" style={{ color: C.faint }}>Flag this item when on-hand drops to or below this amount — pick whichever unit makes sense (boards, SF, pallets, gallons…).</div>
-                    </div>
-
-                    {category === "wood" && (
-                      <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
-                        <Field label="Painted with">
-                          <select
-                            style={{ ...inputStyle, marginTop: 8 }}
-                            value={p.paintProductId || ""}
-                            onChange={(e) => update(p.id, { paintProductId: e.target.value })}
-                          >
-                            <option value="">— Not painted (natural / brushed) —</option>
-                            {products.filter((x) => x.category === "paint").map((x) => (
-                              <option key={x.id} value={x.id}>{x.sku} — {x.name}</option>
-                            ))}
-                          </select>
-                        </Field>
-                        <div className="text-xs mt-1" style={{ color: C.faint }}>
-                          Ties this SKU to the colour it's finished in, so the crew doesn't have to remember which
-                          Graphene Stone goes with which product. It prints on the work order.
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
-                      <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, color: C.gold }}>Process Steps (defaults for this SKU)</div>
-                      <div className="text-xs mb-2" style={{ color: C.faint }}>Check whatever this product normally goes through — new work order lines for this SKU start with these checked, editable per order.</div>
-                      <div className="grid grid-cols-3 sm:grid-cols-4 gap-1.5">
-                        {PROCESS_STEPS.map((s) => (
-                          <label key={s.id} className="flex items-center gap-1.5 text-xs">
-                            <input
-                              type="checkbox" checked={!!(p.steps && p.steps[s.id])}
-                              onChange={(e) => update(p.id, { steps: { ...(p.steps || defaultSteps()), [s.id]: e.target.checked } })}
-                            />
-                            {s.label}
-                          </label>
-                        ))}
-                      </div>
-                    </div>
-
-                    <Field label="Other notes (bundle sizes, odd conversions, anything else worth remembering)">
-                      <textarea style={{ ...inputStyle, minHeight: 50 }} value={p.otherNotes || ""} onChange={(e) => update(p.id, { otherNotes: e.target.value })} />
-                    </Field>
-                  </div>
-                )}
-              </div>
-            );
-          })
-        )}
-      </div>
+      <DataTable
+        items={filtered} setItems={null} columns={columns}
+        onRowClick={(p) => setActiveId(p.id)}
+        searchable searchText={(p) => [p.sku, p.name, p.category].filter(Boolean).join(" ")}
+        pinnedId={pinnedId}
+        isArchived={(p) => !!p.archived}
+        onToggleArchive={(p) => updateOne({ ...p, archived: !p.archived })}
+        emptyText="No inventory items yet."
+      />
     </div>
   );
 }
-
 function useStopwatch() {
   const [running, setRunning] = useState(false);
   const [elapsed, setElapsed] = useState(0);
@@ -3463,7 +3762,7 @@ const skuSizeKey = (sku) => (/^(\d{3})/.exec(String(sku || "")) || [])[1] || nul
 
 // Wood arrives on pallets that need a scannable label; paint and packing
 // don't. Missing category is treated as wood, matching the rest of the app.
-const producesUnits = (product) => !!product && (product.category || "wood") === "wood";
+const producesUnits = (product) => !!product && ["wood", "milled"].includes(product.category || "wood");
 
 // Boards per pallet for a SKU, falling back to a same-size sibling
 // (185RAW borrows 185N's 300) so one unfilled field doesn't break the
@@ -5864,6 +6163,7 @@ export default function App() {
   const setShifts = (v) => { pushHistory(); _setShifts(v); };
   const [whoWorking, setWhoWorking] = useState("");
   const [activeWOId, setActiveWOId] = useState(null);
+  const [activeProductId, setActiveProductId] = useState(null);
   const [jumpToUnitId, setJumpToUnitId] = useState(null);
   const [importOpen, setImportOpen] = useState(false);
   const saveTimers = useRef({});
@@ -6426,7 +6726,9 @@ export default function App() {
           />
         )}
 
-        {tab === "inventory" && <InventoryTab products={products} onChange={setProducts} />}
+        {tab === "inventory" && (
+          <InventoryTab products={products} onChange={setProducts} activeId={activeProductId} setActiveId={setActiveProductId} />
+        )}
 
         {tab === "contacts" && (
           <div>
