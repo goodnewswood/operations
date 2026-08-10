@@ -1326,6 +1326,54 @@ const hoursDecimal = (seconds) => (Number(seconds) || 0) / 3600;
 // `onDark` is for the app header, where this sits on the dark ink bar and
 // needs light text. On a normal light panel it must use the standard input
 // colours — white-on-white is otherwise invisible.
+/* Shows a quantity in every unit the SKU knows about at once — boards,
+   pallets, square feet, boxes — and lets you type into any of them, with
+   the rest following. Everything still stores in the canonical unit; the
+   other boxes are just views onto it.
+
+   The focused box keeps whatever you literally typed rather than being
+   re-derived, otherwise typing "12" pallets would convert after the "1"
+   and rewrite the box out from under you. */
+function MultiUnitQty({ product, value, onChange, disabled }) {
+  const [editing, setEditing] = useState(null); // { unit, raw }
+  const canonical = canonicalUnitFor(product);
+  // Only units this SKU actually defines a conversion for. unitsFor() always
+  // seeds board/plank/sf, which would show "3,498 planks" for a product with
+  // no plank conversion at all — implying 1:1 when nothing of the sort is set.
+  const graph = buildUnitGraph(product);
+  const shown = [canonical, ...Object.keys(graph).filter((u) => u !== canonical)];
+
+  const display = (u) => {
+    if (editing && editing.unit === u) return editing.raw;
+    const q = convertQty(product, value, canonical, u);
+    if (!Number.isFinite(q)) return "";
+    // Boards and boxes come in whole numbers; SF and pallets don't.
+    const dp = u === "board" || u === "plank" ? 0 : 2;
+    return String(Math.round(q * 10 ** dp) / 10 ** dp);
+  };
+
+  return (
+    <div className="flex flex-wrap gap-2">
+      {shown.map((u) => (
+        <Field key={u} label={unitLabel(u)} w={104}>
+          <input
+            type="number" style={{ ...inputStyle, fontFamily: MONO, textAlign: "right" }}
+            value={display(u)} disabled={disabled}
+            onFocus={() => setEditing({ unit: u, raw: display(u) })}
+            onBlur={() => setEditing(null)}
+            onChange={(e) => {
+              const raw = e.target.value;
+              setEditing({ unit: u, raw });
+              const asCanonical = convertQty(product, raw, u, canonical);
+              onChange(Number.isFinite(asCanonical) ? asCanonical : 0);
+            }}
+          />
+        </Field>
+      ))}
+    </div>
+  );
+}
+
 function WhoSelect({ team, current, onChange, onAddMember, onDark = false, big = false }) {
   const [adding, setAdding] = useState(false);
   const [newName, setNewName] = useState("");
@@ -2375,6 +2423,16 @@ function InventoryTab({ products, onChange }) {
                         <option value="packing">Packing</option>
                       </select>
                     </Field>
+
+                    {category !== "packing" && (
+                      <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
+                        <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, color: C.gold }}>On hand</div>
+                        <MultiUnitQty product={p} value={p.onHand} onChange={(v) => update(p.id, { onHand: v })} />
+                        <div className="text-xs mt-1" style={{ color: C.faint }}>
+                          Type into whichever unit you counted in — the others follow.
+                        </div>
+                      </div>
+                    )}
 
                     {category === "wood" && (
                       <>
