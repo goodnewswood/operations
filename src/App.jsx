@@ -2434,6 +2434,27 @@ function InventoryTab({ products, onChange }) {
                       <div className="text-xs mt-1" style={{ color: C.faint }}>Flag this item when on-hand drops to or below this amount — pick whichever unit makes sense (boards, SF, pallets, gallons…).</div>
                     </div>
 
+                    {category === "wood" && (
+                      <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
+                        <Field label="Painted with">
+                          <select
+                            style={{ ...inputStyle, marginTop: 8 }}
+                            value={p.paintProductId || ""}
+                            onChange={(e) => update(p.id, { paintProductId: e.target.value })}
+                          >
+                            <option value="">— Not painted (natural / brushed) —</option>
+                            {products.filter((x) => x.category === "paint").map((x) => (
+                              <option key={x.id} value={x.id}>{x.sku} — {x.name}</option>
+                            ))}
+                          </select>
+                        </Field>
+                        <div className="text-xs mt-1" style={{ color: C.faint }}>
+                          Ties this SKU to the colour it's finished in, so the crew doesn't have to remember which
+                          Graphene Stone goes with which product. It prints on the work order.
+                        </div>
+                      </div>
+                    )}
+
                     <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
                       <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, color: C.gold }}>Process Steps (defaults for this SKU)</div>
                       <div className="text-xs mb-2" style={{ color: C.faint }}>Check whatever this product normally goes through — new work order lines for this SKU start with these checked, editable per order.</div>
@@ -2936,6 +2957,11 @@ const fmtConv = (n) => (Math.round((Number(n) || 0) * 100) / 100).toLocaleString
 
 // Spec now lives per line item rather than per customer, so the printed
 // sheet shows it next to the item the crew is actually working on.
+// The colour a finished SKU is painted in, if any. Kept on the product so
+// nobody has to remember which Graphene Stone goes with which product.
+const paintFor = (product, products) =>
+  product?.paintProductId ? (products || []).find((x) => x.id === product.paintProductId) || null : null;
+
 const specLine = (spec) => {
   if (!spec) return "";
   return [
@@ -3048,10 +3074,13 @@ function WorkOrderPrintView({ wo, customer, products, onClose }) {
                   </div>
                 </div>
 
-                {(line.note || p?.otherNotes || specLine(line.spec)) && (
+                {(line.note || p?.otherNotes || specLine(line.spec) || paintFor(p, products)) && (
                   <div className="mt-1" style={{ fontSize: 11, color: "#333" }}>
                     {line.note && <div><strong>Order note:</strong> {line.note}</div>}
                     {p?.otherNotes && <div><strong>Item note:</strong> {p.otherNotes}</div>}
+                    {paintFor(p, products) && (
+                      <div><strong>Paint:</strong> {paintFor(p, products).sku} — {paintFor(p, products).name}</div>
+                    )}
                     {specLine(line.spec) && (
                       <div style={{ marginTop: 2, padding: "3px 6px", border: "1px solid #999", background: "#f4f4f4" }}>
                         <strong>Spec:</strong> {specLine(line.spec)}
