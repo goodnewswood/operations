@@ -1083,6 +1083,35 @@ function nextNumber(records, prefix) {
 // stable rawProductId (immune to renaming the SKU later); falls back to
 // the legacy rawSku text match only for entries logged before this field
 // existed, so old history doesn't just vanish.
+/* ---------------- Work-log shape helpers ----------------
+   The log holds two record shapes: the original Sort entries
+   (rawBoards -> toN/toP/toMill/toWaste) and the generalised per-step ones
+   (inboundBoards -> outboundBoards/wasteBoards). Reports and rate targets
+   read through these so neither has to care which it's looking at. */
+const logStep = (e) => e.step || "sorting";
+const logBoardsIn = (e) => Number(e.inboundBoards ?? e.rawBoards) || 0;
+const logBoardsOut = (e) =>
+  e.outboundBoards != null
+    ? Number(e.outboundBoards) || 0
+    : (Number(e.toN) || 0) + (Number(e.toP) || 0) + (Number(e.toMill) || 0);
+const logWaste = (e) => Number(e.wasteBoards ?? e.toWaste) || 0;
+
+// Historical boards/hour for a step, and the goal we hold the crew to:
+// 10% above whatever the current average is, so the bar moves as the
+// floor gets faster. Only entries with a real timer count — logging a
+// batch with no time would otherwise read as infinitely fast.
+const TARGET_MULTIPLIER = 1.1;
+function stepRate(sortLog, step) {
+  const rows = (sortLog || []).filter((e) => (!step || logStep(e) === step) && Number(e.seconds) > 0);
+  const boards = rows.reduce((sum, e) => sum + logBoardsIn(e), 0);
+  const seconds = rows.reduce((sum, e) => sum + (Number(e.seconds) || 0), 0);
+  const rate = seconds > 0 ? boards / (seconds / 3600) : 0;
+  return { boards, seconds, rate, target: rate * TARGET_MULTIPLIER, samples: rows.length };
+}
+
+const canonicalUnitFor = (p) =>
+  p.category === "paint" ? "gal" : p.category === "packing" ? (p.unitLabel || "ea") : (p.kind === "sf" ? "sf" : "board");
+
 const resolveRawProduct = (entry, products) => {
   if (entry?.rawProductId) return products.find((p) => p.id === entry.rawProductId) || null;
   if (entry?.rawSku) return products.find((p) => p.sku === entry.rawSku) || null;
@@ -1090,6 +1119,7 @@ const resolveRawProduct = (entry, products) => {
 };
 const today = () => new Date().toISOString().slice(0, 10);
 const num = (n, d = 0) => (Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
+const money = (n) => (Number(n) || 0).toLocaleString("en-US", { style: "currency", currency: "USD" });
 
 // Wood conversions all route through "board" as the hub unit — that's
 // what makes box and pallet relate correctly to SF and planks without
@@ -1696,8 +1726,11 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
     }],
   });
 
-  const pushThrough = () => update({ status: "shipped" });
-  const reopen = () => update({ status: "not_started" });
+  // Stamp when it actually shipped. The ship date on the order is a plan;
+  // without this there's no record of what really happened, so on-time
+  // performance can only ever compare one guess against another.
+  const pushThrough = () => update({ status: "shipped", shippedAt: new Date().toISOString() });
+  const reopen = () => update({ status: "not_started", shippedAt: "" });
 
 
   return (
@@ -1738,7 +1771,11 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
               </select>
               <select
                 style={{ ...inputStyle, background: "#2a241d", color: "#fff", borderColor: "#4a423a", maxWidth: 160 }}
-                value={wo.status || "not_started"} onChange={(e) => update({ status: e.target.value })}
+                value={wo.status || "not_started"}
+                onChange={(e) => update({
+                  status: e.target.value,
+                  ...(e.target.value === "shipped" ? { shippedAt: wo.shippedAt || new Date().toISOString() } : { shippedAt: "" }),
+                })}
                 title="Where this job is in the shop"
               >
                 {STATUS_FLOW.map((st) => <option key={st} value={st}>{STATUS_LABEL[st]}</option>)}
@@ -2216,7 +2253,6 @@ function InventoryTab({ products, onChange }) {
     update(pid, { ...patch, ...extra });
   };
 
-  const canonicalUnitFor = (p) => (p.category === "paint" ? "gal" : p.category === "packing" ? (p.unitLabel || "ea") : (p.kind === "sf" ? "sf" : "board"));
   const sfEquivalent = (p) => (p.category === "packing" ? 0 : convertQty(p, p.onHand, canonicalUnitFor(p), "sf"));
   const needsReorder = (p) => Number(p.reorderPoint) > 0 && (Number(p.onHand) || 0) <= Number(p.reorderPoint);
 
@@ -4039,6 +4075,49 @@ function SkuPicker({ products, value, onChange, onCreate, placeholder = "— Sel
   );
 }
 
+/* Shows the crew what "good" looks like for this step: the running
+   historical average and a goal 10% above it. Once boards and a timer are
+   on screen it also shows live pace against that goal, so you know where
+   you stand before submitting rather than after. */
+function RateTarget({ sortLog, step, boardsSoFar, secondsSoFar }) {
+  const { rate, target, samples } = stepRate(sortLog, step);
+  const live = secondsSoFar > 0 ? (Number(boardsSoFar) || 0) / (secondsSoFar / 3600) : 0;
+  const hasHistory = samples > 0 && rate > 0;
+  const meeting = hasHistory && live >= target;
+
+  return (
+    <div className="rounded-sm px-3 py-2 mb-3" style={{ background: "#FBF6EC", border: `1px solid ${C.gold}` }}>
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <span className="flex items-center gap-1.5" style={{ fontWeight: 700, fontSize: 13, color: C.gold }}>
+          <Timer size={14} /> Target {hasHistory ? `${num(target, 0)} bd/hr` : "\u2014"}
+        </span>
+        {hasHistory ? (
+          <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>
+            avg {num(rate, 0)} × 1.1 · {samples} timed batch{samples === 1 ? "" : "es"}
+          </span>
+        ) : (
+          <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>
+            no timed batches for this step yet — the goal appears once there's history
+          </span>
+        )}
+      </div>
+      {secondsSoFar > 0 && Number(boardsSoFar) > 0 && (
+        <div className="mt-1 flex items-center gap-2" style={{ fontFamily: MONO, fontSize: 12 }}>
+          <span style={{ color: C.faint }}>Right now:</span>
+          <span style={{ fontWeight: 800, color: !hasHistory ? C.ink : meeting ? C.moss : C.redwood }}>
+            {num(live, 0)} bd/hr
+          </span>
+          {hasHistory && (
+            <span style={{ color: meeting ? C.moss : C.redwood }}>
+              {meeting ? "on target" : `${num(target - live, 0)} bd/hr under`}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSort, onDeleteSort, team, whoWorking, setWhoWorking, onAddTeamMember, workOrders, units, onUnitsChange, jumpToUnitId, runGrouped, purchaseOrders }) {
   const millStock = products.find((p) => p.role === "millStock");
   const rawProducts = products.filter((p) => p.kind === "board" && p.role === "raw");
@@ -4293,6 +4372,7 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
         </Field>
 
         <div className="mt-4 pt-4" style={{ borderTop: `1px solid ${C.kraft}` }}>
+          <RateTarget sortLog={sortLog} step="sorting" boardsSoFar={rawIn} secondsSoFar={sw.elapsed} />
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-1.5" style={{ fontWeight: 700, fontSize: 13 }}>
               <Timer size={15} style={{ color: C.faint }} /> Time on this batch
@@ -4500,6 +4580,7 @@ function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, o
         </Field>
 
         <div className="mt-4 pt-4" style={{ borderTop: `1px solid ${C.kraft}` }}>
+          <RateTarget sortLog={sortLog} step={step} boardsSoFar={inBoards} secondsSoFar={sw.elapsed} />
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-1.5" style={{ fontWeight: 700, fontSize: 13 }}>
               <Timer size={15} style={{ color: C.faint }} /> Time on this batch
@@ -5059,107 +5140,453 @@ function TimeClockTab({ shifts, onChange, team, whoWorking, setWhoWorking, onAdd
   );
 }
 
-function TimeTab({ sortLog, team, whoWorking, setWhoWorking, onAddTeamMember }) {
-  const [date, setDate] = useState(today());
-  const [view, setView] = useState("mine");
+/* ---------------- Reports ----------------
+   Ten shop-floor reports over one date range and one work-type filter.
+   Everything is derived from records the crew already produce — the work
+   log, the time clock, POs, received units, work orders — so nothing here
+   needs extra data entry to stay true.
 
-  const dayEntries = sortLog.filter((s) => s.date === date && Number(s.seconds) > 0);
-  const mine = dayEntries.filter((s) => s.by === whoWorking);
-  const byPerson = team.map((name) => {
-    const entries = dayEntries.filter((s) => s.by === name);
-    const totalSec = entries.reduce((sum, e) => sum + (Number(e.seconds) || 0), 0);
-    return { name, entries, totalSec };
-  }).filter((p) => p.totalSec > 0 || p.name === whoWorking);
+   Where a number can't be trusted (no timed batches yet, a ship date
+   that's still only a plan) the report says so rather than printing a
+   confident zero. */
 
-  const mineTotalSec = mine.reduce((sum, e) => sum + (Number(e.seconds) || 0), 0);
-  const teamTotalSec = dayEntries.reduce((sum, e) => sum + (Number(e.seconds) || 0), 0);
+const REPORTS = [
+  { id: "throughput", label: "Throughput by step", stepFilter: true },
+  { id: "yield", label: "Yield & recovery", stepFilter: false },
+  { id: "waste", label: "Waste", stepFilter: true },
+  { id: "people", label: "Person productivity", stepFilter: true },
+  { id: "labor", label: "Clock hours vs logged", stepFilter: true },
+  { id: "vendorcost", label: "Cost per board by vendor", stepFilter: false },
+  { id: "purchasing", label: "Purchasing summary", stepFilter: false },
+  { id: "aging", label: "Yard aging", stepFilter: false },
+  { id: "stock", label: "Stock & days of cover", stepFilter: false },
+  { id: "ontime", label: "Work orders & on-time", stepFilter: false },
+];
 
+function ReportShell({ title, subtitle, children, empty }) {
   return (
-    <div className="max-w-2xl">
-      <div className="flex flex-wrap items-center gap-2 mb-4">
-        <Field label="Day" w={160}><input type="date" style={inputStyle} value={date} onChange={(e) => setDate(e.target.value)} /></Field>
-        <div className="flex items-end gap-1 pb-0.5">
-          {[["mine", "My day"], ["team", "Whole team"]].map(([id, label]) => (
-            <button
-              key={id} onClick={() => setView(id)}
-              className="px-3 py-2 rounded-sm text-xs"
-              style={{ fontFamily: MONO, background: view === id ? C.ink : "transparent", color: view === id ? "#fff" : C.faint, border: `1px solid ${view === id ? C.ink : C.kraftDark}` }}
-            >
-              <CalendarDays size={12} className="inline mr-1" /> {label}
-            </button>
-          ))}
-        </div>
+    <div className="rounded-sm overflow-hidden" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
+      <div className="px-4 py-3" style={{ borderBottom: `1px solid ${C.kraftDark}` }}>
+        <div style={{ fontWeight: 800 }}>{title}</div>
+        {subtitle && <div className="text-xs mt-0.5" style={{ color: C.faint }}>{subtitle}</div>}
       </div>
-
-      {view === "mine" ? (
-        <div className="rounded-sm p-4" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
-          <div className="flex items-center justify-between mb-3">
-            <div style={{ fontWeight: 800, fontSize: 15 }}>{whoWorking || "Pick your name"} · {date}</div>
-            <div style={{ fontFamily: MONO, fontSize: 20, fontWeight: 800 }}>{fmtDuration(mineTotalSec)}</div>
-          </div>
-          {!whoWorking ? (
-            <div className="text-sm text-center py-6" style={{ color: C.faint }}>Select your name above to see your day.</div>
-          ) : mine.length === 0 ? (
-            <div className="text-sm text-center py-6" style={{ color: C.faint }}>No time logged on {date}.</div>
-          ) : (
-            <div className="space-y-2">
-              {mine.map((e) => (
-                <div key={e.id} className="flex justify-between px-3 py-2 rounded-sm text-sm" style={{ background: C.paper }}>
-                  <span>{e.batchLabel}{e.workOrderNumber ? ` · ${e.workOrderNumber}` : ""}</span>
-                  <span style={{ fontFamily: MONO }}>{fmtDuration(e.seconds)}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      ) : (
-        <div className="rounded-sm p-4" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
-          <div className="flex items-center justify-between mb-3">
-            <div style={{ fontWeight: 800, fontSize: 15 }}>Whole team · {date}</div>
-            <div style={{ fontFamily: MONO, fontSize: 20, fontWeight: 800 }}>{fmtDuration(teamTotalSec)}</div>
-          </div>
-          {byPerson.length === 0 ? (
-            <div className="text-sm text-center py-6" style={{ color: C.faint }}>No time logged by anyone on {date}.</div>
-          ) : (
-            <div className="space-y-3">
-              {byPerson.map((p) => (
-                <div key={p.name}>
-                  <div className="flex justify-between items-center px-3 py-2 rounded-sm" style={{ background: C.paper, fontWeight: 700 }}>
-                    <span>{p.name}</span>
-                    <span style={{ fontFamily: MONO }}>{fmtDuration(p.totalSec)} <span style={{ color: C.faint, fontWeight: 400 }}>({hoursDecimal(p.totalSec).toFixed(2)}h)</span></span>
-                  </div>
-                  {p.entries.map((e) => (
-                    <div key={e.id} className="flex justify-between px-3 py-1.5 text-sm" style={{ color: C.faint }}>
-                      <span>{e.batchLabel}{e.workOrderNumber ? ` · ${e.workOrderNumber}` : ""}</span>
-                      <span style={{ fontFamily: MONO }}>{fmtDuration(e.seconds)}</span>
-                    </div>
-                  ))}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
+      {empty ? <div className="px-4 py-10 text-center text-sm" style={{ color: C.faint }}>{empty}</div> : children}
     </div>
   );
 }
 
-/* ---------------- Concurrent-save merge ----------------
-   Every collection lives in one row as a whole JSON array, and each app
-   holds that array in memory and writes all of it on any edit. With two
-   tabs open (Ops and Office, or a phone and a laptop) that's last-writer-
-   wins: whoever saves second silently erases everything the other one
-   added. It really happens — six SKUs created at different times vanished
-   together in one save.
+function RTable({ head, rows, foot }) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full" style={{ borderCollapse: "collapse", fontSize: 13 }}>
+        <thead>
+          <tr style={{ background: C.kraft }}>
+            {head.map((h, i) => (
+              <th key={i} className={`px-3 py-2 ${i === 0 ? "text-left" : "text-right"}`}
+                  style={{ fontFamily: MONO, fontSize: 11, color: C.faint, whiteSpace: "nowrap" }}>
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={i} style={{ borderTop: `1px solid ${C.kraft}` }}>
+              {r.map((cell, j) => (
+                <td key={j} className={`px-3 py-2 ${j === 0 ? "text-left" : "text-right"}`}
+                    style={{ fontFamily: j === 0 ? undefined : MONO, fontWeight: j === 0 ? 700 : 400, whiteSpace: "nowrap" }}>
+                  {cell}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+        {foot && (
+          <tfoot>
+            <tr style={{ borderTop: `2px solid ${C.kraftDark}`, background: C.paper }}>
+              {foot.map((cell, j) => (
+                <td key={j} className={`px-3 py-2 ${j === 0 ? "text-left" : "text-right"}`}
+                    style={{ fontFamily: MONO, fontWeight: 800, whiteSpace: "nowrap" }}>
+                  {cell}
+                </td>
+              ))}
+            </tr>
+          </tfoot>
+        )}
+      </table>
+    </div>
+  );
+}
 
-   So a save is now a three-way merge instead of an overwrite. We keep the
-   version we loaded as a baseline; at save time we re-read the row and
-   reconcile:
-     - records we added or changed  -> ours wins
-     - records only they added      -> kept
-     - records we explicitly deleted -> removed (absent from ours but
-                                       present in the baseline)
-   Anything we never touched is left exactly as they left it. */
+function ReportsTab({ sortLog, shifts, products, units, purchaseOrders, suppliers, workOrders, team }) {
+  const [report, setReport] = useState("throughput");
+  const [from, setFrom] = useState(addDays(today(), -30));
+  const [to, setTo] = useState(today());
+  const [step, setStep] = useState("all");
+
+  const def = REPORTS.find((r) => r.id === report);
+  const inRange = (d) => !!d && d >= from && d <= to;
+  const rangeLabel = `${from} → ${to}`;
+
+  // Work-log rows for the current range and work type.
+  const logRows = (sortLog || []).filter((e) => inRange(e.date) && (step === "all" || logStep(e) === step));
+  const stepName = (id) => PROCESS_STEPS.find((p) => p.id === id)?.label || id;
+
+  const copyTSV = (head, rows) => {
+    const text = [head.join("\t"), ...rows.map((r) => r.map((c) => (typeof c === "object" ? "" : String(c))).join("\t"))].join("\n");
+    navigator.clipboard?.writeText(text);
+  };
+
+  /* ---- 1. Throughput by step ---- */
+  const Throughput = () => {
+    const steps = step === "all" ? PROCESS_STEPS.map((p) => p.id) : [step];
+    const rows = steps.map((id) => {
+      const rs = logRows.filter((e) => logStep(e) === id && Number(e.seconds) > 0);
+      const boards = rs.reduce((s, e) => s + logBoardsIn(e), 0);
+      const secs = rs.reduce((s, e) => s + (Number(e.seconds) || 0), 0);
+      const rate = secs > 0 ? boards / (secs / 3600) : 0;
+      return { id, batches: rs.length, boards, hours: hoursDecimal(secs), rate, target: rate * TARGET_MULTIPLIER };
+    }).filter((r) => r.batches > 0).sort((a, b) => b.boards - a.boards);
+
+    const head = ["Step", "Batches", "Boards", "Hours", "Bd/hr", "Target"];
+    const body = rows.map((r) => [stepName(r.id), num(r.batches), num(r.boards), r.hours.toFixed(2), num(r.rate, 0), num(r.target, 0)]);
+    const tb = rows.reduce((s, r) => s + r.boards, 0), th = rows.reduce((s, r) => s + r.hours, 0);
+    return (
+      <ReportShell
+        title="Throughput by process step" subtitle={`${rangeLabel} · only batches with a timer count`}
+        empty={rows.length ? null : "No timed batches in this range."}
+      >
+        <RTable head={head} rows={body} foot={["All steps", num(rows.reduce((s, r) => s + r.batches, 0)), num(tb), th.toFixed(2), num(th > 0 ? tb / th : 0, 0), ""]} />
+      </ReportShell>
+    );
+  };
+
+  /* ---- 2. Yield & recovery (Sort only) ---- */
+  const Yield = () => {
+    const rs = (sortLog || []).filter((e) => inRange(e.date) && logStep(e) === "sorting" && Number(e.rawBoards) > 0);
+    const bySize = {};
+    rs.forEach((e) => {
+      const p = resolveRawProduct(e, products);
+      const key = p?.sku || e.rawSku || "Unknown";
+      const b = (bySize[key] = bySize[key] || { raw: 0, n: 0, p: 0, mill: 0, waste: 0, batches: 0 });
+      b.raw += Number(e.rawBoards) || 0;
+      b.n += Number(e.toN) || 0;
+      b.p += Number(e.toP) || 0;
+      b.mill += Number(e.toMill) || 0;
+      b.waste += Number(e.toWaste) || 0;
+      b.batches += 1;
+    });
+    const rows = Object.entries(bySize).map(([sku, b]) => ({ sku, ...b, good: b.n + b.p }))
+      .sort((a, b) => (a.raw ? a.good / a.raw : 0) - (b.raw ? b.good / b.raw : 0));
+    const pct = (x, of) => (of > 0 ? `${((x / of) * 100).toFixed(1)}%` : "—");
+    const head = ["Raw size", "Batches", "Boards in", "Sellable", "Mill", "Waste", "Recovery", "Waste %"];
+    const body = rows.map((r) => [r.sku, num(r.batches), num(r.raw), num(r.good), num(r.mill), num(r.waste), pct(r.good, r.raw), pct(r.waste, r.raw)]);
+    const t = rows.reduce((a, r) => ({ raw: a.raw + r.raw, good: a.good + r.good, mill: a.mill + r.mill, waste: a.waste + r.waste }), { raw: 0, good: 0, mill: 0, waste: 0 });
+    return (
+      <ReportShell
+        title="Yield & recovery by raw size" subtitle={`${rangeLabel} · sorting only · worst recovery first`}
+        empty={rows.length ? null : "No sort batches in this range."}
+      >
+        <RTable head={head} rows={body} foot={["All sizes", "", num(t.raw), num(t.good), num(t.mill), num(t.waste), pct(t.good, t.raw), pct(t.waste, t.raw)]} />
+      </ReportShell>
+    );
+  };
+
+  /* ---- 3. Waste ---- */
+  const Waste = () => {
+    const byStep = {}, byPerson = {};
+    logRows.forEach((e) => {
+      const w = logWaste(e); if (!w) return;
+      byStep[logStep(e)] = (byStep[logStep(e)] || 0) + w;
+      byPerson[e.by || "Unattributed"] = (byPerson[e.by || "Unattributed"] || 0) + w;
+    });
+    const boardsIn = logRows.reduce((s, e) => s + logBoardsIn(e), 0);
+    const totalWaste = Object.values(byStep).reduce((s, v) => s + v, 0);
+    const stepRows = Object.entries(byStep).sort((a, b) => b[1] - a[1]).map(([id, w]) => [stepName(id), num(w), boardsIn > 0 ? `${((w / boardsIn) * 100).toFixed(1)}%` : "—"]);
+    const personRows = Object.entries(byPerson).sort((a, b) => b[1] - a[1]).map(([n, w]) => [n, num(w)]);
+    return (
+      <div className="space-y-3">
+        <ReportShell title="Waste by step" subtitle={`${rangeLabel} · ${num(totalWaste)} boards wasted of ${num(boardsIn)} handled`}
+          empty={stepRows.length ? null : "No waste recorded in this range."}>
+          <RTable head={["Step", "Waste boards", "% of boards handled"]} rows={stepRows} />
+        </ReportShell>
+        {personRows.length > 0 && (
+          <ReportShell title="Waste by person" subtitle="Same range and work type">
+            <RTable head={["Person", "Waste boards"]} rows={personRows} />
+          </ReportShell>
+        )}
+      </div>
+    );
+  };
+
+  /* ---- 4. Person productivity ---- */
+  const People = () => {
+    const by = {};
+    logRows.forEach((e) => {
+      const k = e.by || "Unattributed";
+      const b = (by[k] = by[k] || { boards: 0, seconds: 0, batches: 0, waste: 0 });
+      b.boards += logBoardsIn(e); b.seconds += Number(e.seconds) || 0; b.batches += 1; b.waste += logWaste(e);
+    });
+    const rows = Object.entries(by).map(([name, b]) => ({ name, ...b, rate: b.seconds > 0 ? b.boards / (b.seconds / 3600) : 0 }))
+      .sort((a, b) => b.rate - a.rate);
+    const head = ["Person", "Batches", "Boards", "Hours", "Bd/hr", "Waste"];
+    const body = rows.map((r) => [r.name, num(r.batches), num(r.boards), hoursDecimal(r.seconds).toFixed(2), r.seconds > 0 ? num(r.rate, 0) : "—", num(r.waste)]);
+    return (
+      <ReportShell title="Person productivity" subtitle={`${rangeLabel}${step === "all" ? " · all work types" : ` · ${stepName(step)} only`}`}
+        empty={rows.length ? null : "Nothing logged in this range."}>
+        <RTable head={head} rows={body} />
+      </ReportShell>
+    );
+  };
+
+  /* ---- 5. Clock hours vs logged work ---- */
+  const Labor = () => {
+    const clocked = {};
+    (shifts || []).filter((sh) => sh.clockIn && inRange(localDay(sh.clockIn))).forEach((sh) => {
+      clocked[sh.person] = (clocked[sh.person] || 0) + shiftSeconds(sh);
+    });
+    const logged = {};
+    logRows.forEach((e) => { logged[e.by || "Unattributed"] = (logged[e.by || "Unattributed"] || 0) + (Number(e.seconds) || 0); });
+    const names = [...new Set([...Object.keys(clocked), ...Object.keys(logged)])].sort();
+    const rows = names.map((n) => {
+      const c = clocked[n] || 0, l = logged[n] || 0;
+      return [n, hoursDecimal(c).toFixed(2), hoursDecimal(l).toFixed(2), hoursDecimal(Math.max(0, c - l)).toFixed(2), c > 0 ? `${((l / c) * 100).toFixed(0)}%` : "—"];
+    });
+    const tc = Object.values(clocked).reduce((s, v) => s + v, 0);
+    const tl = Object.values(logged).reduce((s, v) => s + v, 0);
+    return (
+      <ReportShell
+        title="Clock hours vs logged work" subtitle={`${rangeLabel} · the gap is paid time not attached to a batch`}
+        empty={names.length ? null : "No clock or work records in this range. The time clock only started collecting recently."}
+      >
+        <RTable
+          head={["Person", "Clocked", "Logged", "Unaccounted", "Captured"]} rows={rows}
+          foot={["Everyone", hoursDecimal(tc).toFixed(2), hoursDecimal(tl).toFixed(2), hoursDecimal(Math.max(0, tc - tl)).toFixed(2), tc > 0 ? `${((tl / tc) * 100).toFixed(0)}%` : "—"]}
+        />
+      </ReportShell>
+    );
+  };
+
+  /* ---- 6. Cost per board by vendor ---- */
+  const VendorCost = () => {
+    const by = {};
+    (purchaseOrders || []).filter((po) => inRange(po.date)).forEach((po) => {
+      const v = suppliers.find((s) => s.id === po.supplierId);
+      const name = v?.name || "Unknown vendor";
+      const b = (by[name] = by[name] || { boards: 0, lineCost: 0, freight: 0, pos: 0, painted: 0, clean: 0 });
+      b.pos += 1;
+      b.freight += Number(po.shippingCost) || 0;
+      (po.lines || []).forEach((l) => {
+        const qty = (Number(l.boardCount) || 0) * (Number(l.copies) || 1);
+        b.boards += qty;
+        b.lineCost += Number(l.cost) || 0;
+        if (l.painted) b.painted += qty; else b.clean += qty;
+      });
+    });
+    const rows = Object.entries(by).map(([name, b]) => ({ name, ...b, landed: b.boards > 0 ? (b.lineCost + b.freight) / b.boards : 0 }))
+      .sort((a, b) => a.landed - b.landed);
+    const head = ["Vendor", "POs", "Boards", "Material", "Freight", "Landed $/bd", "Painted / clean"];
+    const body = rows.map((r) => [r.name, num(r.pos), num(r.boards), money(r.lineCost), money(r.freight), r.boards > 0 ? `$${r.landed.toFixed(3)}` : "—", `${num(r.painted)} / ${num(r.clean)}`]);
+    const t = rows.reduce((a, r) => ({ b: a.b + r.boards, m: a.m + r.lineCost, f: a.f + r.freight }), { b: 0, m: 0, f: 0 });
+    return (
+      <ReportShell title="Cost per board received, by vendor" subtitle={`${rangeLabel} · landed cost includes freight · cheapest first`}
+        empty={rows.length ? null : "No purchase orders in this range."}>
+        <RTable head={head} rows={body} foot={["All vendors", "", num(t.b), money(t.m), money(t.f), t.b > 0 ? `$${((t.m + t.f) / t.b).toFixed(3)}` : "—", ""]} />
+      </ReportShell>
+    );
+  };
+
+  /* ---- 7. Purchasing summary ---- */
+  const Purchasing = () => {
+    const pos = (purchaseOrders || []).filter((po) => inRange(po.date));
+    const rows = pos.slice().sort((a, b) => (b.date || "").localeCompare(a.date || "")).map((po) => {
+      const v = suppliers.find((s) => s.id === po.supplierId);
+      const boards = (po.lines || []).reduce((s, l) => s + (Number(l.boardCount) || 0) * (Number(l.copies) || 1), 0);
+      return [po.number || "—", v?.name || "Unknown", po.date || "—", num(boards), money(po.totalCost), po.status === "ordered" ? "Ordered" : "Received", po.paymentStatus || "Unpaid"];
+    });
+    const spend = pos.reduce((s, po) => s + (Number(po.totalCost) || 0), 0);
+    const unpaid = pos.filter((po) => (po.paymentStatus || "Unpaid") !== "Paid").reduce((s, po) => s + (Number(po.totalCost) || 0), 0);
+    const boards = pos.reduce((s, po) => s + (po.lines || []).reduce((x, l) => x + (Number(l.boardCount) || 0) * (Number(l.copies) || 1), 0), 0);
+    return (
+      <ReportShell title="Purchasing summary" subtitle={`${rangeLabel} · ${money(spend)} committed · ${money(unpaid)} still unpaid`}
+        empty={rows.length ? null : "No purchase orders in this range."}>
+        <RTable head={["PO", "Vendor", "Date", "Boards", "Total", "Status", "Payment"]} rows={rows}
+          foot={["Total", "", "", num(boards), money(spend), "", money(unpaid) + " unpaid"]} />
+      </ReportShell>
+    );
+  };
+
+  /* ---- 8. Yard aging ---- */
+  const Aging = () => {
+    const open = (units || []).filter((u) => Number(u.boardsRemaining) > 0);
+    const days = (d) => (d ? Math.floor((new Date(`${today()}T12:00:00`) - new Date(`${d}T12:00:00`)) / 86400000) : null);
+    const buckets = [
+      { label: "0–30 days", min: 0, max: 30 },
+      { label: "31–60 days", min: 31, max: 60 },
+      { label: "61–90 days", min: 61, max: 90 },
+      { label: "Over 90 days", min: 91, max: Infinity },
+    ];
+    const rows = buckets.map((b) => {
+      const us = open.filter((u) => { const a = days(u.receivedDate); return a != null && a >= b.min && a <= b.max; });
+      return [b.label, num(us.length), num(us.reduce((s, u) => s + (Number(u.boardsRemaining) || 0), 0))];
+    });
+    const oldest = open.slice().sort((a, b) => (a.receivedDate || "").localeCompare(b.receivedDate || "")).slice(0, 12).map((u) => {
+      const po = purchaseOrders.find((p) => p.id === u.poId);
+      const v = suppliers.find((s) => s.id === po?.supplierId);
+      return [u.sizeLabel, po?.number || "—", v?.name || "—", u.receivedDate || "—", `${days(u.receivedDate) ?? "—"} d`, num(u.boardsRemaining)];
+    });
+    const unknownDate = open.filter((u) => !u.receivedDate).length;
+    return (
+      <div className="space-y-3">
+        <ReportShell title="Yard aging — unsorted pallets" subtitle={`As of ${today()} · ${num(open.length)} pallets still holding boards${unknownDate ? ` · ${unknownDate} with no received date` : ""}`}
+          empty={open.length ? null : "Nothing sitting in the yard."}>
+          <RTable head={["Age", "Pallets", "Boards"]} rows={rows} />
+        </ReportShell>
+        {oldest.length > 0 && (
+          <ReportShell title="Oldest pallets" subtitle="Clear these first">
+            <RTable head={["Size", "PO", "Vendor", "Received", "Age", "Boards left"]} rows={oldest} />
+          </ReportShell>
+        )}
+      </div>
+    );
+  };
+
+  /* ---- 9. Stock & days of cover ---- */
+  const Stock = () => {
+    const daysInRange = Math.max(1, Math.round((new Date(`${to}T12:00:00`) - new Date(`${from}T12:00:00`)) / 86400000) + 1);
+    const consumed = {};
+    (sortLog || []).filter((e) => inRange(e.date)).forEach((e) => {
+      const id = e.inboundProductId || e.rawProductId;
+      if (id) consumed[id] = (consumed[id] || 0) + logBoardsIn(e);
+    });
+    const rows = (products || [])
+      .filter((p) => !p.archived && (p.category || "wood") === "wood")
+      .map((p) => {
+        const perDay = (consumed[p.id] || 0) / daysInRange;
+        const onHand = Number(p.onHand) || 0;
+        const cover = perDay > 0 ? onHand / perDay : null;
+        const low = Number(p.reorderPoint) > 0 && onHand <= Number(p.reorderPoint);
+        return { p, onHand, perDay, cover, low, sf: convertQty(p, onHand, canonicalUnitFor(p), "sf") };
+      })
+      .sort((a, b) => (a.cover == null ? Infinity : a.cover) - (b.cover == null ? Infinity : b.cover));
+    const body = rows.map((r) => [
+      `${r.low ? "⚠ " : ""}${r.p.sku}`,
+      num(r.onHand),
+      num(r.sf, 0),
+      r.p.reorderPoint ? num(r.p.reorderPoint) : "—",
+      r.perDay > 0 ? num(r.perDay, 1) : "—",
+      r.cover == null ? "—" : `${num(r.cover, 0)} d`,
+    ]);
+    return (
+      <ReportShell title="Stock position & days of cover"
+        subtitle={`On hand now · burn rate from ${rangeLabel} (${daysInRange} days) · shortest cover first`}
+        empty={rows.length ? null : "No wood SKUs to report."}>
+        <RTable head={["SKU", "On hand", "≈ SF", "Reorder at", "Bd/day", "Cover"]} rows={body} />
+      </ReportShell>
+    );
+  };
+
+  /* ---- 10. Work orders & on-time ---- */
+  const OnTime = () => {
+    const wos = (workOrders || []).filter((w) => !w.archived);
+    const byStatus = STATUS_FLOW.map((st) => [STATUS_LABEL[st], num(wos.filter((w) => (w.status || "not_started") === st).length)]);
+
+    // Shipped inside the range. shippedAt is the real stamp; older orders
+    // predate it and fall back to the planned ship date, which is flagged.
+    const shipped = wos.filter((w) => w.status === "shipped").map((w) => ({
+      w, actual: w.shippedAt ? localDay(w.shippedAt) : (w.shipDate || null), estimated: !w.shippedAt,
+    })).filter((r) => inRange(r.actual));
+
+    const withPromise = shipped.filter((r) => r.w.readyByDate);
+    const lateness = (r) => Math.round((new Date(`${r.actual}T12:00:00`) - new Date(`${r.w.readyByDate}T12:00:00`)) / 86400000);
+    const late = withPromise.filter((r) => lateness(r) > 0);
+    const avgLate = late.length ? late.reduce((s, r) => s + lateness(r), 0) / late.length : 0;
+    const estimatedCount = shipped.filter((r) => r.estimated).length;
+
+    const openOverdue = wos.filter((w) => w.status !== "shipped" && w.readyByDate && w.readyByDate < today())
+      .sort((a, b) => a.readyByDate.localeCompare(b.readyByDate))
+      .map((w) => [w.number, w.customerName || "—", STATUS_LABEL[w.status] || w.status, w.readyByDate, `${Math.round((new Date(`${today()}T12:00:00`) - new Date(`${w.readyByDate}T12:00:00`)) / 86400000)} d`]);
+
+    return (
+      <div className="space-y-3">
+        <ReportShell title="Work orders by stage" subtitle="Current pipeline, all open orders">
+          <RTable head={["Stage", "Orders"]} rows={byStatus} />
+        </ReportShell>
+        <ReportShell
+          title="On-time performance"
+          subtitle={`Shipped ${rangeLabel}${estimatedCount ? ` · ${estimatedCount} shipped before ship-time was recorded, using their planned date` : ""}`}
+          empty={shipped.length ? null : "Nothing shipped in this range."}
+        >
+          <RTable head={["Measure", "Value"]} rows={[
+            ["Shipped in range", num(shipped.length)],
+            ["Had a ready-by promise", num(withPromise.length)],
+            ["Shipped late", num(late.length)],
+            ["On-time rate", withPromise.length ? `${(((withPromise.length - late.length) / withPromise.length) * 100).toFixed(0)}%` : "—"],
+            ["Average days late (when late)", late.length ? num(avgLate, 1) : "—"],
+          ]} />
+        </ReportShell>
+        {openOverdue.length > 0 && (
+          <ReportShell title="Open and past ready-by" subtitle="Still not shipped">
+            <RTable head={["WO", "Customer", "Stage", "Ready by", "Overdue"]} rows={openOverdue} />
+          </ReportShell>
+        )}
+      </div>
+    );
+  };
+
+  const body = {
+    throughput: Throughput, yield: Yield, waste: Waste, people: People, labor: Labor,
+    vendorcost: VendorCost, purchasing: Purchasing, aging: Aging, stock: Stock, ontime: OnTime,
+  }[report];
+  const Body = body || Throughput;
+
+  const preset = (days) => { setFrom(addDays(today(), -days)); setTo(today()); };
+
+  return (
+    <div className="max-w-4xl">
+      <div className="rounded-sm p-4 mb-4" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
+        <div className="flex flex-wrap items-end gap-2">
+          <Field label="From" w={150}><input type="date" style={inputStyle} value={from} onChange={(e) => setFrom(e.target.value)} /></Field>
+          <Field label="To" w={150}><input type="date" style={inputStyle} value={to} onChange={(e) => setTo(e.target.value)} /></Field>
+          <Btn onClick={() => { setFrom(weekStart(today())); setTo(today()); }}>This week</Btn>
+          <Btn onClick={() => preset(30)}>Last 30 days</Btn>
+          <Btn onClick={() => preset(365)}>Last year</Btn>
+        </div>
+
+        <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${C.kraft}` }}>
+          <div className="text-xs mb-1.5" style={{ fontFamily: MONO, color: C.faint }}>
+            TYPE OF WORK {!def?.stepFilter && <span style={{ color: C.kraftDark }}>· not used by this report</span>}
+          </div>
+          <div className="flex flex-wrap gap-1.5" style={{ opacity: def?.stepFilter ? 1 : 0.4 }}>
+            {[["all", "All work"], ...PROCESS_STEPS.map((p) => [p.id, p.label])].map(([id, label]) => (
+              <button
+                key={id} onClick={() => setStep(id)} disabled={!def?.stepFilter}
+                className="px-2.5 py-1 rounded-sm text-xs"
+                style={{ fontFamily: MONO, background: step === id ? C.ink : "transparent", color: step === id ? "#fff" : C.faint, border: `1px solid ${step === id ? C.ink : C.kraftDark}` }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap gap-1.5 mb-4">
+        {REPORTS.map((r) => (
+          <button
+            key={r.id} onClick={() => setReport(r.id)}
+            className="px-3 py-1.5 rounded-sm text-xs"
+            style={{ fontFamily: MONO, background: report === r.id ? C.redwood : "transparent", color: report === r.id ? "#fff" : C.faint, border: `1px solid ${report === r.id ? C.redwood : C.kraftDark}` }}
+          >
+            {r.label}
+          </button>
+        ))}
+      </div>
+
+      <Body />
+    </div>
+  );
+}
 
 function mergeCollections(baseline, ours, theirs) {
   if (!Array.isArray(ours) || !Array.isArray(theirs)) return ours;
@@ -5639,7 +6066,7 @@ export default function App() {
     setActiveWOId(null);
   };
   const pushWOThrough = (id) => {
-    setWorkOrders(workOrders.map((w) => (w.id === id ? { ...w, status: "shipped" } : w)));
+    setWorkOrders(workOrders.map((w) => (w.id === id ? { ...w, status: "shipped", shippedAt: w.shippedAt || new Date().toISOString() } : w)));
   };
 
   const activeWO = workOrders.find((w) => w.id === activeWOId) || null;
@@ -5866,7 +6293,9 @@ export default function App() {
               onUpdateCustomerSpec={(customerId, patch) => setCustomers(customers.map((c) => (c.id === customerId ? { ...c, spec: { ...c.spec, ...patch } } : c)))}
             />
           ) : (
-            <WorkOrderBoard workOrders={workOrders} customers={customers} onOpen={(id) => setActiveWOId(id)} onNew={newWorkOrder} onImport={() => setImportOpen(true)} onPushThrough={pushWOThrough} onStatusChange={(id, status) => setWorkOrders(workOrders.map((w) => (w.id === id ? { ...w, status } : w)))} />
+            <WorkOrderBoard workOrders={workOrders} customers={customers} onOpen={(id) => setActiveWOId(id)} onNew={newWorkOrder} onImport={() => setImportOpen(true)} onPushThrough={pushWOThrough} onStatusChange={(id, status) => setWorkOrders(workOrders.map((w) => (w.id === id
+              ? { ...w, status, ...(status === "shipped" ? { shippedAt: w.shippedAt || new Date().toISOString() } : { shippedAt: "" }) }
+              : w)))} />
           )
         )}
         {tab === "orders" && ordersSubTab === "purchaseorders" && (
@@ -5932,7 +6361,10 @@ export default function App() {
           />
         )}
         {tab === "reports" && (
-          <TimeTab sortLog={sortLog} team={team} whoWorking={whoWorking} setWhoWorking={setWhoWorking} onAddTeamMember={addTeamMember} />
+          <ReportsTab
+            sortLog={sortLog} shifts={shifts} products={products} units={units}
+            purchaseOrders={purchaseOrders} suppliers={suppliers} workOrders={workOrders} team={team}
+          />
         )}
       </main>
     </div>
