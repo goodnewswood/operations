@@ -2718,6 +2718,9 @@ function VendorsTab({ suppliers, onChange }) {
                       <div className="flex items-center gap-1.5 mb-2" style={{ fontWeight: 700, color: C.gold }}>
                         <Tag size={14} /> Pricing ($/board by size)
                       </div>
+                      <div className="text-xs mb-2" style={{ color: C.faint }}>
+                        Purchase orders auto-fill from these. "Painted" replaces the size price for painted stock rather than adding to it.
+                      </div>
                       <div className="grid grid-cols-4 gap-2">
                         {sizePriceFields.map((size) => (
                           <Field key={size} label={size} w={undefined}>
@@ -2731,7 +2734,7 @@ function VendorsTab({ suppliers, onChange }) {
                       </div>
                       <div className="grid grid-cols-2 gap-2 mt-2">
                         <Field label="4ft"><input type="number" style={{ ...inputStyle, fontFamily: MONO }} value={s.pricing?.fourFt ?? ""} placeholder="—" onChange={(e) => updatePricing(s.id, { fourFt: e.target.value })} /></Field>
-                        <Field label="Paint adder"><input type="number" style={{ ...inputStyle, fontFamily: MONO }} value={s.pricing?.paint ?? ""} placeholder="—" onChange={(e) => updatePricing(s.id, { paint: e.target.value })} /></Field>
+                        <Field label="Painted $/bd"><input type="number" style={{ ...inputStyle, fontFamily: MONO }} value={s.pricing?.paint ?? ""} placeholder="—" onChange={(e) => updatePricing(s.id, { paint: e.target.value })} /></Field>
                       </div>
                       <Field label="Pricing notes (bundles, delivery fees, etc)"><textarea style={{ ...inputStyle, minHeight: 50 }} value={s.priceNotes || ""} onChange={(e) => update(s.id, { priceNotes: e.target.value })} /></Field>
                     </div>
@@ -3285,8 +3288,46 @@ function LabelPrintView({ units, supplierFor, onClose }) {
    matching raw-size product's on-hand board count — that last part used
    to be a manual, disconnected step. */
 
+/* Vendor pricing lookup for purchase orders.
+
+   Vendors quote by board size (165/166/185/186), and separately for
+   painted stock — painted is a REPLACEMENT price, not an add-on; it runs
+   cheaper than clean because it's less desirable. So a line is priced at
+   either the size price or the painted price, never the sum.
+
+   A SKU's size is its leading three digits (185RAW, 185N, 185P are all
+   "185"), which is how the vendor sheet is organised. */
+const skuSizeKey = (sku) => (/^(\d{3})/.exec(String(sku || "")) || [])[1] || null;
+
+// Boards per pallet for a SKU, falling back to a same-size sibling
+// (185RAW borrows 185N's 300) so one unfilled field doesn't break the
+// auto-fill for the whole size family.
+function boardsPerPalletFor(products, sku) {
+  const exact = products.find((p) => p.sku === sku);
+  const direct = Number(exact?.boardsPerUnit) || 0;
+  if (direct > 0) return direct;
+  const size = skuSizeKey(sku);
+  if (!size) return 0;
+  const sibling = products.find((p) => skuSizeKey(p.sku) === size && Number(p.boardsPerUnit) > 0);
+  return Number(sibling?.boardsPerUnit) || 0;
+}
+
+function vendorPriceFor(supplier, sku, painted) {
+  const pricing = supplier?.pricing || {};
+  if (painted) {
+    const p = Number(pricing.paint);
+    if (p > 0) return p;
+  }
+  const size = skuSizeKey(sku);
+  const v = size ? Number(pricing[size]) : NaN;
+  return v > 0 ? v : null;
+}
+
 function NewPurchaseOrderModal({ suppliers, products, editingPO, receivingPO, onClose, onCreate, onUpdate, onReceive }) {
-  const blankLine = () => ({ key: uid(), item: "185", other: false, boardCount: "", copies: "1", costPerBoard: "" });
+  // Default to a real SKU — "185" on its own matches no product, so the
+  // picker rendered blank and neither auto-fill had anything to key off.
+  const defaultItem = () => (products.find((p) => p.sku === "185RAW") || products.find((p) => p.kind === "board") || products[0])?.sku || "";
+  const blankLine = () => ({ key: uid(), item: defaultItem(), other: false, boardCount: "", copies: "1", costPerBoard: "", painted: false });
   const isEditing = !!editingPO;
   const isReceiving = !!receivingPO;
   const sourcePO = editingPO || receivingPO;
@@ -3302,7 +3343,7 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, receivingPO, on
         const liveProduct = l.productId ? products.find((p) => p.id === l.productId) : null;
         const item = liveProduct?.sku || l.sizeLabel || "";
         const isKnownProduct = products.some((p) => p.sku === item);
-        return { key: uid(), item, other: item !== "" && !isKnownProduct, boardCount: l.boardCount ?? "", copies: String(copies), costPerBoard: costPerBoard || "" };
+        return { key: uid(), item, other: item !== "" && !isKnownProduct, boardCount: l.boardCount ?? "", copies: String(copies), costPerBoard: costPerBoard || "", painted: !!l.painted };
       })
     : [blankLine()];
 
@@ -3322,7 +3363,54 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, receivingPO, on
   // entry in the picker is just confusing.
   const sizeOptions = [...new Set(products.filter((p) => !p.archived).map((p) => p.sku))];
 
-  const updateLine = (key, patch) => setLines(lines.map((l) => (l.key === key ? { ...l, ...patch } : l)));
+  const supplier = suppliers.find((x) => x.id === supplierId);
+
+  /* Auto-fill cost and pallet size when the vendor, the item, or the
+     painted flag changes — but only where the crew hasn't typed their own
+     number. `autoCost`/`autoBoards` remember what we filled in last, so a
+     field still holding our value gets refreshed while a hand-entered one
+     is left alone. Both stay fully editable. */
+  const applyLine = (key, patch) => setLines((prev) => prev.map((l) => {
+    if (l.key !== key) return l;
+    const next = { ...l, ...patch };
+    const product = products.find((p) => p.sku === next.item);
+
+    const price = vendorPriceFor(supplier, next.item, next.painted);
+    const costUntouched = !next.costPerBoard || String(next.costPerBoard) === String(next.autoCost ?? "");
+    if (price != null && costUntouched) {
+      next.costPerBoard = price;
+      next.autoCost = price;
+    }
+
+    const perPallet = boardsPerPalletFor(products, next.item);
+    const boardsUntouched = !next.boardCount || String(next.boardCount) === String(next.autoBoards ?? "");
+    if (perPallet > 0 && boardsUntouched) {
+      next.boardCount = perPallet;
+      next.autoBoards = perPallet;
+    }
+    return next;
+  }));
+
+  const updateLine = (key, patch) => applyLine(key, patch);
+
+  // Fill every line that's still on our numbers — on open, and again
+  // whenever the vendor changes.
+  useEffect(() => {
+    setLines((prev) => prev.map((l) => {
+      const next = { ...l };
+      const price = vendorPriceFor(supplier, l.item, l.painted);
+      if (price != null && (!l.costPerBoard || String(l.costPerBoard) === String(l.autoCost ?? ""))) {
+        next.costPerBoard = price;
+        next.autoCost = price;
+      }
+      const perPallet = boardsPerPalletFor(products, l.item);
+      if (perPallet > 0 && (!l.boardCount || String(l.boardCount) === String(l.autoBoards ?? ""))) {
+        next.boardCount = perPallet;
+        next.autoBoards = perPallet;
+      }
+      return next;
+    }));
+  }, [supplierId]);
   const removeLine = (key) => setLines(lines.length > 1 ? lines.filter((l) => l.key !== key) : lines);
 
   // A line is "inventory" if it has a quantity — that's what bumps the
@@ -3384,7 +3472,7 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, receivingPO, on
     const po = {
       id: poId, supplierId, date, shipVia, paymentStatus, paidVia,
       shippingCost: Number(shippingCost) || 0,
-      lines: validLines.map((l) => ({ sizeLabel: l.item, productId: matchAnyBySku(l.item)?.id || null, boardCount: Number(l.boardCount) || 0, copies: Math.max(1, Math.floor(Number(l.copies) || 1)), cost: lineTotal(l) })),
+      lines: validLines.map((l) => ({ sizeLabel: l.item, productId: matchAnyBySku(l.item)?.id || null, boardCount: Number(l.boardCount) || 0, copies: Math.max(1, Math.floor(Number(l.copies) || 1)), cost: lineTotal(l), painted: !!l.painted })),
       totalCost, note: notes,
       status: isReceiving ? "received" : (sourcePO?.status || "received"),
       ...(sourcePO ? { number } : {}),
@@ -3451,6 +3539,8 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, receivingPO, on
               const total = lineTotal(l);
               const isInventory = Number(l.boardCount) > 0;
               const totalUnitsForLine = Math.max(1, Math.floor(Number(l.copies) || 1)) * (Number(l.boardCount) || 0);
+              const paintedPrice = Number(supplier?.pricing?.paint) || 0;
+              const cleanPrice = vendorPriceFor(supplier, l.item, false);
               return (
                 <div key={l.key} className="flex flex-wrap gap-2 items-end">
                   <Field label="Item / size" w={130} required>
@@ -3502,6 +3592,32 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, receivingPO, on
                     );
                   })()}
                   <button onClick={() => removeLine(l.key)} disabled={lines.length === 1} className="opacity-40 hover:opacity-100 disabled:opacity-15 mb-2"><Trash2 size={16} /></button>
+
+                  <div className="w-full flex flex-wrap items-center gap-3" style={{ marginTop: -4 }}>
+                    <div className="flex items-center gap-3">
+                      {[[false, "Clean price"], [true, "Painted price"]].map(([val, label]) => (
+                        <label key={String(val)} className="flex items-center gap-1.5 text-xs" style={{ fontFamily: MONO, color: C.faint, cursor: "pointer" }}>
+                          <input
+                            type="radio" name={`painted-${l.key}`} checked={!!l.painted === val}
+                            onChange={() => updateLine(l.key, { painted: val })}
+                          />
+                          {label}
+                          {val && paintedPrice > 0 ? ` ($${paintedPrice.toFixed(2)})` : ""}
+                          {!val && cleanPrice != null ? ` ($${cleanPrice.toFixed(2)})` : ""}
+                        </label>
+                      ))}
+                    </div>
+                    {supplierId && l.item && vendorPriceFor(supplier, l.item, l.painted) == null && (
+                      <span className="text-xs flex items-center gap-1" style={{ color: C.warn, fontFamily: MONO }}>
+                        <AlertTriangle size={11} /> no {l.painted ? "painted" : ""} price on file for {supplier?.name} — enter it by hand
+                      </span>
+                    )}
+                    {l.painted && paintedPrice === 0 && supplierId && (
+                      <span className="text-xs" style={{ color: C.faint, fontFamily: MONO }}>
+                        (add a painted price on {supplier?.name}'s vendor card to auto-fill this)
+                      </span>
+                    )}
+                  </div>
                 </div>
               );
             })}
