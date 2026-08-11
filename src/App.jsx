@@ -62,6 +62,7 @@ const KEY = {
   purchaseOrders: "gnws-shared-pos-v1",
   units: "gnws-shared-units-v1",
   goals: "gnws-shared-goals-v1",
+  invLog: "gnws-shared-invlog-v1",
 };
 
 /* ---------------- Seed data ---------------- */
@@ -1084,6 +1085,36 @@ function nextNumber(records, prefix) {
 // stable rawProductId (immune to renaming the SKU later); falls back to
 // the legacy rawSku text match only for entries logged before this field
 // existed, so old history doesn't just vanish.
+/* ---------------- Inventory history ----------------
+   Every change to a SKU's on-hand gets a row here: who, when, from what
+   to what, and why. Counts, work, receiving and hand edits all land in
+   the same place, so an item's history reads as one story rather than
+   being scattered across the sort log, the PO units and nothing at all.
+
+   Reasons are deliberately coarse — the detail lives on the record that
+   caused the change, and this is the thread that ties them together. */
+const ADJ_REASON = {
+  count: "Physical count",
+  work: "Production",
+  receive: "Received",
+  edit: "Hand edit",
+};
+
+function makeAdjustment({ productId, from, to, reason, note, by, sessionId }) {
+  return {
+    id: uid(),
+    productId,
+    at: new Date().toISOString(),
+    from: Number(from) || 0,
+    to: Number(to) || 0,
+    delta: (Number(to) || 0) - (Number(from) || 0),
+    reason: reason || "edit",
+    note: note || "",
+    by: by || "",
+    sessionId: sessionId || "",
+  };
+}
+
 /* ---------------- Work-log shape helpers ----------------
    The log holds two record shapes: the original Sort entries
    (rawBoards -> toN/toP/toMill/toWaste) and the generalised per-step ones
@@ -2504,7 +2535,7 @@ function TwoUnitCell({ product, value, onChange, onUnitsChange }) {
    made you scroll a 45-row list to find anything and expanded editors
    inline, which pushed everything else off screen. */
 
-function InventoryDetail({ product, products, onChange, onBack, onDelete, onDuplicate }) {
+function InventoryDetail({ product, products, invLog, onChange, onBack, onDelete, onDuplicate }) {
   const p = product;
   const category = p.category || "wood";
   const canonicalUnit = canonicalUnitFor(p);
@@ -2687,6 +2718,39 @@ function InventoryDetail({ product, products, onChange, onBack, onDelete, onDupl
         </Field>
       </div>
 
+      {(() => {
+        const rows = (invLog || []).filter((a) => a.productId === p.id)
+          .sort((a, b) => (b.at || "").localeCompare(a.at || ""));
+        return (
+          <div className="rounded-sm overflow-hidden mb-4" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
+            <div className="px-4 py-3" style={{ borderBottom: `1px solid ${C.kraftDark}`, fontWeight: 800 }}>
+              History <span style={{ fontWeight: 400, color: C.faint, fontFamily: MONO, fontSize: 12 }}>({rows.length})</span>
+            </div>
+            {rows.length === 0 ? (
+              <div className="px-4 py-6 text-center text-sm" style={{ color: C.faint }}>
+                Nothing recorded yet. Counts, production and receiving all show up here from now on.
+              </div>
+            ) : rows.slice(0, 40).map((a) => (
+              <div key={a.id} className="px-4 py-2 flex items-center justify-between gap-2 text-sm" style={{ borderTop: `1px solid ${C.kraft}` }}>
+                <div>
+                  <div style={{ fontFamily: MONO, fontSize: 12 }}>
+                    {new Date(a.at).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+                    <span style={{ color: C.faint }}> · {ADJ_REASON[a.reason] || a.reason}{a.by ? ` · ${a.by}` : ""}</span>
+                  </div>
+                  {a.note && <div style={{ fontSize: 12, color: C.faint }}>{a.note}</div>}
+                </div>
+                <div style={{ fontFamily: MONO, whiteSpace: "nowrap" }}>
+                  <span style={{ color: C.faint }}>{num(a.from)} → {num(a.to)}</span>{" "}
+                  <span style={{ fontWeight: 800, color: a.delta >= 0 ? C.moss : C.redwood }}>
+                    {a.delta >= 0 ? "+" : ""}{num(a.delta)}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
+
       <div className="flex gap-2 mb-8 flex-wrap">
         <Btn onClick={onDuplicate}><Copy size={13} /> Duplicate</Btn>
         <Btn onClick={() => update({ archived: !p.archived })}>
@@ -2698,12 +2762,14 @@ function InventoryDetail({ product, products, onChange, onBack, onDelete, onDupl
   );
 }
 
-function InventoryTab({ products, onChange, activeId, setActiveId }) {
+function InventoryTab({ products, onChange, invLog, activeId, setActiveId }) {
   const [group, setGroup] = useState("all");
   const [pinnedId, setPinnedId] = useState(null);
   const active = products.find((p) => p.id === activeId) || null;
 
-  const updateOne = (p) => onChange(products.map((x) => (x.id === p.id ? p : x)));
+  // A change made here is someone looking at the shelf, so it lands in the
+  // history as a count rather than an anonymous edit.
+  const updateOne = (p) => onChange(products.map((x) => (x.id === p.id ? p : x)), { reason: "count" });
   const remove = (id) => { onChange(products.filter((p) => p.id !== id)); setActiveId(null); };
   const add = () => {
     const p = { id: uid(), sku: "NEW-SKU", name: "New item", kind: "board", category: "wood", unitLabel: "ea", onHand: 0 };
@@ -2724,7 +2790,7 @@ function InventoryTab({ products, onChange, activeId, setActiveId }) {
   if (active) {
     return (
       <InventoryDetail
-        product={active} products={products} onChange={updateOne}
+        product={active} products={products} invLog={invLog} onChange={updateOne}
         onBack={() => setActiveId(null)}
         onDelete={() => remove(active.id)}
         onDuplicate={() => duplicate(active)}
@@ -4176,7 +4242,7 @@ function ReceivingTab({ suppliers, purchaseOrders, onPOChange, units, onUnitsCha
       onProductsChange(products.map((p) => {
         const bump = boardsBySize[p.id];
         return bump ? { ...p, onHand: (Number(p.onHand) || 0) + bump } : p;
-      }));
+      }), { reason: "receive" });
     });
     setNewPOOpen(false);
     setPrintUnits(createdUnits);
@@ -4240,7 +4306,7 @@ function ReceivingTab({ suppliers, purchaseOrders, onPOChange, units, onUnitsCha
       onProductsChange(products.map((p) => {
         const bump = boardsBySize[p.id];
         return bump ? { ...p, onHand: (Number(p.onHand) || 0) + bump } : p;
-      }));
+      }), { reason: "receive" });
     });
     setPrintUnits(newUnits);
     setReceivingPO(null);
@@ -4465,41 +4531,15 @@ function SkuPicker({ products, value, onChange, onCreate, placeholder = "— Sel
    historical average and a goal 10% above it. Once boards and a timer are
    on screen it also shows live pace against that goal, so you know where
    you stand before submitting rather than after. */
-function RateTarget({ sortLog, step, boardsSoFar, secondsSoFar }) {
+function RateTarget({ sortLog, step }) {
   const { rate, target, samples } = stepRate(sortLog, step);
-  const live = secondsSoFar > 0 ? (Number(boardsSoFar) || 0) / (secondsSoFar / 3600) : 0;
   const hasHistory = samples > 0 && rate > 0;
-  const meeting = hasHistory && live >= target;
-
+  if (!hasHistory) return null;
   return (
-    <div className="rounded-sm px-3 py-2 mb-3" style={{ background: "#FBF6EC", border: `1px solid ${C.gold}` }}>
-      <div className="flex items-center justify-between flex-wrap gap-2">
-        <span className="flex items-center gap-1.5" style={{ fontWeight: 700, fontSize: 13, color: C.gold }}>
-          <Timer size={14} /> Target {hasHistory ? `${num(target, 0)} bd/hr` : "\u2014"}
-        </span>
-        {hasHistory ? (
-          <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>
-            avg {num(rate, 0)} × 1.1 · {samples} timed batch{samples === 1 ? "" : "es"}
-          </span>
-        ) : (
-          <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>
-            no timed batches for this step yet — the goal appears once there's history
-          </span>
-        )}
+    <div className="rounded-sm px-4 py-3 mb-4" style={{ background: "#FBF6EC", border: `2px solid ${C.gold}` }}>
+      <div className="flex items-center gap-2" style={{ fontWeight: 800, fontSize: 18, color: C.gold }}>
+        <Timer size={18} /> Target {num(target, 0)} boards per hour
       </div>
-      {secondsSoFar > 0 && Number(boardsSoFar) > 0 && (
-        <div className="mt-1 flex items-center gap-2" style={{ fontFamily: MONO, fontSize: 12 }}>
-          <span style={{ color: C.faint }}>Right now:</span>
-          <span style={{ fontWeight: 800, color: !hasHistory ? C.ink : meeting ? C.moss : C.redwood }}>
-            {num(live, 0)} bd/hr
-          </span>
-          {hasHistory && (
-            <span style={{ color: meeting ? C.moss : C.redwood }}>
-              {meeting ? "on target" : `${num(target - live, 0)} bd/hr under`}
-            </span>
-          )}
-        </div>
-      )}
     </div>
   );
 }
@@ -4646,6 +4686,7 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
         <div className="flex items-center justify-between mb-3">
           <div style={{ fontWeight: 800, fontSize: 16 }}>Log a Sorting Batch</div>
         </div>
+        <RateTarget sortLog={sortLog} step="sorting" />
         <p className="text-sm mb-3" style={{ color: C.faint }}>
           Pick the received unit you're breaking down, then split it into what it actually sorted into.
           Everything here is counted in <strong>boards</strong>. Make sure your name is picked in the top right first.
@@ -4758,7 +4799,6 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
         </Field>
 
         <div className="mt-4 pt-4" style={{ borderTop: `1px solid ${C.kraft}` }}>
-          <RateTarget sortLog={sortLog} step="sorting" boardsSoFar={rawIn} secondsSoFar={sw.elapsed} />
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-1.5" style={{ fontWeight: 700, fontSize: 13 }}>
               <Timer size={15} style={{ color: C.faint }} /> Time on this batch
@@ -4924,6 +4964,7 @@ function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, o
         <div className="flex items-center justify-between mb-3">
           <div style={{ fontWeight: 800, fontSize: 16 }}>Log — {stepDef?.label || step}</div>
         </div>
+        <RateTarget sortLog={sortLog} step={step} />
 
         <Field label="Who's working on this" required>
           <WhoSelect team={team} current={whoWorking} onChange={setWhoWorking} onAddMember={onAddTeamMember} />
@@ -4966,7 +5007,6 @@ function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, o
         </Field>
 
         <div className="mt-4 pt-4" style={{ borderTop: `1px solid ${C.kraft}` }}>
-          <RateTarget sortLog={sortLog} step={step} boardsSoFar={inBoards} secondsSoFar={sw.elapsed} />
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-1.5" style={{ fontWeight: 700, fontSize: 13 }}>
               <Timer size={15} style={{ color: C.faint }} /> Time on this batch
@@ -6063,6 +6103,7 @@ export default function App() {
   const [purchaseOrders, _setPurchaseOrders] = useState([]);
   const [units, _setUnits] = useState([]);
   const [shifts, _setShifts] = useState([]);
+  const [invLog, _setInvLog] = useState([]);
   const [goals, setGoals] = useState({ boardsPerHour: 100 });
 
   // --- Undo/redo history --------------------------------------------
@@ -6085,7 +6126,7 @@ export default function App() {
   const [historyCounts, setHistoryCounts] = useState({ undo: 0, redo: 0 });
 
   useEffect(() => {
-    latestRef.current = { customers, products, workOrders, sortLog, team, suppliers, purchaseOrders, units, shifts };
+    latestRef.current = { customers, products, workOrders, sortLog, team, suppliers, purchaseOrders, units, shifts, invLog };
   });
 
   const refreshHistoryCounts = () => setHistoryCounts({ undo: historyRef.current.length, redo: futureRef.current.length });
@@ -6118,6 +6159,7 @@ export default function App() {
     _setPurchaseOrders(snap.purchaseOrders);
     _setUnits(snap.units);
     _setShifts(snap.shifts || []);
+    _setInvLog(snap.invLog || []);
     skipHistoryRef.current = false;
   };
 
@@ -6154,6 +6196,29 @@ export default function App() {
 
   const setCustomers = (v) => { pushHistory(); _setCustomers(v); };
   const setProducts = (v) => { pushHistory(); _setProducts(v); };
+
+  /* Writes products AND records what moved. Every path that changes stock
+     goes through this so an item's history is complete — a count, a sort
+     batch, a receipt and a hand edit all leave the same kind of trail.
+     Only real on-hand changes are recorded; renaming a SKU doesn't. */
+  const setProductsLogged = (next, { reason = "edit", note = "", by = "", sessionId = "" } = {}) => {
+    const before = new Map((latestRef.current?.products || products).map((p) => [p.id, p]));
+    const adjustments = [];
+    next.forEach((p) => {
+      const prev = before.get(p.id);
+      if (!prev) return;
+      if ((Number(prev.onHand) || 0) === (Number(p.onHand) || 0)) return;
+      adjustments.push(makeAdjustment({ productId: p.id, from: prev.onHand, to: p.onHand, reason, note, by, sessionId }));
+    });
+    if (adjustments.length) {
+      runGrouped(() => {
+        _setProducts(next);
+        _setInvLog([...adjustments, ...(latestRef.current?.invLog || invLog)]);
+      });
+    } else {
+      setProducts(next);
+    }
+  };
   const setWorkOrders = (v) => { pushHistory(); _setWorkOrders(v); };
   const setSortLog = (v) => { pushHistory(); _setSortLog(v); };
   const setTeam = (v) => { pushHistory(); _setTeam(v); };
@@ -6161,6 +6226,7 @@ export default function App() {
   const setPurchaseOrders = (v) => { pushHistory(); _setPurchaseOrders(v); };
   const setUnits = (v) => { pushHistory(); _setUnits(v); };
   const setShifts = (v) => { pushHistory(); _setShifts(v); };
+  const setInvLog = (v) => { pushHistory(); _setInvLog(v); };
   const [whoWorking, setWhoWorking] = useState("");
   const [activeWOId, setActiveWOId] = useState(null);
   const [activeProductId, setActiveProductId] = useState(null);
@@ -6199,6 +6265,7 @@ export default function App() {
     { key: KEY.purchaseOrders, set: _setPurchaseOrders, get: () => purchaseOrders, arr: true },
     { key: KEY.units, set: _setUnits, get: () => units, arr: true },
     { key: KEY.timeLog, set: _setShifts, get: () => shifts, arr: true },
+    { key: KEY.invLog, set: _setInvLog, get: () => invLog, arr: true },
     { key: KEY.goals, set: (d) => setGoals(d && !Array.isArray(d) ? d : { boardsPerHour: 100 }), get: () => goals, arr: false },
   ];
   const collectionsRef = useRef(COLLECTIONS);
@@ -6353,6 +6420,7 @@ export default function App() {
   useEffect(() => { if (loaded) saveKey(KEY.purchaseOrders, purchaseOrders); }, [purchaseOrders, loaded]);
   useEffect(() => { if (loaded) saveKey(KEY.units, units); }, [units, loaded]);
   useEffect(() => { if (loaded) saveKey(KEY.timeLog, shifts); }, [shifts, loaded]);
+  useEffect(() => { if (loaded) saveKey(KEY.invLog, invLog); }, [invLog, loaded]);
   useEffect(() => { if (loaded) saveKey(KEY.goals, goals); }, [goals, loaded]);
 
   const addTeamMember = (name) => { if (!team.includes(name)) setTeam([...team, name]); };
@@ -6696,7 +6764,7 @@ export default function App() {
             suppliers={suppliers}
             purchaseOrders={purchaseOrders} onPOChange={setPurchaseOrders}
             units={units} onUnitsChange={setUnits}
-            products={products} onProductsChange={setProducts}
+            products={products} onProductsChange={(v) => setProductsLogged(v, { reason: "work", by: whoWorking })}
             runGrouped={runGrouped}
           />
         )}
@@ -6714,7 +6782,7 @@ export default function App() {
 
         {tab === "work" && (
           <WorkTab
-            products={products} onProductsChange={setProducts}
+            products={products} onProductsChange={(v) => setProductsLogged(v, { reason: "work", by: whoWorking })}
             sortLog={sortLog} onLogSort={(s) => setSortLog([s, ...sortLog])}
             onUpdateSort={updateSortEntry} onDeleteSort={deleteSortEntry}
             team={team} whoWorking={whoWorking} setWhoWorking={setWhoWorking} onAddTeamMember={addTeamMember}
@@ -6727,7 +6795,12 @@ export default function App() {
         )}
 
         {tab === "inventory" && (
-          <InventoryTab products={products} onChange={setProducts} activeId={activeProductId} setActiveId={setActiveProductId} />
+          <InventoryTab
+            products={products}
+            onChange={(v, opts) => setProductsLogged(v, { by: whoWorking, ...opts })}
+            invLog={invLog}
+            activeId={activeProductId} setActiveId={setActiveProductId}
+          />
         )}
 
         {tab === "contacts" && (
