@@ -2799,9 +2799,173 @@ function InventoryDetail({ product, products, invLog, onChange, onBack, onDelete
   );
 }
 
+/* A printable count sheet for walking the racks. Everything the counter
+   needs is on the page — what the app currently believes is on hand, plus
+   blank space to tally against it — so nobody has to carry a phone around
+   the yard. One category at a time, because the wood racks and the paint
+   shelf get counted on separate trips.
+
+   The on-hand figure is printed deliberately: this is a check against the
+   book, not a blind count, and the crew has always worked off the last
+   known number. */
+function InventoryCountSheet({ products, group, onClose }) {
+  const [cat, setCat] = useState(group || "all");
+
+  const rows = products
+    .filter((p) => !p.archived)
+    .filter((p) => (cat === "all" ? true : (p.category || "wood") === cat))
+    .slice()
+    .sort(bySkuFavouritesFirst);
+
+  // Same two units the Inventory table shows for this SKU, so the sheet
+  // and the screen never disagree about what a number means.
+  const onHandLine = (p) => {
+    if (p.category === "packing") return `${num(p.onHand)} ${p.unitLabel || "ea"}`;
+    const canonical = canonicalUnitFor(p);
+    const opts = unitOptionsFor(p);
+    const saved = (p.displayUnits || []).filter((u) => opts.includes(u));
+    const units = (saved.length ? saved : defaultUnitsFor(p)).filter(Boolean);
+    return units.map((u) => `${fmtConv(convertQty(p, p.onHand, canonical, u))} ${unitLabel(u)}`).join("   ·   ");
+  };
+  // Only print a square-foot figure when the SKU genuinely converts to SF.
+  // convertQty falls back 1:1 otherwise, which would print "2 gal = 2 SF"
+  // and put a number on the sheet that means nothing.
+  const hasSF = (p) => canonicalUnitFor(p) === "sf" || Object.keys(buildUnitGraph(p)).includes("sf");
+  const sfOf = (p) => (hasSF(p) ? convertQty(p, p.onHand, canonicalUnitFor(p), "sf") : null);
+
+  // Pallets and boards are how wood gets counted. Paint and packaging come
+  // off the shelf in their own units, so those sheets get their own boxes.
+  const boxLabels = (p) => {
+    const c = (p && p.category) || cat;
+    const labels =
+      c === "paint" ? ["Total gallons", "Total quarts", "Total units"]
+      : c === "packing" ? [`Total ${(p && p.unitLabel) || "units"}`, "Total boxes", "Total units"]
+      : ["Total pallets", "Total units", "Total boards"];
+    // A SKU counted in "units" would otherwise get two identical boxes.
+    return [...new Set(labels)];
+  };
+
+  const catLabel = { all: "All categories", wood: "Wood", milled: "Milled wood", paint: "Paint", packing: "Packaging" }[cat] || cat;
+  const sfTotal = rows.reduce((s, p) => s + (sfOf(p) || 0), 0);
+  const sfCount = rows.filter((p) => sfOf(p) != null).length;
+
+  const Box = ({ label, height = 22 }) => (
+    <div style={{ flex: 1 }}>
+      <div style={{ fontSize: 7.5, textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 2 }}>{label}</div>
+      <div style={{ border: "1px solid #000", height, background: "#fff" }} />
+    </div>
+  );
+
+  return (
+    <div className="fixed inset-0 z-50 overflow-auto" style={{ background: "rgba(34,29,25,0.6)" }}>
+      <style>{`
+        @page { size: letter; margin: 0.45in; }
+        @media print {
+          body * { visibility: hidden !important; }
+          #count-print-root, #count-print-root * { visibility: visible !important; }
+          #count-print-root { position: absolute !important; left: 0; top: 0; margin: 0; }
+          .no-print { display: none !important; }
+        }
+      `}</style>
+
+      <div className="max-w-4xl mx-auto my-8">
+        <div className="flex flex-wrap justify-between items-center gap-2 mb-3 no-print">
+          <div className="flex flex-wrap items-center gap-2">
+            {[["all", "All"], ["wood", "Wood"], ["milled", "Milled"], ["paint", "Paint"], ["packing", "Packaging"]].map(([id, label]) => (
+              <button
+                key={id} onClick={() => setCat(id)}
+                className="px-3 py-1.5 rounded-sm text-xs"
+                style={{ fontFamily: MONO, background: cat === id ? "#fff" : "transparent", color: cat === id ? C.ink : "#fff", border: "1px solid #fff" }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <div className="flex gap-2">
+            <Btn kind="primary" onClick={() => window.print()}><Printer size={13} /> Print</Btn>
+            {/* Plain Btn is dark-on-transparent, which vanishes against the
+                dark modal backdrop — so this one is styled for the overlay. */}
+            <button
+              onClick={onClose}
+              className="px-3 py-1.5 rounded-sm text-xs inline-flex items-center gap-1.5"
+              style={{ fontFamily: MONO, color: "#fff", border: "1px solid #fff", background: "transparent" }}
+            >
+              <X size={13} /> Close
+            </button>
+          </div>
+        </div>
+
+        <div id="count-print-root" style={{ background: "#fff", color: "#000", padding: "0.3in", fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif" }}>
+          <div className="flex items-end justify-between" style={{ borderBottom: "3px solid #000", paddingBottom: 8, marginBottom: 10 }}>
+            <div>
+              <div style={{ fontSize: 21, fontWeight: 900, letterSpacing: -0.3 }}>INVENTORY COUNT SHEET</div>
+              <div style={{ fontSize: 11, marginTop: 3 }}>{catLabel} — {rows.length} item{rows.length === 1 ? "" : "s"}</div>
+            </div>
+            <div style={{ fontSize: 10, textAlign: "right", lineHeight: 1.7 }}>
+              <div>Printed {new Date().toLocaleString("en-US")}</div>
+              <div>Counted by ______________________</div>
+              <div>Date ______________  Time __________</div>
+            </div>
+          </div>
+
+          {rows.length === 0 && <div style={{ fontSize: 12 }}>Nothing in this category.</div>}
+
+          {rows.map((p) => {
+            const sf = sfOf(p);
+            const rw = Number(p.reworkQty) || 0, wst = Number(p.wasteQty) || 0;
+            return (
+              <div key={p.id} style={{ border: "1px solid #000", marginBottom: 7, breakInside: "avoid", pageBreakInside: "avoid" }}>
+                <div className="flex justify-between items-baseline" style={{ background: "#ececec", borderBottom: "1px solid #000", padding: "3px 6px", gap: 10 }}>
+                  <div style={{ minWidth: 0 }}>
+                    <span style={{ fontFamily: MONO, fontWeight: 900, fontSize: 13 }}>{p.sku}</span>
+                    <span style={{ fontSize: 10.5, marginLeft: 8 }}>{p.name}</span>
+                  </div>
+                  <div style={{ fontSize: 9.5, textAlign: "right", whiteSpace: "nowrap" }}>
+                    <strong>On book:</strong> {onHandLine(p)}
+                    {sf != null && <>{"  |  "}<strong>≈ SF:</strong> {fmtConv(sf)}</>}
+                  </div>
+                </div>
+
+                <div className="flex" style={{ fontSize: 8.5, padding: "2px 6px", gap: 18, borderBottom: "1px dotted #999" }}>
+                  <span>Rework on book: <strong>{num(rw)}</strong>{p.reworkNote ? ` — ${p.reworkNote}` : ""}</span>
+                  <span>Waste on book: <strong>{num(wst)}</strong>{p.wasteNote ? ` — ${p.wasteNote}` : ""}</span>
+                </div>
+
+                <div style={{ padding: "4px 6px 6px" }}>
+                  <div style={{ fontSize: 7.5, textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 2 }}>Tick marks</div>
+                  <div style={{ border: "1px solid #000", height: 54, background: "#fff" }} />
+                  <div className="flex" style={{ gap: 12, marginTop: 5 }}>
+                    {boxLabels(p).map((l) => <Box key={l} label={l} />)}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+
+          {rows.length > 0 && (
+            <div style={{ border: "2px solid #000", marginTop: 12, padding: "6px 8px", breakInside: "avoid", pageBreakInside: "avoid" }}>
+              <div className="flex justify-between items-baseline" style={{ marginBottom: 5 }}>
+                <div style={{ fontSize: 12, fontWeight: 900, letterSpacing: 0.4 }}>SHEET TOTALS — {catLabel.toUpperCase()}</div>
+                <div style={{ fontSize: 9 }}>
+                  On book: {sfCount > 0 ? `≈ ${fmtConv(sfTotal)} SF across ${sfCount} SKU${sfCount === 1 ? "" : "s"} · ` : ""}
+                  {rows.length} SKU{rows.length === 1 ? "" : "s"} on this sheet
+                </div>
+              </div>
+              <div className="flex" style={{ gap: 12 }}>
+                {boxLabels(null).map((l) => <Box key={l} label={l} height={26} />)}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function InventoryTab({ products, onChange, invLog, activeId, setActiveId }) {
   const [group, setGroup] = useState("all");
   const [pinnedId, setPinnedId] = useState(null);
+  const [countSheetOpen, setCountSheetOpen] = useState(false);
   const active = products.find((p) => p.id === activeId) || null;
 
   // A change made here is someone looking at the shelf, so it lands in the
@@ -2935,7 +3099,10 @@ function InventoryTab({ products, onChange, invLog, activeId, setActiveId }) {
     <div className="max-w-5xl mx-auto">
       <div className="flex items-center justify-between mb-3">
         <div style={{ fontWeight: 800, fontSize: 18 }}>Inventory</div>
-        <Btn kind="primary" onClick={add}><Plus size={14} /> New item</Btn>
+        <div className="flex gap-2">
+          <Btn onClick={() => setCountSheetOpen(true)}><Printer size={14} /> Count sheet</Btn>
+          <Btn kind="primary" onClick={add}><Plus size={14} /> New item</Btn>
+        </div>
       </div>
       <div className="flex flex-wrap items-center gap-2 mb-3">
         {[["all", "All"], ["wood", "Wood"], ["milled", "Milled"], ["paint", "Paint"], ["packing", "Packaging"]].map(([id, label]) => (
@@ -2957,6 +3124,9 @@ function InventoryTab({ products, onChange, invLog, activeId, setActiveId }) {
         onToggleArchive={(p) => updateOne({ ...p, archived: !p.archived })}
         emptyText="No inventory items yet."
       />
+      {countSheetOpen && (
+        <InventoryCountSheet products={products} group={group} onClose={() => setCountSheetOpen(false)} />
+      )}
     </div>
   );
 }
