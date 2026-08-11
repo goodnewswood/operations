@@ -2529,6 +2529,24 @@ function TwoUnitCell({ product, value, onChange, onUnitsChange }) {
   return <span className="flex items-center gap-1.5" style={{ whiteSpace: "nowrap" }}>{[box(u1, 0), box(u2, 1)]}</span>;
 }
 
+/* Condition buckets.
+
+   `onHand` keeps meaning what it always did — good, usable stock — so
+   every picker, conversion and report that reads it stays correct. Waste
+   and rework sit alongside it rather than inside it, because a pallet of
+   boards with nails in it is real material you own but can't sell today,
+   and folding it into on-hand would quietly overstate what's sellable.
+
+   Rework carries a note (to be trimmed, too thin, nails and screws) since
+   what has to happen to it is the whole point of tracking it separately. */
+const CONDITIONS = [
+  { key: "onHand", label: "Good", color: "moss", note: false },
+  { key: "reworkQty", label: "Rework", color: "gold", note: "reworkNote" },
+  { key: "wasteQty", label: "Waste", color: "redwood", note: "wasteNote" },
+];
+const conditionTotal = (p) =>
+  (Number(p.onHand) || 0) + (Number(p.reworkQty) || 0) + (Number(p.wasteQty) || 0);
+
 /* ---------------- Inventory ----------------
    Same list-and-detail shape as GNWS Office: a sortable, searchable table
    with archive, and a full-page editor behind each row. The old accordion
@@ -2608,10 +2626,29 @@ function InventoryDetail({ product, products, invLog, onChange, onBack, onDelete
           </Field>
         ) : (
           <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
-            <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, color: C.gold }}>On hand</div>
-            <MultiUnitQty product={p} value={p.onHand} onChange={(v) => update({ onHand: v })} />
-            <div className="text-xs mt-1" style={{ color: C.faint }}>
-              Type into whichever unit you counted in — the others follow.
+            <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 2, color: C.gold }}>On hand by condition</div>
+            <div className="text-xs mb-2" style={{ color: C.faint }}>
+              Type into whichever unit you counted in — the others follow. Only <strong>Good</strong> counts as
+              sellable stock; rework and waste are tracked separately so they don't inflate what's available.
+            </div>
+            {CONDITIONS.map((c) => (
+              <div key={c.key} className="mb-2 pb-2" style={{ borderBottom: `1px solid ${C.kraft}` }}>
+                <div className="flex items-center gap-1.5 mb-1" style={{ fontFamily: MONO, fontSize: 11, color: C[c.color] }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 99, background: C[c.color], display: "inline-block" }} />
+                  {c.label.toUpperCase()}
+                </div>
+                <MultiUnitQty product={p} value={p[c.key]} onChange={(v) => update({ [c.key]: v })} />
+                {c.note && (
+                  <input
+                    className="mt-1" style={{ ...inputStyle, fontSize: 13 }}
+                    placeholder={c.key === "reworkQty" ? "What has to happen to it — trim, de-nail, re-sort…" : "Why it's waste"}
+                    value={p[c.note] || ""} onChange={(e) => update({ [c.note]: e.target.value })}
+                  />
+                )}
+              </div>
+            ))}
+            <div style={{ fontFamily: MONO, fontSize: 12, color: C.faint }}>
+              Total on site: {num(conditionTotal(p))} {unitLabel(canonicalUnit)}
             </div>
           </div>
         )}
@@ -2856,6 +2893,21 @@ function InventoryTab({ products, onChange, invLog, activeId, setActiveId }) {
         />
       )),
       sortValue: (p) => Number(p.onHand) || 0,
+    },
+    {
+      id: "cond", label: "Rework / Waste",
+      render: (p) => {
+        const r = Number(p.reworkQty) || 0, w = Number(p.wasteQty) || 0;
+        if (!r && !w) return <span style={{ color: C.kraftDark }}>—</span>;
+        return (
+          <span style={{ fontFamily: MONO, fontSize: 12 }} title={[p.reworkNote, p.wasteNote].filter(Boolean).join(" · ")}>
+            {r ? <span style={{ color: C.gold }}>{num(r)} rw</span> : null}
+            {r && w ? <span style={{ color: C.kraftDark }}> · </span> : null}
+            {w ? <span style={{ color: C.redwood }}>{num(w)} wst</span> : null}
+          </span>
+        );
+      },
+      sortValue: (p) => (Number(p.reworkQty) || 0) + (Number(p.wasteQty) || 0),
     },
     {
       id: "sf", label: "≈ SF",
@@ -6207,8 +6259,17 @@ export default function App() {
     next.forEach((p) => {
       const prev = before.get(p.id);
       if (!prev) return;
-      if ((Number(prev.onHand) || 0) === (Number(p.onHand) || 0)) return;
-      adjustments.push(makeAdjustment({ productId: p.id, from: prev.onHand, to: p.onHand, reason, note, by, sessionId }));
+      // Rework and waste move for their own reasons and are worth their own
+      // history rows — otherwise "where did 300 boards go" has no answer.
+      CONDITIONS.forEach((c) => {
+        const from = Number(prev[c.key]) || 0;
+        const to = Number(p[c.key]) || 0;
+        if (from === to) return;
+        adjustments.push(makeAdjustment({
+          productId: p.id, from, to, reason, by, sessionId,
+          note: [c.key === "onHand" ? "" : c.label, note].filter(Boolean).join(" · "),
+        }));
+      });
     });
     if (adjustments.length) {
       runGrouped(() => {
