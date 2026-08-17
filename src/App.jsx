@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
+import { createPortal } from "react-dom";
 import jsQR from "jsqr";
 import {
   Plus, Trash2, ChevronLeft, Users, Package, LayoutGrid, Scissors,
@@ -1571,6 +1572,74 @@ function MultiUnitQty({ product, value, onChange, disabled }) {
   );
 }
 
+
+/* Who's on this batch. Sorting is regularly a two-person job, and the log
+   only ever had room for one name, so the second person's work went
+   unrecorded. Tap a name to add or drop them.
+
+   The first name picked also becomes the app-wide "who's working", so the
+   header and the time clock keep pointing at a real person. */
+function CrewSelect({ team, crew, onChange, onAddMember, label = "Who's working on this" }) {
+  const [adding, setAdding] = useState(false);
+  const [newName, setNewName] = useState("");
+  const toggle = (name) => onChange(crew.includes(name) ? crew.filter((n) => n !== name) : [...crew, name]);
+  const commit = () => {
+    const n = newName.trim();
+    if (n) { onAddMember(n); onChange([...crew.filter((x) => x !== n), n]); }
+    setAdding(false); setNewName("");
+  };
+  return (
+    <div>
+      <div className="flex items-center gap-1.5 mb-1.5" style={{ fontSize: 11, fontWeight: 700, color: C.faint, fontFamily: MONO, letterSpacing: 0.4 }}>
+        <User size={13} /> {label.toUpperCase()}
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {team.map((t) => {
+          const on = crew.includes(t);
+          return (
+            <button
+              key={t} onClick={() => toggle(t)}
+              className="px-3 py-2 rounded-sm"
+              style={{
+                fontFamily: MONO, fontSize: 13, fontWeight: on ? 700 : 400,
+                background: on ? C.ink : "transparent",
+                color: on ? "#fff" : C.ink,
+                border: `1px solid ${on ? C.ink : C.kraftDark}`,
+              }}
+            >
+              {on ? "\u2713 " : ""}{t}
+            </button>
+          );
+        })}
+        {adding ? (
+          <span className="flex items-center gap-1">
+            <input
+              autoFocus style={{ ...inputStyle, width: 120, padding: "6px 8px", fontSize: 13 }}
+              value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Name"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") commit();
+                if (e.key === "Escape") { setAdding(false); setNewName(""); }
+              }}
+            />
+            <button onClick={commit} style={{ color: C.kraftDark }}><Check size={15} /></button>
+          </span>
+        ) : (
+          <button
+            onClick={() => setAdding(true)}
+            className="px-3 py-2 rounded-sm"
+            style={{ fontFamily: MONO, fontSize: 13, color: C.faint, border: `1px dashed ${C.kraftDark}` }}
+          >
+            + Add name
+          </button>
+        )}
+      </div>
+      {crew.length === 0 && (
+        <div className="mt-1.5 text-xs" style={{ color: C.warn }}>Tap your name — more than one if two of you are on it.</div>
+      )}
+    </div>
+  );
+}
+
 function WhoSelect({ team, current, onChange, onAddMember, onDark = false, big = false }) {
   const [adding, setAdding] = useState(false);
   const [newName, setNewName] = useState("");
@@ -2799,6 +2868,47 @@ function InventoryDetail({ product, products, invLog, onChange, onBack, onDelete
   );
 }
 
+/* Every print sheet renders through here — into a portal at the end of
+   <body> rather than inside the app tree.
+
+   The old approach hid the app with `visibility: hidden` and floated the
+   sheet on top of it. But hidden elements still occupy their full height,
+   so the browser still paged out the entire app behind the sheet — and
+   because the overlay is position:fixed, the sheet got painted onto every
+   one of those pages. That is why one work order came out of the printer
+   as several copies. Taking the app out of the printed page box entirely
+   gives exactly one copy of whatever is on the sheet. */
+function PrintPortal({ children }) {
+  const hostRef = useRef(null);
+  if (!hostRef.current && typeof document !== "undefined") {
+    hostRef.current = document.createElement("div");
+    hostRef.current.className = "print-portal";
+  }
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    document.body.appendChild(host);
+    return () => { if (host.parentNode) host.parentNode.removeChild(host); };
+  }, []);
+  return hostRef.current ? createPortal(children, hostRef.current) : null;
+}
+
+const PRINT_CSS = `
+  @page { size: letter; margin: 0.4in; }
+  @media print {
+    /* Only the portal prints. Everything else leaves the page box so it
+       cannot generate pages of its own. */
+    body > *:not(.print-portal) { display: none !important; }
+    .print-overlay {
+      position: static !important; overflow: visible !important;
+      background: none !important; inset: auto !important; z-index: auto !important;
+    }
+    .print-shell { max-width: none !important; margin: 0 !important; }
+    .print-sheet { padding: 0 !important; }
+    .no-print { display: none !important; }
+  }
+`;
+
 /* A printable count sheet for walking the racks. Everything the counter
    needs is on the page — what the app currently believes is on hand, plus
    blank space to tally against it — so nobody has to carry a phone around
@@ -2857,18 +2967,11 @@ function InventoryCountSheet({ products, group, onClose }) {
   );
 
   return (
-    <div className="fixed inset-0 z-50 overflow-auto" style={{ background: "rgba(34,29,25,0.6)" }}>
-      <style>{`
-        @page { size: letter; margin: 0.45in; }
-        @media print {
-          body * { visibility: hidden !important; }
-          #count-print-root, #count-print-root * { visibility: visible !important; }
-          #count-print-root { position: absolute !important; left: 0; top: 0; margin: 0; }
-          .no-print { display: none !important; }
-        }
-      `}</style>
+    <PrintPortal>
+    <div className="fixed inset-0 z-50 overflow-auto print-overlay" style={{ background: "rgba(34,29,25,0.6)" }}>
+      <style>{PRINT_CSS}</style>
 
-      <div className="max-w-4xl mx-auto my-8">
+      <div className="max-w-4xl mx-auto my-8 print-shell">
         <div className="flex flex-wrap justify-between items-center gap-2 mb-3 no-print">
           <div className="flex flex-wrap items-center gap-2">
             {[["all", "All"], ["wood", "Wood"], ["milled", "Milled"], ["paint", "Paint"], ["packing", "Packaging"]].map(([id, label]) => (
@@ -2895,7 +2998,7 @@ function InventoryCountSheet({ products, group, onClose }) {
           </div>
         </div>
 
-        <div id="count-print-root" style={{ background: "#fff", color: "#000", padding: "0.3in", fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif" }}>
+        <div id="count-print-root" className="print-sheet" style={{ background: "#fff", color: "#000", padding: "0.3in", fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif" }}>
           <div className="flex items-end justify-between" style={{ borderBottom: "3px solid #000", paddingBottom: 8, marginBottom: 10 }}>
             <div>
               <div style={{ fontSize: 21, fontWeight: 900, letterSpacing: -0.3 }}>INVENTORY COUNT SHEET</div>
@@ -2959,6 +3062,7 @@ function InventoryCountSheet({ products, group, onClose }) {
         </div>
       </div>
     </div>
+    </PrintPortal>
   );
 }
 
@@ -3130,10 +3234,46 @@ function InventoryTab({ products, onChange, invLog, activeId, setActiveId }) {
     </div>
   );
 }
-function useStopwatch() {
-  const [running, setRunning] = useState(false);
-  const [elapsed, setElapsed] = useState(0);
-  const startRef = useRef(null);
+/* An open log survives the app being closed.
+
+   Everything on a log form lives in React state, which the browser throws
+   away the moment the app is shut — so a batch someone had half filled in,
+   timer running, came back blank the next morning. This mirrors the draft
+   into localStorage on every change. localStorage writes are synchronous,
+   so unlike the Supabase save (a network round trip that gets cancelled
+   mid-flight when the page goes away) it survives even an abrupt kill.
+
+   The clock stores the moment it was started rather than a running count
+   of seconds, so time keeps accruing while the app is closed — which is
+   what actually happened on the floor. */
+function useDraft(key) {
+  const readDraft = () => {
+    try { return JSON.parse(localStorage.getItem(key) || "null") || {}; }
+    catch { return {}; }
+  };
+  const savedRef = useRef(null);
+  if (savedRef.current === null) savedRef.current = readDraft();
+
+  const save = (patch) => {
+    try {
+      const next = { ...readDraft(), ...patch };
+      localStorage.setItem(key, JSON.stringify(next));
+    } catch { /* private browsing or a full quota — the form still works */ }
+  };
+  const clear = () => { try { localStorage.removeItem(key); } catch { /* nothing to clean up */ } };
+  return { saved: savedRef.current, save, clear };
+}
+
+/* A stopwatch that can be handed a draft to resume from. */
+function useStopwatch(resume) {
+  // A clock that was running when the app closed keeps counting: elapsed is
+  // measured from the stored start time, not frozen at the last render.
+  const [running, setRunning] = useState(() => !!resume?.running);
+  const [elapsed, setElapsed] = useState(() => {
+    if (resume?.running && resume.startedAt) return Math.max(0, Math.floor((Date.now() - resume.startedAt) / 1000));
+    return Math.max(0, Math.round(Number(resume?.elapsed) || 0));
+  });
+  const startRef = useRef(resume?.running && resume.startedAt ? resume.startedAt : null);
   const timerRef = useRef(null);
 
   useEffect(() => {
@@ -3156,10 +3296,17 @@ function useStopwatch() {
 
   const start = () => { startRef.current = Date.now() - elapsed * 1000; setRunning(true); };
   const pause = () => setRunning(false);
-  const reset = () => { setRunning(false); setElapsed(0); };
-  const setManual = (seconds) => setElapsed(Math.max(0, Math.round(seconds)));
+  const reset = () => { setRunning(false); setElapsed(0); startRef.current = null; };
+  const setManual = (seconds) => {
+    const v = Math.max(0, Math.round(seconds));
+    setElapsed(v);
+    if (running) startRef.current = Date.now() - v * 1000;
+  };
 
-  return { running, elapsed, start, pause, reset, setManual };
+  // What a draft needs to bring this clock back exactly as it was.
+  const snapshot = { running, elapsed, startedAt: startRef.current };
+
+  return { running, elapsed, start, pause, reset, setManual, snapshot };
 }
 
 const QR = (() => {
@@ -3644,40 +3791,33 @@ function lineConversions(product, qtySF) {
 function WorkOrderPrintView({ wo, customer, products, onClose }) {
   const brand = brandFor(wo.brand);
   return (
-    <div className="fixed inset-0 z-50 overflow-auto" style={{ background: "rgba(34,29,25,0.6)" }}>
-      <style>{`
-        @page { size: letter; margin: 0.5in; }
-        @media print {
-          body * { visibility: hidden !important; }
-          #wo-print-root, #wo-print-root * { visibility: visible !important; }
-          #wo-print-root { position: absolute !important; left: 0; top: 0; margin: 0; }
-          .no-print { display: none !important; }
-        }
-      `}</style>
-      <div className="max-w-4xl mx-auto my-8">
+    <PrintPortal>
+    <div className="fixed inset-0 z-50 overflow-auto print-overlay" style={{ background: "rgba(34,29,25,0.6)" }}>
+      <style>{PRINT_CSS}</style>
+      <div className="max-w-4xl mx-auto my-8 print-shell">
         <div className="flex justify-end gap-2 mb-3 no-print">
           <Btn kind="dark" onClick={() => window.print()}><Printer size={13} /> Print</Btn>
           <Btn onClick={onClose}><X size={13} /> Close</Btn>
         </div>
 
-        <div id="wo-print-root" style={{ background: "#fff", color: "#000", padding: "0.4in", fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif" }}>
-          <div className="flex items-center justify-between" style={{ borderBottom: "3px solid #000", paddingBottom: 10, marginBottom: 16 }}>
-            <div className="flex items-center" style={{ gap: 12 }}>
+        <div id="wo-print-root" className="print-sheet" style={{ background: "#fff", color: "#000", padding: "0.4in", fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif" }}>
+          <div className="flex items-center justify-between" style={{ borderBottom: "2px solid #000", paddingBottom: 6, marginBottom: 10 }}>
+            <div className="flex items-center" style={{ gap: 10 }}>
               <img
                 src={brand.logo} alt=""
-                style={{ height: 52, width: 52, objectFit: "contain" }}
+                style={{ height: 40, width: 40, objectFit: "contain" }}
                 onError={(e) => { e.currentTarget.style.display = "none"; }}
               />
               <div>
-                <div style={{ fontSize: 24, fontWeight: 900 }}>WORK ORDER</div>
-                <div style={{ fontSize: 12, marginTop: 4 }}>
+                <div style={{ fontSize: 19, fontWeight: 900, lineHeight: 1.1 }}>WORK ORDER</div>
+                <div style={{ fontSize: 10, marginTop: 2, lineHeight: 1.35 }}>
                   <div style={{ fontWeight: 700 }}>{brand.name}</div>
                   <div>{SHIPPER.address}</div>
                   <div>{SHIPPER.cityStateZip}</div>
                 </div>
               </div>
             </div>
-            <div style={{ textAlign: "right", fontSize: 12 }}>
+            <div style={{ textAlign: "right", fontSize: 10, lineHeight: 1.45 }}>
               <div><strong>WO #:</strong> {wo.number}</div>
               <div><strong>Date:</strong> {wo.date}</div>
               {wo.readyByDate && <div><strong>Ready by:</strong> {wo.readyByDate}</div>}
@@ -3686,15 +3826,15 @@ function WorkOrderPrintView({ wo, customer, products, onClose }) {
             </div>
           </div>
 
-          <div className="mb-4">
-            <div style={{ fontSize: 11, fontWeight: 700, color: "#555" }}>CUSTOMER</div>
-            <div style={{ fontWeight: 700 }}>{customer?.company || "No customer assigned"}</div>
-            {customer?.address && <div style={{ fontSize: 13 }}>{customer.address}</div>}
-            {(customer?.city || customer?.state) && <div style={{ fontSize: 13 }}>{[customer?.city, customer?.state, customer?.zip].filter(Boolean).join(", ")}</div>}
+          <div style={{ marginBottom: 8, fontSize: 11, lineHeight: 1.35 }}>
+            <div style={{ fontSize: 9, fontWeight: 700, color: "#555", letterSpacing: 0.5 }}>CUSTOMER</div>
+            <div style={{ fontWeight: 700, fontSize: 12 }}>{customer?.company || "No customer assigned"}</div>
+            {customer?.address && <div>{customer.address}</div>}
+            {(customer?.city || customer?.state) && <div>{[customer?.city, customer?.state, customer?.zip].filter(Boolean).join(", ")}</div>}
           </div>
 
           {wo.notes && (
-            <div className="mb-4" style={{ fontSize: 13 }}>
+            <div style={{ marginBottom: 8, fontSize: 11 }}>
               <strong>Notes:</strong> {wo.notes}
             </div>
           )}
@@ -3708,26 +3848,26 @@ function WorkOrderPrintView({ wo, customer, products, onClose }) {
             const checkedSteps = PROCESS_STEPS.filter((s) => line.steps && line.steps[s.id]);
             const conversions = lineConversions(p, line.qtySF);
             return (
-              <div key={line.id} style={{ border: "1px solid #999", padding: 8, marginBottom: 8, pageBreakInside: "avoid" }}>
+              <div key={line.id} style={{ border: "1px solid #999", padding: "5px 7px", marginBottom: 5, breakInside: "avoid", pageBreakInside: "avoid" }}>
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    {p && <div style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 13 }}>{p.sku}</div>}
-                    <div style={{ fontSize: 13, fontWeight: p ? 400 : 700 }}>{p ? p.name : (line.desc || "Item")}</div>
+                    {p && <div style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 12, lineHeight: 1.2 }}>{p.sku}</div>}
+                    <div style={{ fontSize: 11, fontWeight: p ? 400 : 700, lineHeight: 1.25 }}>{p ? p.name : (line.desc || "Item")}</div>
                   </div>
-                  <div style={{ textAlign: "right", fontSize: 11 }}>
+                  <div style={{ textAlign: "right", fontSize: 10, whiteSpace: "nowrap" }}>
                     {conversions.map((c) => `${fmtConv(c.qty)} ${unitLabel(c.unit)}`).join(" · ")}
                   </div>
                 </div>
 
                 {(line.note || p?.otherNotes || specLine(line.spec) || paintFor(p, products)) && (
-                  <div className="mt-1" style={{ fontSize: 11, color: "#333" }}>
+                  <div style={{ marginTop: 3, fontSize: 10, color: "#333", lineHeight: 1.35 }}>
                     {line.note && <div><strong>Order note:</strong> {line.note}</div>}
                     {p?.otherNotes && <div><strong>Item note:</strong> {p.otherNotes}</div>}
                     {paintFor(p, products) && (
                       <div><strong>Paint:</strong> {paintFor(p, products).sku} — {paintFor(p, products).name}</div>
                     )}
                     {specLine(line.spec) && (
-                      <div style={{ marginTop: 2, padding: "3px 6px", border: "1px solid #999", background: "#f4f4f4" }}>
+                      <div style={{ marginTop: 2, padding: "2px 5px", border: "1px solid #999", background: "#f4f4f4" }}>
                         <strong>Spec:</strong> {specLine(line.spec)}
                       </div>
                     )}
@@ -3735,11 +3875,11 @@ function WorkOrderPrintView({ wo, customer, products, onClose }) {
                 )}
 
                 {checkedSteps.length > 0 && (
-                  <div className="flex flex-wrap mt-2" style={{ gap: 12 }}>
+                  <div className="flex flex-wrap" style={{ gap: "3px 10px", marginTop: 4 }}>
                     {checkedSteps.map((s) => (
-                      <div key={s.id} className="flex items-center" style={{ gap: 5 }}>
-                        <span style={{ width: 13, height: 13, border: "1.5px solid #000", display: "inline-block" }} />
-                        <span style={{ fontSize: 11 }}>{s.label}</span>
+                      <div key={s.id} className="flex items-center" style={{ gap: 4 }}>
+                        <span style={{ width: 11, height: 11, border: "1.25px solid #000", display: "inline-block" }} />
+                        <span style={{ fontSize: 10 }}>{s.label}</span>
                       </div>
                     ))}
                   </div>
@@ -3750,6 +3890,7 @@ function WorkOrderPrintView({ wo, customer, products, onClose }) {
         </div>
       </div>
     </div>
+    </PrintPortal>
   );
 }
 
@@ -3767,17 +3908,10 @@ function BOLModal({ wo, customer, products, onClose }) {
   const bolNumber = `BOL-${wo.number}`;
 
   return (
-    <div className="fixed inset-0 z-50 overflow-auto" style={{ background: "rgba(34,29,25,0.6)" }}>
-      <style>{`
-        @page { size: letter; margin: 0.5in; }
-        @media print {
-          body * { visibility: hidden !important; }
-          #bol-root, #bol-root * { visibility: visible !important; }
-          #bol-root { position: absolute !important; left: 0; top: 0; margin: 0; }
-          .no-print { display: none !important; }
-        }
-      `}</style>
-      <div className="max-w-2xl mx-auto my-8">
+    <PrintPortal>
+    <div className="fixed inset-0 z-50 overflow-auto print-overlay" style={{ background: "rgba(34,29,25,0.6)" }}>
+      <style>{PRINT_CSS}</style>
+      <div className="max-w-2xl mx-auto my-8 print-shell">
         <div className="flex justify-end gap-2 mb-3 no-print">
           <Field label="Pallets" w={90}><input type="number" style={inputStyle} value={pallets} onChange={(e) => setPallets(e.target.value)} /></Field>
           <Field label="Weight (lbs)" w={110}><input type="number" style={inputStyle} value={weight} onChange={(e) => setWeight(e.target.value)} /></Field>
@@ -3789,7 +3923,7 @@ function BOLModal({ wo, customer, products, onClose }) {
           </div>
         </div>
 
-        <div id="bol-root" style={{ background: "#fff", color: "#000", padding: "0.4in", fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif" }}>
+        <div id="bol-root" className="print-sheet" style={{ background: "#fff", color: "#000", padding: "0.4in", fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif" }}>
           <div className="flex items-center justify-between" style={{ borderBottom: "3px solid #000", paddingBottom: 10, marginBottom: 16 }}>
             <div style={{ fontSize: 24, fontWeight: 900 }}>BILL OF LADING</div>
             <div style={{ textAlign: "right", fontSize: 12 }}>
@@ -3854,6 +3988,7 @@ function BOLModal({ wo, customer, products, onClose }) {
         </div>
       </div>
     </div>
+    </PrintPortal>
   );
 }
 
@@ -3923,19 +4058,10 @@ function PalletLabelModal({ wo, customer, products, onClose, onGenerate }) {
 
 function FinishedLabelPrintView({ labels, onClose }) {
   return (
-    <div className="fixed inset-0 z-50 overflow-auto" style={{ background: "rgba(34,29,25,0.6)" }}>
-      <style>{`
-        @page { size: 4in 1in landscape; margin: 0; }
-        @media print {
-          body * { visibility: hidden !important; }
-          #flabels-root, #flabels-root * { visibility: visible !important; }
-          #flabels-root { margin: 0 !important; }
-          .flabel-page { page-break-after: always; break-after: page; page-break-inside: avoid; break-inside: avoid; border: none !important; margin: 0 !important; }
-          .flabel-page:last-child { page-break-after: auto; break-after: auto; }
-          .no-print { display: none !important; }
-        }
-      `}</style>
-      <div className="max-w-md mx-auto my-8">
+    <PrintPortal>
+    <div className="fixed inset-0 z-50 overflow-auto print-overlay" style={{ background: "rgba(34,29,25,0.6)" }}>
+      <style>{PRINT_CSS}</style>
+      <div className="max-w-md mx-auto my-8 print-shell">
         <div className="flex justify-end gap-2 mb-3 no-print">
           <Btn kind="dark" onClick={() => window.print()}><Printer size={13} /> Print all {labels.length} labels</Btn>
           <Btn onClick={onClose}><X size={13} /> Close</Btn>
@@ -3963,24 +4089,16 @@ function FinishedLabelPrintView({ labels, onClose }) {
         </div>
       </div>
     </div>
+    </PrintPortal>
   );
 }
 
 function LabelPrintView({ units, supplierFor, onClose }) {
   return (
-    <div className="fixed inset-0 z-50 overflow-auto" style={{ background: "rgba(34,29,25,0.6)" }}>
-      <style>{`
-        @page { size: 4in 1in landscape; margin: 0; }
-        @media print {
-          body * { visibility: hidden !important; }
-          #labels-root, #labels-root * { visibility: visible !important; }
-          #labels-root { margin: 0 !important; }
-          .label-page { page-break-after: always; break-after: page; page-break-inside: avoid; break-inside: avoid; border: none !important; margin: 0 !important; }
-          .label-page:last-child { page-break-after: auto; break-after: auto; }
-          .no-print { display: none !important; }
-        }
-      `}</style>
-      <div className="max-w-md mx-auto my-8">
+    <PrintPortal>
+    <div className="fixed inset-0 z-50 overflow-auto print-overlay" style={{ background: "rgba(34,29,25,0.6)" }}>
+      <style>{PRINT_CSS}</style>
+      <div className="max-w-md mx-auto my-8 print-shell">
         <div className="flex justify-end gap-2 mb-3 no-print">
           <Btn kind="dark" onClick={() => window.print()}>
             <Printer size={13} /> {units.length > 1 ? `Print all ${units.length} labels` : "Print label"}
@@ -4016,6 +4134,7 @@ function LabelPrintView({ units, supplierFor, onClose }) {
         </div>
       </div>
     </div>
+    </PrintPortal>
   );
 }
 
@@ -4770,16 +4889,20 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
   const millStock = products.find((p) => p.role === "millStock");
   const rawProducts = products.filter((p) => p.kind === "board" && p.role === "raw");
 
-  const [workOrderId, setWorkOrderId] = useState("");
-  const [unitId, setUnitId] = useState(jumpToUnitId || "");
-  const [rawProductId, setRawProductId] = useState("");
-  const [rawBoards, setRawBoards] = useState("");
-  const [toN, setToN] = useState("");
-  const [toP, setToP] = useState("");
-  const [toMill, setToMill] = useState("");
-  const [toWaste, setToWaste] = useState("");
-  const [description, setDescription] = useState("");
-  const sw = useStopwatch();
+  // Anything typed here is kept on the device, so closing the app mid-batch
+  // doesn't wipe the log. Cleared when the batch is actually submitted.
+  const { saved, save, clear: clearDraft } = useDraft("gnws-draft-sorting");
+
+  const [workOrderId, setWorkOrderId] = useState(saved.workOrderId || "");
+  const [unitId, setUnitId] = useState(jumpToUnitId || saved.unitId || "");
+  const [rawProductId, setRawProductId] = useState(saved.rawProductId || "");
+  const [rawBoards, setRawBoards] = useState(saved.rawBoards || "");
+  const [toN, setToN] = useState(saved.toN || "");
+  const [toP, setToP] = useState(saved.toP || "");
+  const [toMill, setToMill] = useState(saved.toMill || "");
+  const [toWaste, setToWaste] = useState(saved.toWaste || "");
+  const [description, setDescription] = useState(saved.description || "");
+  const sw = useStopwatch(saved.clock);
   const [manualEdit, setManualEdit] = useState(false);
   const [manualHMS, setManualHMS] = useState({ h: "0", m: "0", s: "0" });
 
@@ -4788,6 +4911,11 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
   const [scannerOpen, setScannerOpen] = useState(false);
   const [scanError, setScanError] = useState("");
 
+  // Seeded from the open draft first, then from whoever the header already
+  // had picked, so someone who set their name once doesn't set it again.
+  const [crew, setCrew] = useState(() => (saved.crew?.length ? saved.crew : whoWorking ? [whoWorking] : []));
+  const setCrewSynced = (next) => { setCrew(next); setWhoWorking(next[0] || ""); };
+
   const rawProduct = products.find((p) => p.id === rawProductId);
   // Where the sorted boards land. These used to be derived purely from the
   // inbound SKU's size family, which meant sorting anything without a
@@ -4795,16 +4923,29 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
   // no product's on-hand moved. They're explicit now, defaulted to the
   // family siblings when those exist so the common case still needs no
   // extra clicks.
-  const [toNProductId, setToNProductId] = useState("");
-  const [toPProductId, setToPProductId] = useState("");
+  const [toNProductId, setToNProductId] = useState(saved.toNProductId || "");
+  const [toPProductId, setToPProductId] = useState(saved.toPProductId || "");
   const familyN = products.find((p) => rawProduct?.groupId && p.groupId === rawProduct.groupId && p.role === "sortedN");
   const familyP = products.find((p) => rawProduct?.groupId && p.groupId === rawProduct.groupId && p.role === "sortedP");
   const nProduct = products.find((p) => p.id === toNProductId) || familyN;
   const pProduct = products.find((p) => p.id === toPProductId) || familyP;
 
+  useEffect(() => {
+    save({ workOrderId, unitId, rawProductId, rawBoards, toN, toP, toMill, toWaste, description, crew, toNProductId, toPProductId });
+  }, [workOrderId, unitId, rawProductId, rawBoards, toN, toP, toMill, toWaste, description, crew, toNProductId, toPProductId]);
+
+  // The clock is saved on every tick so a kill mid-batch loses at most a second.
+  useEffect(() => { save({ clock: sw.snapshot }); }, [sw.running, sw.elapsed]);
+
   // Picking a different inbound SKU re-defaults the destinations to that
-  // SKU's family; anything hand-picked stays put until then.
-  useEffect(() => { setToNProductId(""); setToPProductId(""); }, [rawProductId]);
+  // SKU's family; anything hand-picked stays put until then. Skipped on the
+  // first render, which would otherwise wipe the destinations restored from
+  // an open draft.
+  const firstRender = useRef(true);
+  useEffect(() => {
+    if (firstRender.current) { firstRender.current = false; return; }
+    setToNProductId(""); setToPProductId("");
+  }, [rawProductId]);
 
   useEffect(() => { if (jumpToUnitId) setUnitId(jumpToUnitId); }, [jumpToUnitId]);
 
@@ -4872,7 +5013,7 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
   };
 
   const submit = () => {
-    if (!rawIn || !whoWorking || !rawProductId) return;
+    if (!rawIn || !crew.length || !rawProductId) return;
     const updates = products.map((p) => {
       if (p.id === rawProduct?.id) return { ...p, onHand: (Number(p.onHand) || 0) - rawIn };
       if (p.id === nProduct?.id) return { ...p, onHand: (Number(p.onHand) || 0) + (Number(toN) || 0) };
@@ -4888,7 +5029,7 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
         onUnitsChange(units.map((u) => u.id === unitId ? { ...u, boardsRemaining: Math.max(0, (Number(u.boardsRemaining) || 0) - rawIn) } : u));
       }
       onLogSort({
-        id: uid(), date: today(), by: whoWorking, batchLabel: autoLabel,
+        id: uid(), date: today(), by: crew.join(" + "), crew, batchLabel: autoLabel,
         workOrderId: workOrderId || "", workOrderNumber: wo?.number || "",
         unitId: unitId || "", rawProductId,
         toNProductId: nProduct?.id || "", toPProductId: pProduct?.id || "",
@@ -4900,6 +5041,7 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
     });
     setWorkOrderId(""); setUnitId(""); setRawProductId(""); setRawBoards(""); setToN(""); setToP(""); setToMill(""); setToWaste(""); setDescription(""); setToNProductId(""); setToPProductId("");
     sw.reset();
+    clearDraft();
   };
 
   return (
@@ -4909,9 +5051,12 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
           <div style={{ fontWeight: 800, fontSize: 16 }}>Log a Sorting Batch</div>
         </div>
         <RateTarget sortLog={sortLog} step="sorting" />
+        <div className="mb-3 pb-3" style={{ borderBottom: `1px solid ${C.kraft}` }}>
+          <CrewSelect team={team} crew={crew} onChange={setCrewSynced} onAddMember={onAddTeamMember} />
+        </div>
         <p className="text-sm mb-3" style={{ color: C.faint }}>
           Pick the received unit you're breaking down, then split it into what it actually sorted into.
-          Everything here is counted in <strong>boards</strong>. Make sure your name is picked in the top right first.
+          Everything here is counted in <strong>boards</strong>.
         </p>
 
         <Btn kind="primary" onClick={() => { setScanError(""); setScannerOpen(true); }} big>
@@ -4975,7 +5120,7 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
           <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 2 }}>What did it sort into?</div>
           <div className="grid gap-3 sm:grid-cols-2">
             <div>
-              <Field label="Sorted to (no paint)">
+              <Field label="Sorted Clean">
                 <SkuPicker
                   products={products} value={nProduct?.id || ""} onChange={setToNProductId}
                   onCreate={(np) => onProductsChange([...products, np])}
@@ -4987,7 +5132,7 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
               </Field>
             </div>
             <div>
-              <Field label="Sorted to (one side painted)">
+              <Field label="Sorted Paint">
                 <SkuPicker
                   products={products} value={pProduct?.id || ""} onChange={setToPProductId}
                   onCreate={(np) => onProductsChange([...products, np])}
@@ -5049,11 +5194,11 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
         </div>
 
         <div className="mt-4">
-          <Btn kind="primary" onClick={submit} disabled={!rawIn || !whoWorking || !rawProductId} big>
+          <Btn kind="primary" onClick={submit} disabled={!rawIn || !crew.length || !rawProductId} big>
             <Check size={16} /> Log this batch
           </Btn>
           {!rawProductId && <div className="mt-2 text-xs" style={{ color: C.warn }}>Pick a raw size above first.</div>}
-          {!whoWorking && <div className="mt-2 text-xs" style={{ color: C.warn }}>Pick your name above first.</div>}
+          {!crew.length && <div className="mt-2 text-xs" style={{ color: C.warn }}>Pick your name above first.</div>}
         </div>
       </div>
 
@@ -5150,7 +5295,9 @@ function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, o
   const inBoards = Number(inboundBoards) || 0;
   const outBoards = Number(outboundBoards) || 0;
   const wasteN = Number(wasteBoards) || 0;
-  const canSubmit = inBoards > 0 && whoWorking && inboundProductId && outboundProductId;
+  const [crew, setCrew] = useState(() => (whoWorking ? [whoWorking] : []));
+  const setCrewSynced = (next) => { setCrew(next); setWhoWorking(next[0] || ""); };
+  const canSubmit = inBoards > 0 && crew.length > 0 && inboundProductId && outboundProductId;
   const openWorkOrders = workOrders.filter((w) => w.status !== "shipped");
   const stepEntries = sortLog.filter((s) => s.step === step);
 
@@ -5164,7 +5311,7 @@ function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, o
         return p;
       }));
       onLogSort({
-        id: uid(), date: today(), by: whoWorking,
+        id: uid(), date: today(), by: crew.join(" + "), crew,
         batchLabel: `${stepDef?.label || step} — ${inboundProduct?.sku || "?"} → ${outboundProduct?.sku || "?"}`,
         step,
         workOrderId: workOrderId || "", workOrderNumber: wo?.number || "",
@@ -5189,7 +5336,7 @@ function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, o
         <RateTarget sortLog={sortLog} step={step} />
 
         <Field label="Who's working on this" required>
-          <WhoSelect team={team} current={whoWorking} onChange={setWhoWorking} onAddMember={onAddTeamMember} />
+          <CrewSelect team={team} crew={crew} onChange={setCrewSynced} onAddMember={onAddTeamMember} />
         </Field>
 
         <div className="mt-3">
@@ -5262,7 +5409,7 @@ function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, o
           </Btn>
           {!inboundProductId && <div className="mt-2 text-xs" style={{ color: C.warn }}>Pick inbound stock above first.</div>}
           {!outboundProductId && <div className="mt-2 text-xs" style={{ color: C.warn }}>Pick or create an outbound SKU above first.</div>}
-          {!whoWorking && <div className="mt-2 text-xs" style={{ color: C.warn }}>Pick your name above first.</div>}
+          {!crew.length && <div className="mt-2 text-xs" style={{ color: C.warn }}>Pick your name above first.</div>}
         </div>
       </div>
 
