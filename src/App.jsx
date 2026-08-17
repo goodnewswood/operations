@@ -1640,6 +1640,47 @@ function CrewSelect({ team, crew, onChange, onAddMember, label = "Who's working 
   );
 }
 
+/* ---------------- Phone Back button ----------------
+   Android and iOS both treat Back as "up one level". This is a single
+   page, so nothing here ever created a history entry — which meant the
+   very first Back press left the site entirely. On a phone, with the app
+   pinned to the home screen, that reads as the whole app disappearing.
+
+   Instead of threading a router through everything, any screen that can
+   be "backed out of" — a detail view, a modal, a print sheet — registers
+   itself here while it is open. One spare history entry is kept armed at
+   all times; a Back press pops that entry, we close the innermost layer
+   ourselves, and re-arm. Only when there is nothing left to close does
+   Back actually leave. */
+const backLayers = [];
+
+/* One spare history entry is kept in front of us so a Back press always
+   has something to pop. It gets consumed on every press, so anything that
+   moves around inside the app re-arms it — otherwise letting one press
+   through to leave would leave Back permanently dead. */
+let backArmed = false;
+function armBack() {
+  if (backArmed) return;
+  try { window.history.pushState({ gnws: 1 }, ""); backArmed = true; } catch { /* history unavailable */ }
+}
+
+function useBackLayer(active, close) {
+  const closeRef = useRef(close);
+  closeRef.current = close;
+  useEffect(() => {
+    if (!active) return;
+    // Registered by identity, so unmounting removes the right one even
+    // when several layers are stacked.
+    const entry = { close: () => closeRef.current() };
+    backLayers.push(entry);
+    armBack();
+    return () => {
+      const i = backLayers.indexOf(entry);
+      if (i >= 0) backLayers.splice(i, 1);
+    };
+  }, [active]);
+}
+
 function WhoSelect({ team, current, onChange, onAddMember, onDark = false, big = false }) {
   const [adding, setAdding] = useState(false);
   const [newName, setNewName] = useState("");
@@ -1759,7 +1800,7 @@ function Dashboard({ workOrders, products, sortLog, units, onOpenWO, goTab, goal
         {STATUS_FLOW.map((s) => (
           <button
             key={s}
-            onClick={() => goTab("workorders")}
+            onClick={() => goTab("orders")}
             className="rounded-sm p-4 text-left hover:shadow-md transition-shadow"
             style={{ background: C.panel, border: `1px solid ${C.kraftDark}`, borderLeft: `4px solid ${STATUS_COLOR[s]}` }}
           >
@@ -1834,7 +1875,7 @@ function Dashboard({ workOrders, products, sortLog, units, onOpenWO, goTab, goal
           <div className="mt-4 pt-3" style={{ borderTop: `1px solid ${C.kraft}` }}>
             <div className="flex items-center justify-between mb-1">
               <span style={{ fontFamily: MONO, fontSize: 10, color: C.faint, letterSpacing: "0.08em" }}>RECEIVED UNITS AWAITING SORT</span>
-              <button onClick={() => goTab("receiving")} style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>View →</button>
+              <button onClick={() => goTab("work")} style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>View →</button>
             </div>
             {unclaimedUnits.length === 0 ? (
               <div className="text-sm" style={{ color: C.faint }}>Nothing waiting.</div>
@@ -2404,6 +2445,7 @@ function ImportInvoiceModal({ customers, onClose, onImported }) {
 
 function CustomersTab({ customers, onChange }) {
   const [openId, setOpenId] = useState(null);
+  useBackLayer(!!openId, () => setOpenId(null));
   const [pinnedId, setPinnedId] = useState(null);
   const [sortBy, setSortBy] = useState("name");
   const update = (id, patch) => onChange(customers.map((c) => (c.id === id ? { ...c, ...patch } : c)));
@@ -2919,6 +2961,7 @@ const PRINT_CSS = `
    book, not a blind count, and the crew has always worked off the last
    known number. */
 function InventoryCountSheet({ products, group, onClose }) {
+  useBackLayer(true, onClose);
   const [cat, setCat] = useState(group || "all");
 
   const rows = products
@@ -3071,6 +3114,7 @@ function InventoryTab({ products, onChange, invLog, activeId, setActiveId }) {
   const [pinnedId, setPinnedId] = useState(null);
   const [countSheetOpen, setCountSheetOpen] = useState(false);
   const active = products.find((p) => p.id === activeId) || null;
+  useBackLayer(!!active, () => setActiveId(null));
 
   // A change made here is someone looking at the shelf, so it lands in the
   // history as a count rather than an anonymous edit.
@@ -3488,6 +3532,7 @@ function QRCode({ value, size = 96 }) {
 
 function VendorsTab({ suppliers, onChange }) {
   const [openId, setOpenId] = useState(null);
+  useBackLayer(!!openId, () => setOpenId(null));
   const [pinnedId, setPinnedId] = useState(null);
   const [sortBy, setSortBy] = useState("name");
   const [showHidden, setShowHidden] = useState(false);
@@ -3789,6 +3834,7 @@ function lineConversions(product, qtySF) {
 }
 
 function WorkOrderPrintView({ wo, customer, products, onClose }) {
+  useBackLayer(true, onClose);
   const brand = brandFor(wo.brand);
   return (
     <PrintPortal>
@@ -3895,6 +3941,7 @@ function WorkOrderPrintView({ wo, customer, products, onClose }) {
 }
 
 function BOLModal({ wo, customer, products, onClose }) {
+  useBackLayer(true, onClose);
   const totalSF = (wo.lines || []).reduce((sum, l) => sum + (Number(l.qtySF) || 0), 0);
   const estimatedPallets = (wo.lines || []).reduce((sum, l) => {
     const product = products.find((p) => p.id === l.productId);
@@ -4001,6 +4048,7 @@ function BOLModal({ wo, customer, products, onClose }) {
    here, on purpose. */
 
 function PalletLabelModal({ wo, customer, products, onClose, onGenerate }) {
+  useBackLayer(true, onClose);
   const lineDesc = (l) => {
     const p = products.find((pr) => pr.id === l.productId);
     return p ? p.sku : (l.desc || "Item");
@@ -4057,6 +4105,7 @@ function PalletLabelModal({ wo, customer, products, onClose, onGenerate }) {
 }
 
 function FinishedLabelPrintView({ labels, onClose }) {
+  useBackLayer(true, onClose);
   return (
     <PrintPortal>
     <div className="fixed inset-0 z-50 overflow-auto print-overlay" style={{ background: "rgba(34,29,25,0.6)" }}>
@@ -4780,6 +4829,7 @@ function ReceivingTab({ suppliers, purchaseOrders, onPOChange, units, onUnitsCha
 function WorkTab(props) {
   const { jumpToUnitId } = props;
   const [activeStep, setActiveStep] = useState(null);
+  useBackLayer(!!activeStep, () => setActiveStep(null));
   useEffect(() => { if (jumpToUnitId) setActiveStep("sorting"); }, [jumpToUnitId]);
 
   if (!activeStep) {
@@ -6610,6 +6660,7 @@ export default function App() {
   const [activeProductId, setActiveProductId] = useState(null);
   const [jumpToUnitId, setJumpToUnitId] = useState(null);
   const [importOpen, setImportOpen] = useState(false);
+  const [exitHint, setExitHint] = useState(false);
   const saveTimers = useRef({});
   // Baseline per key: what this tab last saw in storage. Used to tell our
   // own edits apart from another tab's when merging at save time.
@@ -6892,7 +6943,7 @@ export default function App() {
     };
     setWorkOrders([w, ...workOrders]);
     setActiveWOId(w.id);
-    setTab("orders");
+    goTab("orders");
     setOrdersSubTab("workorders");
   };
 
@@ -6909,6 +6960,54 @@ export default function App() {
   };
 
   const activeWO = workOrders.find((w) => w.id === activeWOId) || null;
+
+  // Back out of an open work order or the invoice importer before anything else.
+  useBackLayer(!!activeWO, () => setActiveWOId(null));
+  useBackLayer(importOpen, () => setImportOpen(false));
+
+  /* Which tabs have been visited, so Back returns to where you came from
+     rather than a fixed home screen. Repeats collapse — bouncing between
+     two tabs shouldn't build a stack you have to unwind press by press. */
+  const tabStackRef = useRef([tab]);
+  const TAB_IDS = ["dashboard", "work", "orders", "inventory", "contacts", "time", "reports"];
+  const goTab = (next) => {
+    if (!next || next === tab || !TAB_IDS.includes(next)) return;
+    const stack = tabStackRef.current;
+    const seen = stack.indexOf(next);
+    if (seen >= 0) stack.length = seen + 1; else stack.push(next);
+    armBack();
+    setTab(next);
+  };
+
+  // Innermost layer first, then the tab you came from, then out.
+  const goBack = () => {
+    if (backLayers.length) { backLayers[backLayers.length - 1].close(); return true; }
+    const stack = tabStackRef.current;
+    if (stack.length > 1) { stack.pop(); setTab(stack[stack.length - 1]); return true; }
+    return false;
+  };
+  const goBackRef = useRef(goBack);
+  goBackRef.current = goBack;
+
+  const exitArmRef = useRef(0);
+  useEffect(() => {
+    armBack();
+    const onPop = () => {
+      backArmed = false; // the press just consumed our spare entry
+      if (goBackRef.current()) { armBack(); return; }
+      // Top of the app. A single press deliberately does NOT leave — that
+      // is what made Back feel like it deleted the app mid-shift. Press it
+      // again within a couple of seconds and we let go.
+      const now = Date.now();
+      if (now - exitArmRef.current < 2500) return; // second press: let it through
+      exitArmRef.current = now;
+      armBack();
+      setExitHint(true);
+      setTimeout(() => setExitHint(false), 2500);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
 
   const handleImported = ({ parsed, matchedCustomerId, fileName }) => {
     const cust = customers.find((c) => c.id === matchedCustomerId);
@@ -6930,7 +7029,7 @@ export default function App() {
     };
     setWorkOrders([w, ...workOrders]);
     setActiveWOId(w.id);
-    setTab("orders");
+    goTab("orders");
     setOrdersSubTab("workorders");
     setImportOpen(false);
   };
@@ -7055,7 +7154,7 @@ export default function App() {
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={(e) => { e.preventDefault(); reorderTabs(t.id); setDraggedTabId(null); }}
                 onDragEnd={() => setDraggedTabId(null)}
-                onClick={() => { setTab(t.id); if (t.id === "orders" && ordersSubTab === "workorders") setActiveWOId(null); }}
+                onClick={() => { goTab(t.id); if (t.id === "orders" && ordersSubTab === "workorders") setActiveWOId(null); }}
                 className="flex items-center gap-1.5 px-4 py-2.5 text-sm font-bold whitespace-nowrap cursor-grab active:cursor-grabbing"
                 style={{
                   fontFamily: MONO, letterSpacing: "0.05em",
@@ -7088,7 +7187,7 @@ export default function App() {
           {orderedTabs.map((t) => (
             <button
               key={t.id}
-              onClick={() => { setTab(t.id); if (t.id === "orders" && ordersSubTab === "workorders") setActiveWOId(null); }}
+              onClick={() => { goTab(t.id); if (t.id === "orders" && ordersSubTab === "workorders") setActiveWOId(null); }}
               className="flex flex-col items-center justify-center gap-0.5"
               style={{
                 flex: "1 1 0", minWidth: 0, padding: "9px 2px 8px",
@@ -7107,7 +7206,7 @@ export default function App() {
 
       <main className="max-w-6xl mx-auto px-4 py-5 pb-24 sm:pb-5">
         {tab === "dashboard" && (
-          <Dashboard workOrders={workOrders} products={products} sortLog={sortLog} units={units} onOpenWO={(id) => { setActiveWOId(id); setTab("orders"); setOrdersSubTab("workorders"); }} goTab={setTab} goals={goals} onGoalsChange={setGoals} />
+          <Dashboard workOrders={workOrders} products={products} sortLog={sortLog} units={units} onOpenWO={(id) => { setActiveWOId(id); goTab("orders"); setOrdersSubTab("workorders"); }} goTab={goTab} goals={goals} onGoalsChange={setGoals} />
         )}
 
         {tab === "orders" && !(ordersSubTab === "workorders" && activeWO) && (
@@ -7145,6 +7244,14 @@ export default function App() {
             products={products} onProductsChange={(v) => setProductsLogged(v, { reason: "work", by: whoWorking })}
             runGrouped={runGrouped}
           />
+        )}
+        {exitHint && (
+          <div
+            className="fixed left-1/2 z-50 px-3 py-2 rounded-sm no-print"
+            style={{ bottom: 90, transform: "translateX(-50%)", background: C.ink, color: "#fff", fontFamily: MONO, fontSize: 12, whiteSpace: "nowrap" }}
+          >
+            Press back again to leave
+          </div>
         )}
         {importOpen && (
           <ImportInvoiceModal customers={customers} onClose={() => setImportOpen(false)} onImported={handleImported} />
