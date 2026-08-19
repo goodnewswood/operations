@@ -3573,7 +3573,6 @@ function VendorsTab({ suppliers, onChange }) {
   const [sortBy, setSortBy] = useState("name");
   const [showHidden, setShowHidden] = useState(false);
   const update = (id, patch) => onChange(suppliers.map((s) => (s.id === id ? { ...s, ...patch } : s)));
-  const updatePricing = (id, patch) => onChange(suppliers.map((s) => (s.id === id ? { ...s, pricing: { ...s.pricing, ...patch } } : s)));
   const remove = (id) => onChange(suppliers.filter((s) => s.id !== id));
   const add = () => {
     const v = { id: uid(), name: "New vendor", altName: "", code: "", contact: "", phone: "", email: "", address: "", city: "", hidden: false, favorite: false, accountOwner: "", crews: "", has1099: false, payMethod: "", notes: "", pricing: {}, priceNotes: "" };
@@ -3581,7 +3580,6 @@ function VendorsTab({ suppliers, onChange }) {
     setOpenId(v.id);
     setPinnedId(v.id);
   };
-  const sizePriceFields = ["165", "166", "185", "186"];
 
   const shown = suppliers
     .filter((s) => showHidden || !s.hidden)
@@ -3674,31 +3672,8 @@ function VendorsTab({ suppliers, onChange }) {
                       <span className="text-xs" style={{ color: C.faint, fontFamily: MONO }}>1099 ON FILE</span>
                     </label>
 
-                    <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${C.kraft}` }}>
-                      <div className="flex items-center gap-1.5 mb-2" style={{ fontWeight: 700, color: C.gold }}>
-                        <Tag size={14} /> Pricing ($/board by size)
-                      </div>
-                      <div className="text-xs mb-2" style={{ color: C.faint }}>
-                        Purchase orders auto-fill from these. "Painted" replaces the size price for painted stock rather than adding to it.
-                      </div>
-                      <div className="grid grid-cols-4 gap-2">
-                        {sizePriceFields.map((size) => (
-                          <Field key={size} label={size} w={undefined}>
-                            <input
-                              type="number" style={{ ...inputStyle, fontFamily: MONO }}
-                              value={s.pricing?.[size] ?? ""} placeholder="—"
-                              onChange={(e) => updatePricing(s.id, { [size]: e.target.value })}
-                            />
-                          </Field>
-                        ))}
-                      </div>
-                      <div className="grid grid-cols-2 gap-2 mt-2">
-                        <Field label="4ft"><input type="number" style={{ ...inputStyle, fontFamily: MONO }} value={s.pricing?.fourFt ?? ""} placeholder="—" onChange={(e) => updatePricing(s.id, { fourFt: e.target.value })} /></Field>
-                        <Field label="Painted $/bd"><input type="number" style={{ ...inputStyle, fontFamily: MONO }} value={s.pricing?.paint ?? ""} placeholder="—" onChange={(e) => updatePricing(s.id, { paint: e.target.value })} /></Field>
-                      </div>
-                      <Field label="Pricing notes (bundles, delivery fees, etc)"><textarea style={{ ...inputStyle, minHeight: 50 }} value={s.priceNotes || ""} onChange={(e) => update(s.id, { priceNotes: e.target.value })} /></Field>
-                    </div>
-
+                    {/* Vendor rates live in GNWS Office now. The floor app shows
+                        no money at all, so they are edited there. */}
                     <Field label="General notes"><textarea style={{ ...inputStyle, minHeight: 70 }} value={s.notes || ""} onChange={(e) => update(s.id, { notes: e.target.value })} /></Field>
                   </div>
                 )}
@@ -4082,109 +4057,6 @@ function BOLModal({ wo, customer, products, onClose }) {
    customer name, size, and ship date very clearly readable at a glance.
    Always 4"x1" for the Rollo printer — that's the only format offered
    here, on purpose. */
-
-/* ---------------- Printable Purchase Order (8.5x11) ----------------
-   What gets handed to the vendor as proof of the order: what we bought,
-   at what price, and what we expect to be invoiced for. Freight is called
-   out separately because it is billed separately and deliberately is not
-   part of the amount being authorised here. */
-function PurchaseOrderPrintView({ po, supplier, onClose }) {
-  useBackLayer(true, onClose);
-  const brand = brandFor(po.brand);
-  const goods = poGoodsTotal(po);
-  const freight = Number(po.shippingCost) || 0;
-  const boards = (po.lines || []).reduce((s, l) => s + (Number(l.boardCount) || 0) * (Number(l.copies) || 1), 0);
-  const cell = { border: "1px solid #999", padding: "4px 6px" };
-
-  return (
-    <PrintPortal>
-    <div className="fixed inset-0 z-50 overflow-auto print-overlay" style={{ background: "rgba(34,29,25,0.6)" }}>
-      <style>{PRINT_CSS}</style>
-      <div className="max-w-4xl mx-auto my-8 print-shell">
-        <div className="flex flex-wrap justify-end gap-2 mb-3 no-print">
-          <Btn kind="primary" onClick={() => window.print()}><Printer size={13} /> Print</Btn>
-          <CloseBtn onClose={onClose} onDark />
-        </div>
-
-        <div id="po-print-root" className="print-sheet" style={{ background: "#fff", color: "#000", padding: "0.4in", fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif" }}>
-          <div className="flex items-center justify-between" style={{ borderBottom: "2px solid #000", paddingBottom: 6, marginBottom: 10 }}>
-            <div className="flex items-center" style={{ gap: 10 }}>
-              <img
-                src={brand.logo} alt=""
-                style={{ height: 40, width: 40, objectFit: "contain" }}
-                onError={(e) => { e.currentTarget.style.display = "none"; }}
-              />
-              <div>
-                <div style={{ fontSize: 19, fontWeight: 900, lineHeight: 1.1 }}>PURCHASE ORDER</div>
-                <div style={{ fontSize: 10, marginTop: 2, lineHeight: 1.35 }}>
-                  <div style={{ fontWeight: 700 }}>{brand.name}</div>
-                  <div>{SHIPPER.address}</div>
-                  <div>{SHIPPER.cityStateZip}</div>
-                </div>
-              </div>
-            </div>
-            <div style={{ textAlign: "right", fontSize: 10, lineHeight: 1.45 }}>
-              <div><strong>PO #:</strong> {po.number || "—"}</div>
-              <div><strong>Date:</strong> {po.date}</div>
-              {po.shipVia && <div><strong>Ship via:</strong> {po.shipVia}</div>}
-              <div><strong>Status:</strong> {po.status === "ordered" ? "Ordered" : "Received"}</div>
-            </div>
-          </div>
-
-          <div style={{ marginBottom: 10, fontSize: 11, lineHeight: 1.35 }}>
-            <div style={{ fontSize: 9, fontWeight: 700, color: "#555", letterSpacing: 0.5 }}>VENDOR</div>
-            <div style={{ fontWeight: 700, fontSize: 12 }}>{supplier?.name || "Unknown vendor"}</div>
-            {supplier?.contact && <div>{supplier.contact}</div>}
-            {supplier?.address && <div>{supplier.address}</div>}
-            {supplier?.city && <div>{supplier.city}</div>}
-            {supplier?.phone && <div>{supplier.phone}</div>}
-            {supplier?.email && <div>{supplier.email}</div>}
-          </div>
-
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
-            <thead>
-              <tr style={{ background: "#ececec" }}>
-                {["Item / size", "Boards per unit", "Units", "Boards", "Cost"].map((h, i) => (
-                  <th key={h} style={{ ...cell, textAlign: i > 0 ? "right" : "left" }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {(po.lines || []).map((l, i) => (
-                <tr key={i}>
-                  <td style={{ ...cell, fontFamily: "monospace", fontWeight: 700 }}>{l.sizeLabel}</td>
-                  <td style={{ ...cell, textAlign: "right" }}>{num(l.boardCount)}</td>
-                  <td style={{ ...cell, textAlign: "right" }}>{num(l.copies || 1)}</td>
-                  <td style={{ ...cell, textAlign: "right" }}>{num((Number(l.boardCount) || 0) * (Number(l.copies) || 1))}</td>
-                  <td style={{ ...cell, textAlign: "right" }}>${Number(l.cost || 0).toFixed(2)}</td>
-                </tr>
-              ))}
-              <tr>
-                <td colSpan={3} style={{ ...cell, fontWeight: 700 }}>Total to invoice</td>
-                <td style={{ ...cell, textAlign: "right", fontWeight: 700 }}>{num(boards)}</td>
-                <td style={{ ...cell, textAlign: "right", fontWeight: 900 }}>${goods.toFixed(2)}</td>
-              </tr>
-            </tbody>
-          </table>
-
-          {freight > 0 && (
-            <div style={{ marginTop: 6, fontSize: 10 }}>
-              Freight of ${freight.toFixed(2)} is billed separately and is not part of the total above.
-            </div>
-          )}
-
-          {po.note && <div style={{ marginTop: 10, fontSize: 11 }}><strong>Notes:</strong> {po.note}</div>}
-
-          <div style={{ marginTop: 22, fontSize: 10, display: "flex", gap: 40 }}>
-            <div style={{ flex: 1, borderTop: "1px solid #000", paddingTop: 3 }}>Authorised by — {SHIPPER.name}</div>
-            <div style={{ flex: 1, borderTop: "1px solid #000", paddingTop: 3 }}>Accepted by — {supplier?.name || "vendor"}</div>
-          </div>
-        </div>
-      </div>
-    </div>
-    </PrintPortal>
-  );
-}
 
 function PalletLabelModal({ wo, customer, products, onClose, onGenerate }) {
   useBackLayer(true, onClose);
@@ -4607,7 +4479,7 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, receivingPO, on
               <input style={{ ...inputStyle, marginTop: 6 }} value={shipViaOther} onChange={(e) => setShipViaOther(e.target.value)} placeholder="Describe how it's getting here" />
             )}
           </Field>
-          <Field label="Shipping cost"><input type="number" style={inputStyle} value={shippingCost} onChange={(e) => setShippingCost(e.target.value)} placeholder="$" /></Field>
+
         </div>
         <div className="grid grid-cols-2 gap-3 mt-2">
           <Field label="Payment status">
@@ -4655,28 +4527,6 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, receivingPO, on
                       <>
                         <Field label={`${unitWord}/unit`} w={90}><input type="number" style={inputStyle} value={l.boardCount} onChange={(e) => updateLine(l.key, { boardCount: e.target.value })} /></Field>
                         <Field label="× units" w={70}><input type="number" min="1" style={inputStyle} value={l.copies} onChange={(e) => updateLine(l.key, { copies: e.target.value })} /></Field>
-                        {isInventory ? (
-                          <>
-                            <Field label={`Cost/${unitWord} ($)`} w={100}>
-                              <input type="number" style={inputStyle} value={l.costPerBoard} onChange={(e) => updateLine(l.key, { costPerBoard: e.target.value })} />
-                      </Field>
-                      <Field label="Total ($)" w={100}>
-                        <input
-                          type="number" style={inputStyle}
-                          value={total ? Number(total.toFixed(2)) : ""}
-                          onChange={(e) => {
-                            const enteredTotal = Number(e.target.value) || 0;
-                            const perBoard = totalUnitsForLine > 0 ? enteredTotal / totalUnitsForLine : enteredTotal;
-                            updateLine(l.key, { costPerBoard: perBoard });
-                          }}
-                        />
-                      </Field>
-                    </>
-                  ) : (
-                    <Field label="Cost ($)" w={100}>
-                      <input type="number" style={inputStyle} value={l.costPerBoard} onChange={(e) => updateLine(l.key, { costPerBoard: e.target.value })} />
-                    </Field>
-                  )}
                       </>
                     );
                   })()}
@@ -4684,15 +4534,15 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, receivingPO, on
 
                   <div className="w-full flex flex-wrap items-center gap-3" style={{ marginTop: -4 }}>
                     <div className="flex items-center gap-3">
-                      {[[false, "Clean price"], [true, "Painted price"]].map(([val, label]) => (
+                      {/* Clean/painted still drives which vendor rate GNWS Office
+                          applies; the rates themselves aren't shown on the floor. */}
+                      {[[false, "Clean"], [true, "Painted"]].map(([val, label]) => (
                         <label key={String(val)} className="flex items-center gap-1.5 text-xs" style={{ fontFamily: MONO, color: C.faint, cursor: "pointer" }}>
                           <input
                             type="radio" name={`painted-${l.key}`} checked={!!l.painted === val}
                             onChange={() => updateLine(l.key, { painted: val })}
                           />
                           {label}
-                          {val && paintedPrice > 0 ? ` ($${paintedPrice.toFixed(2)})` : ""}
-                          {!val && cleanPrice != null ? ` ($${cleanPrice.toFixed(2)})` : ""}
                         </label>
                       ))}
                     </div>
@@ -4739,7 +4589,7 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, receivingPO, on
         <div className="mt-3 pt-3 flex items-center justify-between" style={{ borderTop: `1px solid ${C.kraft}` }}>
           <div className="text-sm" style={{ color: C.faint }}>
             {validLines.length > 0
-              ? `${totalUnits} unit${totalUnits === 1 ? "" : "s"} · pay vendor $${totalCost.toFixed(2)}${Number(shippingCost) > 0 ? ` · freight $${Number(shippingCost).toFixed(2)} billed separately` : ""}`
+              ? `${totalUnits} unit${totalUnits === 1 ? "" : "s"}`
               : "Add at least one line"}
             {isEditing && <div className="mt-1">If any of this PO's units have already been sorted from, their board counts won't change — only cost and other details will update.</div>}
           </div>
@@ -4755,32 +4605,12 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, receivingPO, on
 
 function ReceivingTab({ suppliers, purchaseOrders, onPOChange, units, onUnitsChange, products, onProductsChange, runGrouped }) {
   const [printUnits, setPrintUnits] = useState(null);
-  const [printPO, setPrintPO] = useState(null);
-
   /* Payment is its own small edit on purpose. Going through the edit form
      would regenerate this PO's pallet units with fresh ids, which would
      silently invalidate every label already printed and stuck on the wood. */
   const setPaid = (po, paymentStatus) =>
     onPOChange(purchaseOrders.map((p) => (p.id === po.id ? { ...p, paymentStatus } : p)));
 
-  /* Opens the vendor's own mail app with the order filled in. Nothing is
-     sent on anyone's behalf — Ero reads it and hits send. */
-  const emailPO = (po) => {
-    const v = suppliers.find((x) => x.id === po.supplierId);
-    const lines = (po.lines || [])
-      .map((l) => `  ${l.sizeLabel} — ${num(l.boardCount)} boards x ${num(l.copies || 1)} unit(s) — $${Number(l.cost || 0).toFixed(2)}`)
-      .join("\n");
-    const body =
-      `Hi${v?.contact ? ` ${v.contact}` : ""},\n\n` +
-      `Here is our purchase order ${po.number || ""} dated ${po.date}.\n\n${lines}\n\n` +
-      `Total to invoice: $${poGoodsTotal(po).toFixed(2)}\n` +
-      (Number(po.shippingCost) > 0 ? `Freight (billed separately): $${Number(po.shippingCost).toFixed(2)}\n` : "") +
-      (po.shipVia ? `Ship via: ${po.shipVia}\n` : "") +
-      (po.note ? `\nNotes: ${po.note}\n` : "") +
-      `\nThanks,\n${SHIPPER.name}`;
-    window.location.href =
-      `mailto:${v?.email || ""}?subject=${encodeURIComponent(`Purchase Order ${po.number || ""} — ${SHIPPER.name}`)}&body=${encodeURIComponent(body)}`;
-  };
   const [newPOOpen, setNewPOOpen] = useState(false);
   const [editingPO, setEditingPO] = useState(null);
   const [receivingPO, setReceivingPO] = useState(null);
@@ -4916,7 +4746,7 @@ function ReceivingTab({ suppliers, purchaseOrders, onPOChange, units, onUnitsCha
                       <div className="text-xs mt-0.5" style={{ color: C.faint, fontFamily: MONO }}>
                         {po.date} · {num(totalBoards)} boards
                         {!isOrdered ? ` · ${poUnits.length} unit${poUnits.length === 1 ? "" : "s"}` : ""}
-                        {poGoodsTotal(po) ? ` · $${poGoodsTotal(po).toFixed(2)}` : ""}
+
                       </div>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
@@ -4934,7 +4764,6 @@ function ReceivingTab({ suppliers, purchaseOrders, onPOChange, units, onUnitsCha
                       <div className="grid gap-1 mt-3 text-sm">
                         {po.shipVia && <div><span style={{ color: C.faint }}>Ship via: </span>{po.shipVia}</div>}
                         {po.paidVia && <div><span style={{ color: C.faint }}>Paid via: </span>{po.paidVia}</div>}
-                        {po.shippingCost > 0 && <div><span style={{ color: C.faint }}>Shipping: </span>${Number(po.shippingCost).toFixed(2)}</div>}
                         {po.note && <div><span style={{ color: C.faint }}>Notes: </span>{po.note}</div>}
                       </div>
 
@@ -4944,7 +4773,6 @@ function ReceivingTab({ suppliers, purchaseOrders, onPOChange, units, onUnitsCha
                           {po.lines.map((l, i) => (
                             <div key={i} className="text-sm flex justify-between px-2 py-1" style={{ background: C.paper }}>
                               <span>{l.sizeLabel} — {num(l.boardCount)} bd × {l.copies}</span>
-                              <span style={{ fontFamily: MONO, color: C.faint }}>{l.cost ? `$${Number(l.cost).toFixed(2)}` : ""}</span>
                             </div>
                           ))}
                         </div>
@@ -4987,8 +4815,6 @@ function ReceivingTab({ suppliers, purchaseOrders, onPOChange, units, onUnitsCha
                         {isOrdered && (
                           <Btn kind="primary" onClick={() => setReceivingPO(po)}><Printer size={13} /> Receive shipment</Btn>
                         )}
-                        <Btn onClick={() => setPrintPO(po)}><Printer size={13} /> Print purchase order</Btn>
-                        <Btn onClick={() => emailPO(po)}><Mail size={13} /> Email to vendor</Btn>
                         <Btn onClick={() => setPaid(po, (po.paymentStatus || "Unpaid") === "Paid" ? "Unpaid" : "Paid")}>
                           <Check size={13} /> {(po.paymentStatus || "Unpaid") === "Paid" ? "Mark unpaid" : "Mark paid"}
                         </Btn>
@@ -5017,13 +4843,6 @@ function ReceivingTab({ suppliers, purchaseOrders, onPOChange, units, onUnitsCha
 
       {printUnits && printUnits.length > 0 && (
         <LabelPrintView units={printUnits} supplierFor={supplierFor} onClose={() => setPrintUnits(null)} />
-      )}
-      {printPO && (
-        <PurchaseOrderPrintView
-          po={printPO}
-          supplier={suppliers.find((v) => v.id === printPO.supplierId)}
-          onClose={() => setPrintPO(null)}
-        />
       )}
     </div>
   );
@@ -6208,7 +6027,6 @@ const REPORTS = [
   { id: "waste", label: "Waste", stepFilter: true },
   { id: "people", label: "Person productivity", stepFilter: true },
   { id: "labor", label: "Clock hours vs logged", stepFilter: true },
-  { id: "vendorcost", label: "Cost per board by vendor", stepFilter: false },
   { id: "purchasing", label: "Purchasing summary", stepFilter: false },
   { id: "aging", label: "Yard aging", stepFilter: false },
   { id: "stock", label: "Stock & days of cover", stepFilter: false },
@@ -6419,52 +6237,20 @@ function ReportsTab({ sortLog, shifts, products, units, purchaseOrders, supplier
     );
   };
 
-  /* ---- 6. Cost per board by vendor ---- */
-  const VendorCost = () => {
-    const by = {};
-    (purchaseOrders || []).filter((po) => inRange(po.date)).forEach((po) => {
-      const v = suppliers.find((s) => s.id === po.supplierId);
-      const name = v?.name || "Unknown vendor";
-      const b = (by[name] = by[name] || { boards: 0, lineCost: 0, freight: 0, pos: 0, painted: 0, clean: 0 });
-      b.pos += 1;
-      b.freight += Number(po.shippingCost) || 0;
-      (po.lines || []).forEach((l) => {
-        const qty = (Number(l.boardCount) || 0) * (Number(l.copies) || 1);
-        b.boards += qty;
-        b.lineCost += Number(l.cost) || 0;
-        if (l.painted) b.painted += qty; else b.clean += qty;
-      });
-    });
-    const rows = Object.entries(by).map(([name, b]) => ({ name, ...b, landed: b.boards > 0 ? (b.lineCost + b.freight) / b.boards : 0 }))
-      .sort((a, b) => a.landed - b.landed);
-    const head = ["Vendor", "POs", "Boards", "Material", "Freight", "Landed $/bd", "Painted / clean"];
-    const body = rows.map((r) => [r.name, num(r.pos), num(r.boards), money(r.lineCost), money(r.freight), r.boards > 0 ? `$${r.landed.toFixed(3)}` : "—", `${num(r.painted)} / ${num(r.clean)}`]);
-    const t = rows.reduce((a, r) => ({ b: a.b + r.boards, m: a.m + r.lineCost, f: a.f + r.freight }), { b: 0, m: 0, f: 0 });
-    return (
-      <ReportShell title="Cost per board received, by vendor" subtitle={`${rangeLabel} · landed cost includes freight · cheapest first`}
-        empty={rows.length ? null : "No purchase orders in this range."}>
-        <RTable head={head} rows={body} foot={["All vendors", "", num(t.b), money(t.m), money(t.f), t.b > 0 ? `$${((t.m + t.f) / t.b).toFixed(3)}` : "—", ""]} />
-      </ReportShell>
-    );
-  };
-
   /* ---- 7. Purchasing summary ---- */
   const Purchasing = () => {
     const pos = (purchaseOrders || []).filter((po) => inRange(po.date));
     const rows = pos.slice().sort((a, b) => (b.date || "").localeCompare(a.date || "")).map((po) => {
       const v = suppliers.find((s) => s.id === po.supplierId);
       const boards = (po.lines || []).reduce((s, l) => s + (Number(l.boardCount) || 0) * (Number(l.copies) || 1), 0);
-      return [po.number || "—", v?.name || "Unknown", po.date || "—", num(boards), money(poGoodsTotal(po)), money(po.shippingCost), po.status === "ordered" ? "Ordered" : "Received", po.paymentStatus || "Unpaid"];
+      return [po.number || "—", v?.name || "Unknown", po.date || "—", num(boards), po.status === "ordered" ? "Ordered" : "Received", po.paymentStatus || "Unpaid"];
     });
-    const spend = pos.reduce((s, po) => s + poGoodsTotal(po), 0);
-    const freight = pos.reduce((s, po) => s + (Number(po.shippingCost) || 0), 0);
-    const unpaid = pos.filter((po) => (po.paymentStatus || "Unpaid") !== "Paid").reduce((s, po) => s + poGoodsTotal(po), 0);
     const boards = pos.reduce((s, po) => s + (po.lines || []).reduce((x, l) => x + (Number(l.boardCount) || 0) * (Number(l.copies) || 1), 0), 0);
     return (
-      <ReportShell title="Purchasing summary" subtitle={`${rangeLabel} · ${money(spend)} to vendors · ${money(freight)} freight · ${money(unpaid)} still unpaid`}
+      <ReportShell title="Purchasing summary" subtitle={`${rangeLabel} · ${num(boards)} boards received`}
         empty={rows.length ? null : "No purchase orders in this range."}>
-        <RTable head={["PO", "Vendor", "Date", "Boards", "Goods", "Freight", "Status", "Payment"]} rows={rows}
-          foot={["Total", "", "", num(boards), money(spend), money(freight), "", money(unpaid) + " unpaid"]} />
+        <RTable head={["PO", "Vendor", "Date", "Boards", "Status", "Payment"]} rows={rows}
+          foot={["Total", "", "", num(boards), "", ""]} />
       </ReportShell>
     );
   };
@@ -6589,7 +6375,7 @@ function ReportsTab({ sortLog, shifts, products, units, purchaseOrders, supplier
 
   const body = {
     throughput: Throughput, yield: Yield, waste: Waste, people: People, labor: Labor,
-    vendorcost: VendorCost, purchasing: Purchasing, aging: Aging, stock: Stock, ontime: OnTime,
+    purchasing: Purchasing, aging: Aging, stock: Stock, ontime: OnTime,
   }[report];
   const Body = body || Throughput;
 
