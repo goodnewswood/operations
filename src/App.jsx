@@ -2332,8 +2332,8 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
 function SettingsModal({ team, onAddTeamMember, onRemoveTeamMember, goals, onGoalsChange, onResetTabOrder, onClose }) {
   const [newName, setNewName] = useState("");
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center p-4 overflow-auto" style={{ background: "rgba(34,29,25,0.6)" }}>
-      <div className="rounded-sm p-5 w-full max-w-md my-auto" style={{ background: C.panel }}>
+    <div className="fixed inset-0 z-50 overflow-auto p-4" style={{ background: "rgba(34,29,25,0.6)" }}>
+      <div className="rounded-sm p-5 w-full max-w-md mx-auto my-8" style={{ background: C.panel }}>
         <div className="flex items-center justify-between mb-4">
           <div style={{ fontWeight: 800, fontSize: 16 }}>Settings</div>
           <button onClick={onClose} className="opacity-60 hover:opacity-100"><X size={16} /></button>
@@ -2422,8 +2422,8 @@ function ImportInvoiceModal({ customers, onClose, onImported }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center p-4 overflow-auto" style={{ background: "rgba(34,29,25,0.6)" }}>
-      <div className="rounded-sm p-5 w-full max-w-md my-auto" style={{ background: C.panel }}>
+    <div className="fixed inset-0 z-50 overflow-auto p-4" style={{ background: "rgba(34,29,25,0.6)" }}>
+      <div className="rounded-sm p-5 w-full max-w-md mx-auto my-8" style={{ background: C.panel }}>
         <div className="flex items-center justify-between mb-3">
           <div style={{ fontWeight: 800, fontSize: 16 }}>Import invoice / quote (PDF)</div>
           <button onClick={onClose} className="opacity-60 hover:opacity-100"><X size={16} /></button>
@@ -3737,8 +3737,8 @@ function QRScannerModal({ onClose, onDecoded }) {
   }, []);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center p-4 overflow-auto" style={{ background: "rgba(0,0,0,0.85)" }}>
-      <div className="rounded-sm p-4 w-full max-w-sm my-auto" style={{ background: C.panel }}>
+    <div className="fixed inset-0 z-50 overflow-auto p-4" style={{ background: "rgba(0,0,0,0.85)" }}>
+      <div className="rounded-sm p-4 w-full max-w-sm mx-auto my-8" style={{ background: C.panel }}>
         <div className="flex items-center justify-between mb-3">
           <div style={{ fontWeight: 800, fontSize: 16 }}>Scan unit label</div>
           <button onClick={onClose} className="opacity-60 hover:opacity-100"><X size={16} /></button>
@@ -4077,8 +4077,8 @@ function PalletLabelModal({ wo, customer, products, onClose, onGenerate }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center p-4 overflow-auto" style={{ background: "rgba(34,29,25,0.6)" }}>
-      <div className="rounded-sm p-5 w-full max-w-md my-auto" style={{ background: C.panel }}>
+    <div className="fixed inset-0 z-50 overflow-auto p-4" style={{ background: "rgba(34,29,25,0.6)" }}>
+      <div className="rounded-sm p-5 w-full max-w-md mx-auto my-8" style={{ background: C.panel }}>
         <div className="flex items-center justify-between mb-3">
           <div style={{ fontWeight: 800, fontSize: 16 }}>Print pallet labels</div>
           <button onClick={onClose} className="opacity-60 hover:opacity-100"><X size={16} /></button>
@@ -4244,6 +4244,17 @@ function vendorPriceFor(supplier, sku, painted) {
   return v > 0 ? v : null;
 }
 
+/* What the vendor actually gets paid: the goods, and nothing else. Freight
+   is still recorded on the PO, but it is billed separately and must not be
+   folded into the figure being matched against a vendor invoice. Landed cost
+   (goods + freight) is what costing and margin want, and stays available.
+
+   Both derive from the lines rather than the stored totalCost, so purchase
+   orders written before this rule — whose stored total had shipping baked
+   in — read correctly too. */
+const poGoodsTotal = (po) => (po.lines || []).reduce((s, l) => s + (Number(l.cost) || 0), 0);
+const poLandedTotal = (po) => poGoodsTotal(po) + (Number(po.shippingCost) || 0);
+
 function NewPurchaseOrderModal({ suppliers, products, editingPO, receivingPO, onClose, onCreate, onUpdate, onReceive }) {
   // New lines start empty and make you choose — pre-selecting a SKU meant a
   // half-filled line could be submitted as whatever happened to be default.
@@ -4355,7 +4366,8 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, receivingPO, on
   const validLines = lines.filter((l) => l.item.trim() !== "");
   const totalUnits = validLines.reduce((sum, l) => (Number(l.boardCount) > 0 ? sum + Math.max(1, Math.floor(Number(l.copies) || 1)) : sum), 0);
   const linesCost = validLines.reduce((sum, l) => sum + lineTotal(l), 0);
-  const totalCost = linesCost + (Number(shippingCost) || 0);
+  // Goods only — freight is recorded separately, not billed here.
+  const totalCost = linesCost;
   const canSubmit = supplierId && date && validLines.length > 0;
   const shipVia = shipViaChoice === "Other" ? shipViaOther : shipViaChoice;
 
@@ -4420,8 +4432,8 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, receivingPO, on
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center p-4 overflow-auto" style={{ background: "rgba(34,29,25,0.6)" }}>
-      <div className="rounded-sm p-5 w-full max-w-2xl my-auto" style={{ background: C.panel }}>
+    <div className="fixed inset-0 z-50 overflow-auto p-4" style={{ background: "rgba(34,29,25,0.6)" }}>
+      <div className="rounded-sm p-5 w-full max-w-2xl mx-auto my-8" style={{ background: C.panel }}>
         <div className="flex items-center justify-between mb-3">
           <div style={{ fontWeight: 800, fontSize: 16 }}>{isReceiving ? "Receive shipment" : isEditing ? "Edit purchase order" : "New purchase order"}</div>
           <button onClick={onClose} className="opacity-60 hover:opacity-100"><X size={16} /></button>
@@ -4587,7 +4599,9 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, receivingPO, on
 
         <div className="mt-3 pt-3 flex items-center justify-between" style={{ borderTop: `1px solid ${C.kraft}` }}>
           <div className="text-sm" style={{ color: C.faint }}>
-            {validLines.length > 0 ? `${totalUnits} unit${totalUnits === 1 ? "" : "s"} · total cost $${totalCost.toFixed(2)}` : "Add at least one line"}
+            {validLines.length > 0
+              ? `${totalUnits} unit${totalUnits === 1 ? "" : "s"} · pay vendor $${totalCost.toFixed(2)}${Number(shippingCost) > 0 ? ` · freight $${Number(shippingCost).toFixed(2)} billed separately` : ""}`
+              : "Add at least one line"}
             {isEditing && <div className="mt-1">If any of this PO's units have already been sorted from, their board counts won't change — only cost and other details will update.</div>}
           </div>
           <Btn kind="primary" onClick={submit} disabled={!canSubmit} big>
@@ -4735,7 +4749,7 @@ function ReceivingTab({ suppliers, purchaseOrders, onPOChange, units, onUnitsCha
                       <div className="text-xs mt-0.5" style={{ color: C.faint, fontFamily: MONO }}>
                         {po.date} · {num(totalBoards)} boards
                         {!isOrdered ? ` · ${poUnits.length} unit${poUnits.length === 1 ? "" : "s"}` : ""}
-                        {po.totalCost ? ` · $${Number(po.totalCost).toFixed(2)}` : ""}
+                        {poGoodsTotal(po) ? ` · $${poGoodsTotal(po).toFixed(2)}` : ""}
                       </div>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
@@ -6247,16 +6261,17 @@ function ReportsTab({ sortLog, shifts, products, units, purchaseOrders, supplier
     const rows = pos.slice().sort((a, b) => (b.date || "").localeCompare(a.date || "")).map((po) => {
       const v = suppliers.find((s) => s.id === po.supplierId);
       const boards = (po.lines || []).reduce((s, l) => s + (Number(l.boardCount) || 0) * (Number(l.copies) || 1), 0);
-      return [po.number || "—", v?.name || "Unknown", po.date || "—", num(boards), money(po.totalCost), po.status === "ordered" ? "Ordered" : "Received", po.paymentStatus || "Unpaid"];
+      return [po.number || "—", v?.name || "Unknown", po.date || "—", num(boards), money(poGoodsTotal(po)), money(po.shippingCost), po.status === "ordered" ? "Ordered" : "Received", po.paymentStatus || "Unpaid"];
     });
-    const spend = pos.reduce((s, po) => s + (Number(po.totalCost) || 0), 0);
-    const unpaid = pos.filter((po) => (po.paymentStatus || "Unpaid") !== "Paid").reduce((s, po) => s + (Number(po.totalCost) || 0), 0);
+    const spend = pos.reduce((s, po) => s + poGoodsTotal(po), 0);
+    const freight = pos.reduce((s, po) => s + (Number(po.shippingCost) || 0), 0);
+    const unpaid = pos.filter((po) => (po.paymentStatus || "Unpaid") !== "Paid").reduce((s, po) => s + poGoodsTotal(po), 0);
     const boards = pos.reduce((s, po) => s + (po.lines || []).reduce((x, l) => x + (Number(l.boardCount) || 0) * (Number(l.copies) || 1), 0), 0);
     return (
-      <ReportShell title="Purchasing summary" subtitle={`${rangeLabel} · ${money(spend)} committed · ${money(unpaid)} still unpaid`}
+      <ReportShell title="Purchasing summary" subtitle={`${rangeLabel} · ${money(spend)} to vendors · ${money(freight)} freight · ${money(unpaid)} still unpaid`}
         empty={rows.length ? null : "No purchase orders in this range."}>
-        <RTable head={["PO", "Vendor", "Date", "Boards", "Total", "Status", "Payment"]} rows={rows}
-          foot={["Total", "", "", num(boards), money(spend), "", money(unpaid) + " unpaid"]} />
+        <RTable head={["PO", "Vendor", "Date", "Boards", "Goods", "Freight", "Status", "Payment"]} rows={rows}
+          foot={["Total", "", "", num(boards), money(spend), money(freight), "", money(unpaid) + " unpaid"]} />
       </ReportShell>
     );
   };
