@@ -2332,8 +2332,8 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
 function SettingsModal({ team, onAddTeamMember, onRemoveTeamMember, goals, onGoalsChange, onResetTabOrder, onClose }) {
   const [newName, setNewName] = useState("");
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 overflow-auto" style={{ background: "rgba(34,29,25,0.6)" }}>
-      <div className="rounded-sm p-5 w-full max-w-md my-8" style={{ background: C.panel }}>
+    <div className="fixed inset-0 z-50 flex items-start justify-center p-4 overflow-auto" style={{ background: "rgba(34,29,25,0.6)" }}>
+      <div className="rounded-sm p-5 w-full max-w-md my-auto" style={{ background: C.panel }}>
         <div className="flex items-center justify-between mb-4">
           <div style={{ fontWeight: 800, fontSize: 16 }}>Settings</div>
           <button onClick={onClose} className="opacity-60 hover:opacity-100"><X size={16} /></button>
@@ -2422,8 +2422,8 @@ function ImportInvoiceModal({ customers, onClose, onImported }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(34,29,25,0.6)" }}>
-      <div className="rounded-sm p-5 w-full max-w-md" style={{ background: C.panel }}>
+    <div className="fixed inset-0 z-50 flex items-start justify-center p-4 overflow-auto" style={{ background: "rgba(34,29,25,0.6)" }}>
+      <div className="rounded-sm p-5 w-full max-w-md my-auto" style={{ background: C.panel }}>
         <div className="flex items-center justify-between mb-3">
           <div style={{ fontWeight: 800, fontSize: 16 }}>Import invoice / quote (PDF)</div>
           <button onClick={onClose} className="opacity-60 hover:opacity-100"><X size={16} /></button>
@@ -3737,8 +3737,8 @@ function QRScannerModal({ onClose, onDecoded }) {
   }, []);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.85)" }}>
-      <div className="rounded-sm p-4 w-full max-w-sm" style={{ background: C.panel }}>
+    <div className="fixed inset-0 z-50 flex items-start justify-center p-4 overflow-auto" style={{ background: "rgba(0,0,0,0.85)" }}>
+      <div className="rounded-sm p-4 w-full max-w-sm my-auto" style={{ background: C.panel }}>
         <div className="flex items-center justify-between mb-3">
           <div style={{ fontWeight: 800, fontSize: 16 }}>Scan unit label</div>
           <button onClick={onClose} className="opacity-60 hover:opacity-100"><X size={16} /></button>
@@ -4077,8 +4077,8 @@ function PalletLabelModal({ wo, customer, products, onClose, onGenerate }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(34,29,25,0.6)" }}>
-      <div className="rounded-sm p-5 w-full max-w-md" style={{ background: C.panel }}>
+    <div className="fixed inset-0 z-50 flex items-start justify-center p-4 overflow-auto" style={{ background: "rgba(34,29,25,0.6)" }}>
+      <div className="rounded-sm p-5 w-full max-w-md my-auto" style={{ background: C.panel }}>
         <div className="flex items-center justify-between mb-3">
           <div style={{ fontWeight: 800, fontSize: 16 }}>Print pallet labels</div>
           <button onClick={onClose} className="opacity-60 hover:opacity-100"><X size={16} /></button>
@@ -4420,8 +4420,8 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, receivingPO, on
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 overflow-auto" style={{ background: "rgba(34,29,25,0.6)" }}>
-      <div className="rounded-sm p-5 w-full max-w-2xl my-8" style={{ background: C.panel }}>
+    <div className="fixed inset-0 z-50 flex items-start justify-center p-4 overflow-auto" style={{ background: "rgba(34,29,25,0.6)" }}>
+      <div className="rounded-sm p-5 w-full max-w-2xl my-auto" style={{ background: C.panel }}>
         <div className="flex items-center justify-between mb-3">
           <div style={{ fontWeight: 800, fontSize: 16 }}>{isReceiving ? "Receive shipment" : isEditing ? "Edit purchase order" : "New purchase order"}</div>
           <button onClick={onClose} className="opacity-60 hover:opacity-100"><X size={16} /></button>
