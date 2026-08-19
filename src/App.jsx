@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { createPortal } from "react-dom";
 import jsQR from "jsqr";
+import { jsPDF } from "jspdf";
 import {
   Plus, Trash2, ChevronLeft, Users, Package, LayoutGrid, Scissors,
   Boxes, MapPin, AlertTriangle, Check, Clock, CircleDot, User, Copy,
@@ -4062,6 +4063,70 @@ function BOLModal({ wo, customer, products, onClose }) {
    Always 4"x1" for the Rollo printer — that's the only format offered
    here, on purpose. */
 
+/* ---------------- Labels as a PDF ----------------
+   Android's print framework ignores a web page's @page size — it only
+   offers the media sizes the printer driver advertises, which is why the
+   phone kept showing 4x6 no matter what the CSS said. A PDF carries its
+   own page geometry, so 4in x 1in pages come out at 4in x 1in wherever
+   they are opened: the Rollo app, Android's own PDF print, or Preview.
+
+   One label per page, drawn to match what's on screen. */
+const LABEL_W = 4, LABEL_H = 1, LABEL_PAD = 0.07;
+
+function newLabelPdf() {
+  return new jsPDF({ unit: "in", orientation: "landscape", format: [LABEL_W, LABEL_H] });
+}
+
+// The QR is drawn as one filled square per dark module — same matrix the
+// on-screen SVG uses, so a scan of the paper matches a scan of the screen.
+function drawQr(pdf, value, x, y, size) {
+  let matrix, modules;
+  try { const enc = QR.encode(String(value || "")); matrix = enc.matrix; modules = enc.size; }
+  catch (e) { return; }
+  const cell = size / modules;
+  pdf.setFillColor(0, 0, 0);
+  for (let r = 0; r < modules; r++) {
+    for (let c = 0; c < modules; c++) {
+      if (matrix[r][c]) pdf.rect(x + c * cell, y + r * cell, cell * 1.02, cell * 1.02, "F");
+    }
+  }
+}
+
+function receivedLabelsPdf(units, supplierFor) {
+  const pdf = newLabelPdf();
+  units.forEach((unit, i) => {
+    if (i > 0) pdf.addPage([LABEL_W, LABEL_H], "landscape");
+    const supplier = supplierFor ? supplierFor(unit.poId) : null;
+    const qr = LABEL_H - LABEL_PAD * 2;
+    drawQr(pdf, `${unit.id} ${unit.boardCount}bd`, LABEL_W - LABEL_PAD - qr, LABEL_PAD, qr);
+    let y = LABEL_PAD + 0.16;
+    pdf.setFont("courier", "bold"); pdf.setFontSize(15);
+    pdf.text(String(unit.sizeLabel || ""), LABEL_PAD, y);
+    pdf.setFont("courier", "normal"); pdf.setFontSize(9);
+    y += 0.15; pdf.text(String(unit.receivedDate || ""), LABEL_PAD, y);
+    if (supplier?.name) { y += 0.13; pdf.text(String(supplier.name).slice(0, 30), LABEL_PAD, y); }
+    y += 0.13; pdf.setFontSize(8);
+    pdf.text(`${num(unit.boardCount)} bd · ${unit.id}`, LABEL_PAD, y);
+  });
+  return pdf;
+}
+
+function finishedLabelsPdf(labels) {
+  const pdf = newLabelPdf();
+  labels.forEach((l, i) => {
+    if (i > 0) pdf.addPage([LABEL_W, LABEL_H], "landscape");
+    let y = LABEL_PAD + 0.18;
+    pdf.setFont("helvetica", "bold"); pdf.setFontSize(14);
+    pdf.text(String(l.customer || "").slice(0, 34), LABEL_PAD, y);
+    y += 0.22; pdf.setFontSize(13);
+    pdf.text(String(l.size || ""), LABEL_PAD, y);
+    y += 0.2; pdf.setFont("helvetica", "normal"); pdf.setFontSize(9);
+    pdf.text(`${l.seq} of ${l.seqTotal}`, LABEL_PAD, y);
+    pdf.text(`Ship: ${l.shipDate || ""}`, LABEL_W - LABEL_PAD, y, { align: "right" });
+  });
+  return pdf;
+}
+
 function PalletLabelModal({ wo, customer, products, onClose, onGenerate }) {
   useBackLayer(true, onClose);
   const lineDesc = (l) => {
@@ -4128,6 +4193,9 @@ function FinishedLabelPrintView({ labels, onClose }) {
       <div className="max-w-md mx-auto my-8 print-shell">
         <div className="flex justify-end gap-2 mb-3 no-print">
           <Btn kind="dark" onClick={() => window.print()}><Printer size={13} /> Print all {labels.length} labels</Btn>
+          <Btn kind="primary" onClick={() => finishedLabelsPdf(labels).save(`pallet-labels-${today()}.pdf`)}>
+            <FileText size={13} /> Save as 4x1 PDF
+          </Btn>
           <CloseBtn onClose={onClose} onDark />
         </div>
         <div id="flabels-root">
@@ -4166,6 +4234,9 @@ function LabelPrintView({ units, supplierFor, onClose }) {
         <div className="flex justify-end gap-2 mb-3 no-print">
           <Btn kind="dark" onClick={() => window.print()}>
             <Printer size={13} /> {units.length > 1 ? `Print all ${units.length} labels` : "Print label"}
+          </Btn>
+          <Btn kind="primary" onClick={() => receivedLabelsPdf(units, supplierFor).save(`labels-${today()}.pdf`)}>
+            <FileText size={13} /> Save as 4x1 PDF
           </Btn>
           <CloseBtn onClose={onClose} onDark />
         </div>
