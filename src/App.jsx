@@ -1314,7 +1314,7 @@ function UnitSwitchInput({ product, value, canonicalUnit, onChange, displayUnit,
 // the per-line Process Steps checklist above tracks the real detail now.
 // This is just open vs. done, with a direct one-click way to push an
 // order through rather than clicking through stages that don't apply.
-// The stages a job moves through on the floor. Labels and colours for the
+// The stages a job moves through on the floor. Labels and colors for the
 // middle stages have always existed here; the flow itself used to be
 // collapsed to just open/shipped, which made the board useless. Older work
 // orders carrying only "not_started"/"shipped" still land correctly on the
@@ -1358,7 +1358,7 @@ const hoursDecimal = (seconds) => (Number(seconds) || 0) / 3600;
 
 // `onDark` is for the app header, where this sits on the dark ink bar and
 // needs light text. On a normal light panel it must use the standard input
-// colours — white-on-white is otherwise invisible.
+// colors — white-on-white is otherwise invisible.
 /* Shows a quantity in every unit the SKU knows about at once — boards,
    pallets, square feet, boxes — and lets you type into any of them, with
    the rest following. Everything still stores in the canonical unit; the
@@ -2219,7 +2219,7 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
                   }}
                 >
                   <option value="">Custom / describe below…</option>
-                  {products.slice().sort(bySkuFavouritesFirst).map((pr) => (
+                  {products.slice().sort(bySkuFavoritesFirst).map((pr) => (
                     <option key={pr.id} value={pr.id}>{pr.favorite ? "★ " : ""}{pr.sku} — {pr.name}</option>
                   ))}
                 </select>
@@ -2692,7 +2692,7 @@ function InventoryDetail({ product, products, invLog, onChange, onBack, onDelete
         <div className="flex items-center gap-2">
           <button
             onClick={() => update({ favorite: !p.favorite })}
-            title={p.favorite ? "Unfavourite" : "Favourite — keeps it at the top of every picker"}
+            title={p.favorite ? "Unfavorite" : "Favorite — keeps it at the top of every picker"}
             style={{ color: p.favorite ? C.gold : C.kraftDark }}
           >
             <Star size={18} fill={p.favorite ? C.gold : "none"} />
@@ -2822,7 +2822,7 @@ function InventoryDetail({ product, products, invLog, onChange, onBack, onDelete
                 </select>
               </Field>
               <div className="text-xs mt-1" style={{ color: C.faint }}>
-                Ties this SKU to the colour it's finished in, so the crew doesn't have to remember which
+                Ties this SKU to the color it's finished in, so the crew doesn't have to remember which
                 Graphene Stone goes with which product. It prints on the work order.
               </div>
             </div>
@@ -2977,7 +2977,11 @@ const PRINT_CSS = `
    sharing the letter-sized sheet CSS above made the printer offer only
    paper sizes and try to lay the roll out on a page. */
 const LABEL_PRINT_CSS = `
-  @page { size: 4in 1in landscape; margin: 0; }
+  /* No "landscape" keyword here: mixing it with explicit dimensions is
+     invalid CSS, so the browser dropped the whole size declaration and fell
+     back to letter — which is why the Rollo kept offering paper sizes.
+     4in x 1in is already wider than it is tall. */
+  @page { size: 4in 1in; margin: 0; }
   @media print {
     body > *:not(.print-portal) { display: none !important; }
     .print-overlay {
@@ -3012,7 +3016,7 @@ function InventoryCountSheet({ products, group, onClose }) {
     .filter((p) => !p.archived)
     .filter((p) => (cat === "all" ? true : (p.category || "wood") === cat))
     .slice()
-    .sort(bySkuFavouritesFirst);
+    .sort(bySkuFavoritesFirst);
 
   // Same two units the Inventory table shows for this SKU, so the sheet
   // and the screen never disagree about what a number means.
@@ -3162,7 +3166,7 @@ function InventoryTab({ products, onChange, invLog, activeId, setActiveId }) {
     setPinnedId(p.id);
     setActiveId(p.id);
   };
-  // Same spec, different size or colour — identity and stock deliberately
+  // Same spec, different size or color — identity and stock deliberately
   // not carried over, since copying on-hand would invent stock.
   const duplicate = (src) => {
     const copy = { ...src, id: uid(), sku: `${src.sku}-COPY`, onHand: 0, favorite: false };
@@ -3188,7 +3192,7 @@ function InventoryTab({ products, onChange, invLog, activeId, setActiveId }) {
   const filtered = products
     .filter((p) => (group === "all" ? true : (p.category || "wood") === group))
     .slice()
-    .sort(bySkuFavouritesFirst);
+    .sort(bySkuFavoritesFirst);
 
   const columns = [
     {
@@ -3197,7 +3201,7 @@ function InventoryTab({ products, onChange, invLog, activeId, setActiveId }) {
         <span className="flex items-center gap-1.5">
           <button
             onClick={(e) => { e.stopPropagation(); updateOne({ ...p, favorite: !p.favorite }); }}
-            title={p.favorite ? "Unfavourite" : "Favourite — keeps it at the top of every picker"}
+            title={p.favorite ? "Unfavorite" : "Favorite — keeps it at the top of every picker"}
             style={{ color: p.favorite ? C.gold : C.kraftDark }}
           >
             <Star size={13} fill={p.favorite ? C.gold : "none"} />
@@ -3320,7 +3324,7 @@ function InventoryTab({ products, onChange, invLog, activeId, setActiveId }) {
    away the moment the app is shut — so a batch someone had half filled in,
    timer running, came back blank the next morning. This mirrors the draft
    into localStorage on every change. localStorage writes are synchronous,
-   so unlike the Supabase save (a network round trip that gets cancelled
+   so unlike the Supabase save (a network round trip that gets canceled
    mid-flight when the page goes away) it survives even an abrupt kill.
 
    The clock stores the moment it was started rather than a running count
@@ -3703,7 +3707,7 @@ function QRScannerModal({ onClose, onDecoded }) {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    let cancelled = false;
+    let canceled = false;
 
     const stop = () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
@@ -3732,7 +3736,7 @@ function QRScannerModal({ onClose, onDecoded }) {
     (async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-        if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return; }
+        if (canceled) { stream.getTracks().forEach((t) => t.stop()); return; }
         streamRef.current = stream;
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
@@ -3744,7 +3748,7 @@ function QRScannerModal({ onClose, onDecoded }) {
       }
     })();
 
-    return () => { cancelled = true; stop(); };
+    return () => { canceled = true; stop(); };
   }, []);
 
   return (
@@ -3805,7 +3809,7 @@ const fmtConv = (n) => (Math.round((Number(n) || 0) * 100) / 100).toLocaleString
 
 // Spec now lives per line item rather than per customer, so the printed
 // sheet shows it next to the item the crew is actually working on.
-// The colour a finished SKU is painted in, if any. Kept on the product so
+// The color a finished SKU is painted in, if any. Kept on the product so
 // nobody has to remember which Graphene Stone goes with which product.
 const paintFor = (product, products) =>
   product?.paintProductId ? (products || []).find((x) => x.id === product.paintProductId) || null : null;
@@ -4215,11 +4219,11 @@ function LabelPrintView({ units, supplierFor, onClose }) {
    either the size price or the painted price, never the sum.
 
    A SKU's size is its leading three digits (185RAW, 185N, 185P are all
-   "185"), which is how the vendor sheet is organised. */
+   "185"), which is how the vendor sheet is organized. */
 /* The one ordering used by every SKU list and picker in the app:
-   favourites first, then everything else, each block alphabetised by SKU.
+   favorites first, then everything else, each block alphabetized by SKU.
    Numeric-aware so 5 sorts before 48, and 165 before 1650. */
-const bySkuFavouritesFirst = (a, b) => {
+const bySkuFavoritesFirst = (a, b) => {
   const fav = Number(!!b.favorite) - Number(!!a.favorite);
   if (fav !== 0) return fav;
   return String(a.sku || "").localeCompare(String(b.sku || ""), undefined, { numeric: true, sensitivity: "base" });
@@ -4303,14 +4307,14 @@ function NewPurchaseOrderModal({ suppliers, products, editingPO, receivingPO, on
   // De-duped: SKUs are free text and two products can end up sharing one.
   // A duplicated <option> key breaks React's reconciliation, and a repeated
   // entry in the picker is just confusing.
-  // Favourites first, then everything else, each alphabetised — the buyer's
+  // Favorites first, then everything else, each alphabetized — the buyer's
   // usual sizes sit at the top instead of being hunted for.
   const sizeOptions = (() => {
     const seen = new Set();
     return products
       .filter((p) => !p.archived)
       .slice()
-      .sort(bySkuFavouritesFirst)
+      .sort(bySkuFavoritesFirst)
       .filter((p) => (seen.has(p.sku) ? false : (seen.add(p.sku), true)))
       .map((p) => ({ sku: p.sku, favorite: !!p.favorite }));
   })();
@@ -4900,7 +4904,7 @@ function SkuPicker({ products, value, onChange, onCreate, placeholder = "— Sel
   const [creating, setCreating] = useState(false);
   const [newSku, setNewSku] = useState("");
 
-  const sorted = products.slice().sort(bySkuFavouritesFirst);
+  const sorted = products.slice().sort(bySkuFavoritesFirst);
 
   const create = () => {
     const sku = newSku.trim();
