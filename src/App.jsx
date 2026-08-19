@@ -2951,6 +2951,29 @@ const PRINT_CSS = `
   }
 `;
 
+/* Labels are not sheets. A Rollo roll is one 4x1in label per page, so these
+   need their own @page size and a hard page break after every label —
+   sharing the letter-sized sheet CSS above made the printer offer only
+   paper sizes and try to lay the roll out on a page. */
+const LABEL_PRINT_CSS = `
+  @page { size: 4in 1in landscape; margin: 0; }
+  @media print {
+    body > *:not(.print-portal) { display: none !important; }
+    .print-overlay {
+      position: static !important; overflow: visible !important;
+      background: none !important; inset: auto !important; z-index: auto !important;
+    }
+    .print-shell { max-width: none !important; margin: 0 !important; }
+    .no-print { display: none !important; }
+    .label-page, .flabel-page {
+      page-break-after: always; break-after: page;
+      page-break-inside: avoid; break-inside: avoid;
+      border: none !important; margin: 0 !important;
+    }
+    .label-page:last-child, .flabel-page:last-child { page-break-after: auto; break-after: auto; }
+  }
+`;
+
 /* A printable count sheet for walking the racks. Everything the counter
    needs is on the page — what the app currently believes is on hand, plus
    blank space to tally against it — so nobody has to carry a phone around
@@ -4109,7 +4132,7 @@ function FinishedLabelPrintView({ labels, onClose }) {
   return (
     <PrintPortal>
     <div className="fixed inset-0 z-50 overflow-auto print-overlay" style={{ background: "rgba(34,29,25,0.6)" }}>
-      <style>{PRINT_CSS}</style>
+      <style>{LABEL_PRINT_CSS}</style>
       <div className="max-w-md mx-auto my-8 print-shell">
         <div className="flex justify-end gap-2 mb-3 no-print">
           <Btn kind="dark" onClick={() => window.print()}><Printer size={13} /> Print all {labels.length} labels</Btn>
@@ -4146,7 +4169,7 @@ function LabelPrintView({ units, supplierFor, onClose }) {
   return (
     <PrintPortal>
     <div className="fixed inset-0 z-50 overflow-auto print-overlay" style={{ background: "rgba(34,29,25,0.6)" }}>
-      <style>{PRINT_CSS}</style>
+      <style>{LABEL_PRINT_CSS}</style>
       <div className="max-w-md mx-auto my-8 print-shell">
         <div className="flex justify-end gap-2 mb-3 no-print">
           <Btn kind="dark" onClick={() => window.print()}>
@@ -4789,13 +4812,27 @@ function ReceivingTab({ suppliers, purchaseOrders, onPOChange, units, onUnitsCha
                         </div>
                       ) : (
                         <div className="mt-3">
-                          <div className="text-xs mb-1" style={{ color: C.faint, fontFamily: MONO }}>RECEIVED UNITS</div>
+                          <div className="flex items-center justify-between gap-2 mb-1 flex-wrap">
+                            <div className="text-xs" style={{ color: C.faint, fontFamily: MONO }}>RECEIVED UNITS</div>
+                            {poUnits.length > 0 && (
+                              <Btn onClick={() => setPrintUnits(poUnits)}>
+                                <Printer size={13} /> Print this PO's labels ({poUnits.length})
+                              </Btn>
+                            )}
+                          </div>
                           {poUnits.map((u) => (
-                            <div key={u.id} className="flex items-center justify-between px-2 py-1.5 text-sm" style={{ borderBottom: `1px solid ${C.kraft}` }}>
+                            <div key={u.id} className="flex items-center justify-between gap-2 px-2 py-1.5 text-sm" style={{ borderBottom: `1px solid ${C.kraft}` }}>
                               <span style={{ fontFamily: MONO }}>{u.sizeLabel}{u.seqTotal ? ` · ${u.seq} of ${u.seqTotal}` : ""} · {num(u.boardsRemaining)}/{num(u.boardCount)} bd left</span>
-                              <div className="flex items-center gap-2">
-                                <button onClick={() => setPrintUnits([u])} title="Print label" className="opacity-60 hover:opacity-100"><Tag size={14} /></button>
-                                <button onClick={() => removeUnit(u.id)} className="opacity-40 hover:opacity-100"><Trash2 size={13} /></button>
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                {/* A bare icon was too easy to miss on a phone. */}
+                                <button
+                                  onClick={() => setPrintUnits([u])} title="Print just this label"
+                                  className="flex items-center gap-1 px-2 py-1 rounded-sm"
+                                  style={{ fontFamily: MONO, fontSize: 11, color: C.ink, border: `1px solid ${C.kraftDark}` }}
+                                >
+                                  <Tag size={12} /> Label
+                                </button>
+                                <button onClick={() => removeUnit(u.id)} className="opacity-40 hover:opacity-100 p-1"><Trash2 size={13} /></button>
                               </div>
                             </div>
                           ))}
