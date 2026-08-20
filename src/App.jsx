@@ -1123,6 +1123,16 @@ function makeAdjustment({ productId, from, to, reason, note, by, sessionId }) {
    (inboundBoards -> outboundBoards/wasteBoards). Reports and rate targets
    read through these so neither has to care which it's looking at. */
 const logStep = (e) => e.step || "sorting";
+
+/* Newest first, by when the work actually happened.
+
+   The log list used to render the array in storage order, which is NOT
+   chronological: mergeCollections appends records it has never seen to the
+   END of the array, so every batch saved on another phone landed at the
+   bottom. Combined with a 15-row cap that made six days of production look
+   deleted — the rows were there the whole time, just past the cutoff. */
+const byNewest = (a, b) =>
+  String(b.startedAt || b.date || "").localeCompare(String(a.startedAt || a.date || ""));
 const logBoardsIn = (e) => Number(e.inboundBoards ?? e.rawBoards) || 0;
 const logBoardsOut = (e) =>
   e.outboundBoards != null
@@ -5064,6 +5074,8 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
 
   // Seeded from the open draft first, then from whoever the header already
   // had picked, so someone who set their name once doesn't set it again.
+  const [logLimit, setLogLimit] = useState(15);
+  const shownLogCount = sortLog.length;
   const [crew, setCrew] = useState(() => (saved.crew?.length ? saved.crew : whoWorking ? [whoWorking] : []));
   const setCrewSynced = (next) => { setCrew(next); setWhoWorking(next[0] || ""); };
 
@@ -5181,6 +5193,8 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
       }
       onLogSort({
         id: uid(), date: today(), by: crew.join(" + "), crew, batchLabel: autoLabel,
+        expectedBoards: selectedUnit ? Number(selectedUnit.boardsRemaining) || 0 : null,
+        countVariance: selectedUnit ? rawIn - (Number(selectedUnit.boardsRemaining) || 0) : null,
         workOrderId: workOrderId || "", workOrderNumber: wo?.number || "",
         unitId: unitId || "", rawProductId,
         toNProductId: nProduct?.id || "", toPProductId: pProduct?.id || "",
@@ -5265,7 +5279,23 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
           </select>
         </Field>
 
-        <Field label="Raw boards brought in" required><input type="number" style={{ ...inputStyle, marginTop: 8 }} value={rawBoards} onChange={(e) => setRawBoards(e.target.value)} /></Field>
+        <Field label="Raw boards brought in — count them, don't trust the tag" required>
+          <input type="number" style={{ ...inputStyle, marginTop: 8 }} value={rawBoards} onChange={(e) => setRawBoards(e.target.value)} />
+        </Field>
+        {selectedUnit && Number(rawBoards) > 0 && Number(rawBoards) !== Number(selectedUnit.boardsRemaining) && (
+          /* Vendors miscount both ways. Whatever is typed here wins, and the
+             difference is recorded on the batch so it can be taken back to
+             them as an over or short shipment. */
+          <div className="mt-1 text-xs flex items-start gap-1.5" style={{ color: C.warn, fontFamily: MONO }}>
+            <AlertTriangle size={12} style={{ marginTop: 2, flexShrink: 0 }} />
+            <span>
+              Unit says {num(selectedUnit.boardsRemaining)} boards, you counted {num(rawBoards)} —
+              {" "}{Number(rawBoards) > Number(selectedUnit.boardsRemaining) ? "over" : "short"} by
+              {" "}{num(Math.abs(Number(rawBoards) - Number(selectedUnit.boardsRemaining)))}.
+              Your count is what gets saved, and the difference is logged against the PO.
+            </span>
+          </div>
+        )}
 
         <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${C.kraft}` }}>
           <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 2 }}>What did it sort into?</div>
@@ -5354,15 +5384,20 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
       </div>
 
       <div className="rounded-sm p-4" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
-        <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 10 }}>Recent Sorting Log</div>
+        <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
+          <div style={{ fontWeight: 800, fontSize: 15 }}>Recent Sorting Log</div>
+          <div className="text-xs" style={{ color: C.faint, fontFamily: MONO }}>
+            {sortLog.length} logged
+          </div>
+        </div>
         <div className="text-xs mb-2" style={{ color: C.faint }}>
-          Anyone can edit or delete a logged entry below.
+          Newest first. Anyone can edit or delete a logged entry below.
         </div>
         {sortLog.length === 0 ? (
           <div className="text-sm text-center py-4" style={{ color: C.faint }}>Nothing logged yet.</div>
         ) : (
           <div className="space-y-2">
-            {sortLog.slice(0, 15).map((s) => {
+            {sortLog.slice().sort(byNewest).slice(0, logLimit).map((s) => {
               const isEditing = editingId === s.id;
               const entryRaw = resolveRawProduct(s, products);
               const entryN = products.find((p) => p.groupId === entryRaw?.groupId && p.role === "sortedN");
@@ -5406,6 +5441,15 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
             })}
           </div>
         )}
+        {logLimit < shownLogCount && (
+          <button
+            onClick={() => setLogLimit(shownLogCount)}
+            className="mt-3 w-full py-2 rounded-sm text-xs"
+            style={{ fontFamily: MONO, color: C.ink, border: `1px solid ${C.kraftDark}` }}
+          >
+            Show all {shownLogCount} entries
+          </button>
+        )}
       </div>
       {scannerOpen && (
         <QRScannerModal onClose={() => setScannerOpen(false)} onDecoded={handleScanned} />
@@ -5422,13 +5466,14 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
 // finished, sellable SKU rather than another intermediate stage.
 function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, onDeleteSort, team, whoWorking, setWhoWorking, onAddTeamMember, workOrders, runGrouped }) {
   const stepDef = PROCESS_STEPS.find((s) => s.id === step);
-  const [inboundProductId, setInboundProductId] = useState("");
-  const [inboundBoards, setInboundBoards] = useState("");
-  const [outboundProductId, setOutboundProductId] = useState("");
-  const [outboundBoards, setOutboundBoards] = useState("");
-  const [wasteBoards, setWasteBoards] = useState("");
-  const [workOrderId, setWorkOrderId] = useState("");
-  const [description, setDescription] = useState("");
+  const { saved: draft0 } = useDraft(`gnws-draft-${step}`);
+  const [inboundProductId, setInboundProductId] = useState(draft0.inboundProductId || "");
+  const [inboundBoards, setInboundBoards] = useState(draft0.inboundBoards || "");
+  const [outboundProductId, setOutboundProductId] = useState(draft0.outboundProductId || "");
+  const [outboundBoards, setOutboundBoards] = useState(draft0.outboundBoards || "");
+  const [wasteBoards, setWasteBoards] = useState(draft0.wasteBoards || "");
+  const [workOrderId, setWorkOrderId] = useState(draft0.workOrderId || "");
+  const [description, setDescription] = useState(draft0.description || "");
   const sw = useStopwatch();
   const [manualEdit, setManualEdit] = useState(false);
   const [manualHMS, setManualHMS] = useState({ h: "0", m: "0", s: "0" });
@@ -5446,11 +5491,21 @@ function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, o
   const inBoards = Number(inboundBoards) || 0;
   const outBoards = Number(outboundBoards) || 0;
   const wasteN = Number(wasteBoards) || 0;
-  const [crew, setCrew] = useState(() => (whoWorking ? [whoWorking] : []));
+  const [logLimit, setLogLimit] = useState(15);
+  // Same device-side draft the sorting form uses, keyed per step, so a screen
+  // lock mid-entry loses nothing.
+  const { save: saveDraft, clear: clearDraft } = useDraft(`gnws-draft-${step}`);
+  const [crew, setCrew] = useState(() => (draft0.crew?.length ? draft0.crew : whoWorking ? [whoWorking] : []));
   const setCrewSynced = (next) => { setCrew(next); setWhoWorking(next[0] || ""); };
+  useEffect(() => {
+    saveDraft({ inboundProductId, inboundBoards, outboundProductId, outboundBoards,
+                wasteBoards, workOrderId, description, crew });
+  }, [inboundProductId, inboundBoards, outboundProductId, outboundBoards,
+      wasteBoards, workOrderId, description, crew]);
   const canSubmit = inBoards > 0 && crew.length > 0 && inboundProductId && outboundProductId;
   const openWorkOrders = workOrders.filter((w) => w.status !== "shipped");
   const stepEntries = sortLog.filter((s) => s.step === step);
+  const shownLogCount = stepEntries.length;
 
   const submit = () => {
     if (!canSubmit) return;
@@ -5476,6 +5531,7 @@ function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, o
     });
     setInboundProductId(""); setInboundBoards(""); setOutboundProductId(""); setOutboundBoards(""); setWasteBoards(""); setWorkOrderId(""); setDescription("");
     sw.reset();
+    clearDraft();
   };
 
   return (
@@ -5570,7 +5626,7 @@ function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, o
           <div className="text-sm text-center py-4" style={{ color: C.faint }}>Nothing logged yet.</div>
         ) : (
           <div className="space-y-2">
-            {stepEntries.slice(0, 15).map((s) => {
+            {stepEntries.slice().sort(byNewest).slice(0, logLimit).map((s) => {
               const inP = products.find((p) => p.id === s.inboundProductId);
               const outP = products.find((p) => p.id === s.outboundProductId);
               return (
@@ -5591,6 +5647,15 @@ function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, o
               );
             })}
           </div>
+        )}
+        {logLimit < shownLogCount && (
+          <button
+            onClick={() => setLogLimit(shownLogCount)}
+            className="mt-3 w-full py-2 rounded-sm text-xs"
+            style={{ fontFamily: MONO, color: C.ink, border: `1px solid ${C.kraftDark}` }}
+          >
+            Show all {shownLogCount} entries
+          </button>
         )}
       </div>
     </div>
@@ -6540,17 +6605,22 @@ function mergeCollections(baseline, ours, theirs) {
    page: a dot for save state, "Save" to push pending edits immediately,
    and "Sync" to pull the latest. Turns into a prompt when another
    session has moved ahead and this tab has unsaved work. */
-function SyncBar({ state, remoteAhead, lastSyncedAt, onSave, onSync, compact }) {
-  const label = state === "saving" ? "Saving…" : state === "synced" ? "Saved" : remoteAhead ? "Out of date" : "Up to date";
-  const dot = state === "saving" ? C.gold : remoteAhead ? C.warn : C.moss;
+function SyncBar({ state, remoteAhead, lastSyncedAt, onSave, onSync, compact, saveError }) {
+  const failed = state === "error";
+  const label = failed ? "NOT SAVED" : state === "saving" ? "Saving…" : state === "synced" ? "Saved"
+    : remoteAhead ? "Out of date" : "Up to date";
+  const dot = failed ? C.redwood : state === "saving" ? C.gold : remoteAhead ? C.warn : C.moss;
   const ago = lastSyncedAt ? Math.round((Date.now() - lastSyncedAt) / 1000) : null;
   return (
     <div className="flex items-center gap-2">
       {!compact && (
         <span
           className="flex items-center gap-1.5"
-          style={{ fontFamily: MONO, fontSize: 11, color: remoteAhead ? C.warn : "rgba(255,255,255,0.65)" }}
-          title={ago != null ? `Last synced ${ago}s ago` : ""}
+          style={{ fontFamily: MONO, fontSize: 11, fontWeight: failed ? 700 : 400,
+                   color: failed ? "#fff" : remoteAhead ? C.warn : "rgba(255,255,255,0.65)",
+                   background: failed ? C.redwood : "transparent",
+                   padding: failed ? "2px 6px" : 0, borderRadius: 3 }}
+          title={failed ? `Save failed: ${saveError || "unknown error"}` : ago != null ? `Last synced ${ago}s ago` : ""}
         >
           <span style={{ width: 7, height: 7, borderRadius: 99, background: dot, display: "inline-block" }} />
           {label}
@@ -6730,6 +6800,7 @@ export default function App() {
   const [jumpToUnitId, setJumpToUnitId] = useState(null);
   const [importOpen, setImportOpen] = useState(false);
   const [exitHint, setExitHint] = useState(false);
+  const [saveError, setSaveError] = useState(null);
   const saveTimers = useRef({});
   // Baseline per key: what this tab last saw in storage. Used to tell our
   // own edits apart from another tab's when merging at save time.
@@ -6829,10 +6900,17 @@ export default function App() {
     for (const key of keys) {
       if (saveTimers.current[key]) { clearTimeout(saveTimers.current[key]); delete saveTimers.current[key]; }
       const { value, base } = pendingRef.current[key];
-      delete pendingRef.current[key];
-      try { await writeKey(key, value, base); }
-      catch (e) { console.error("Save failed for", key, e); }
+      try { await writeKey(key, value, base); delete pendingRef.current[key]; }
+      catch (e) {
+        // Leave it pending so the next save or flush retries it, and say so
+        // out loud — a silent failure here is how a day's work disappears.
+        console.error("Save failed for", key, e);
+        setSaveError(e?.message || String(e));
+        setSyncState("error");
+        return;
+      }
     }
+    setSaveError(null);
     setSyncState("synced");
     setTimeout(() => setSyncState((v) => (v === "synced" ? "idle" : v)), 1200);
   };
@@ -6859,10 +6937,15 @@ export default function App() {
     saveTimers.current[key] = setTimeout(async () => {
       delete saveTimers.current[key];
       const { value: v, base } = pendingRef.current[key];
-      delete pendingRef.current[key];
       setSyncState("saving");
-      try { await writeKey(key, v, base); }
-      catch (e) { console.error("Save failed for", key, e); }
+      try { await writeKey(key, v, base); delete pendingRef.current[key]; }
+      catch (e) {
+        console.error("Save failed for", key, e);
+        setSaveError(e?.message || String(e));
+        setSyncState("error");
+        return;
+      }
+      setSaveError(null);
       setSyncState("synced");
       setTimeout(() => setSyncState((x) => (x === "synced" ? "idle" : x)), 1200);
     }, 500);
@@ -7165,6 +7248,7 @@ export default function App() {
             <SyncBar
               state={syncState} remoteAhead={remoteAhead} lastSyncedAt={lastSyncedAt}
               onSave={flushSaves} onSync={() => syncNow()}
+            saveError={saveError}
             />
             <button onClick={() => setSettingsOpen(true)} title="Settings" className="p-1.5 rounded-sm hover:opacity-70" style={{ border: "1px solid #4a423a" }}>
               <Settings size={15} />
