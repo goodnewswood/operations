@@ -1095,6 +1095,27 @@ function nextNumber(records, prefix) {
 
    Reasons are deliberately coarse — the detail lives on the record that
    caused the change, and this is the thread that ties them together. */
+/* Stock floors at zero, and remembers how far past zero it was pushed.
+
+   shortBy accumulates across batches so a SKU that keeps getting sorted
+   after it has "run out" keeps growing its shortfall instead of resetting,
+   and shortAt records when it last happened. Clearing it is what a real
+   physical count does. */
+function clampProducts(next, beforeMap) {
+  return next.map((p) => {
+    const prev = beforeMap.get(p.id);
+    if (!prev) return p;
+    let q = p;
+    let short = 0;
+    for (const key of ["onHand", "reworkQty", "wasteQty"]) {
+      const v = Number(q[key]) || 0;
+      if (v < 0) { short += -v; q = { ...q, [key]: 0 }; }
+    }
+    if (!short) return q;
+    return { ...q, shortBy: (Number(prev.shortBy) || 0) + short, shortAt: today() };
+  });
+}
+
 const ADJ_REASON = {
   count: "Physical count",
   work: "Production",
@@ -1732,7 +1753,8 @@ function WhoSelect({ team, current, onChange, onAddMember, onDark = false, big =
   );
 }
 
-function Dashboard({ workOrders, products, sortLog, units, onOpenWO, goTab, goals, onGoalsChange }) {
+function Dashboard({ workOrders, products, sortLog, units, onOpenWO, goTab, goals, onGoalsChange, onClearShort }) {
+  const short = products.filter((p) => Number(p.shortBy) > 0);
   const active = workOrders.filter((w) => w.status !== "shipped");
   const byStatus = STATUS_FLOW.reduce((acc, s) => ({ ...acc, [s]: workOrders.filter((w) => w.status === s).length }), {});
   const needsReorder = products.filter((p) => Number(p.reorderPoint) > 0 && (Number(p.onHand) || 0) <= Number(p.reorderPoint));
@@ -1768,6 +1790,40 @@ function Dashboard({ workOrders, products, sortLog, units, onOpenWO, goTab, goal
 
   return (
     <div>
+      {short.length > 0 && (
+        /* Sorting has run these SKUs past what the last count said was there.
+           The work log is the true record, so the stock sat at zero and the
+           shortfall is shown here until somebody walks the racks. */
+        <div className="rounded-sm p-4 mb-5" style={{ background: "#fff", border: `1px solid ${C.redwood}`, borderLeft: `4px solid ${C.redwood}` }}>
+          <div className="flex items-start gap-2">
+            <AlertTriangle size={16} style={{ color: C.redwood, flexShrink: 0, marginTop: 1 }} />
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 800, color: C.redwood }}>
+                {short.length} SKU{short.length === 1 ? "" : "s"} sorted past what the count said
+              </div>
+              <div className="text-sm mt-1" style={{ color: C.faint }}>
+                Held at zero. The work logs are right, so the count was short. Recount these racks.
+              </div>
+              <div className="mt-2 space-y-1">
+                {short.map((p) => (
+                  <div key={p.id} className="flex items-center justify-between gap-2 text-sm" style={{ fontFamily: MONO }}>
+                    <span><strong>{p.sku}</strong> short by {num(p.shortBy)}{p.shortAt ? ` · ${p.shortAt}` : ""}</span>
+                    {onClearShort && (
+                      <button
+                        onClick={() => onClearShort(p)}
+                        className="px-2 py-1 rounded-sm text-xs"
+                        style={{ fontFamily: MONO, color: C.ink, border: `1px solid ${C.kraftDark}` }}
+                      >
+                        Counted it
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="rounded-sm p-4 mb-5" style={{ background: C.panel, border: `1px solid ${C.kraftDark}`, borderLeft: `4px solid ${aboveGoal ? C.moss : belowGoal ? C.redwood : C.gold}` }}>
         <div className="flex items-center justify-between">
           <div style={{ fontFamily: MONO, fontSize: 10, color: C.faint, letterSpacing: "0.08em" }}>SORTING THROUGHPUT · LAST 30 DAYS</div>
@@ -6759,8 +6815,13 @@ export default function App() {
      goes through this so an item's history is complete — a count, a sort
      batch, a receipt and a hand edit all leave the same kind of trail.
      Only real on-hand changes are recorded; renaming a SKU doesn't. */
-  const setProductsLogged = (next, { reason = "edit", note = "", by = "", sessionId = "" } = {}) => {
+  const setProductsLogged = (rawNext, { reason = "edit", note = "", by = "", sessionId = "" } = {}) => {
     const before = new Map((latestRef.current?.products || products).map((p) => [p.id, p]));
+    // A SKU can't hold less than nothing. When sorting runs a count into the
+    // ground the work log is the true record and the count was the error, so
+    // the stock floors at zero and the shortfall is remembered on the item
+    // rather than silently swallowed — the dashboards surface it in red.
+    const next = clampProducts(rawNext, before);
     const adjustments = [];
     next.forEach((p) => {
       const prev = before.get(p.id);
@@ -7359,7 +7420,10 @@ export default function App() {
 
       <main className="max-w-6xl mx-auto px-4 py-5 pb-24 sm:pb-5">
         {tab === "dashboard" && (
-          <Dashboard workOrders={workOrders} products={products} sortLog={sortLog} units={units} onOpenWO={(id) => { setActiveWOId(id); goTab("orders"); setOrdersSubTab("workorders"); }} goTab={goTab} goals={goals} onGoalsChange={setGoals} />
+          <Dashboard workOrders={workOrders} products={products} sortLog={sortLog} units={units} onOpenWO={(id) => { setActiveWOId(id); goTab("orders"); setOrdersSubTab("workorders"); }} goTab={goTab} goals={goals} onGoalsChange={setGoals}
+            onClearShort={(p) => setProductsLogged(
+              products.map((x) => (x.id === p.id ? { ...x, shortBy: 0, shortAt: "" } : x)),
+              { reason: "count", note: `Recounted after running ${num(p.shortBy)} short`, by: whoWorking })} />
         )}
 
         {tab === "orders" && !(ordersSubTab === "workorders" && activeWO) && (
