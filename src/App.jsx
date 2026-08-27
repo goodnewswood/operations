@@ -1176,6 +1176,7 @@ function stepRate(sortLog, step) {
 
 const canonicalUnitFor = (p) =>
   p.category === "paint" ? "gal" : p.category === "packing" ? (p.unitLabel || "ea") : (p.kind === "sf" ? "sf" : "board");
+const hasSF = (p) => canonicalUnitFor(p) === "sf" || Object.keys(buildUnitGraph(p)).includes("sf");
 
 const resolveRawProduct = (entry, products) => {
   if (entry?.rawProductId) return products.find((p) => p.id === entry.rawProductId) || null;
@@ -1763,9 +1764,40 @@ function Dashboard({ workOrders, products, sortLog, units, onOpenWO, goTab, goal
   const short = products.filter((p) => Number(p.shortBy) > 0);
   const active = workOrders.filter((w) => w.status !== "shipped");
   const byStatus = STATUS_FLOW.reduce((acc, s) => ({ ...acc, [s]: workOrders.filter((w) => w.status === s).length }), {});
-  const needsReorder = products.filter((p) => Number(p.reorderPoint) > 0 && (Number(p.onHand) || 0) <= Number(p.reorderPoint));
   const todaysSorts = sortLog.filter((s) => s.date === today());
   const unclaimedUnits = (units || []).filter((u) => Number(u.boardsRemaining) > 0);
+
+  // The one thing that actually stops a work order: a line that needs
+  // more of a product than is on hand, where the raw stock behind it
+  // (sourceBoardSku, the board that mills into it) can't cover the gap
+  // either. Only checked against orders still being worked — packed and
+  // shipped ones already have their material. A line marked done already
+  // got what it needed, so it's skipped too.
+  const woShortages = workOrders
+    .filter((w) => ACTIVE_WO_STATUSES.includes(w.status))
+    .flatMap((w) => (w.lines || [])
+      .filter((l) => !l.done && l.productId)
+      .map((l) => {
+        const p = products.find((x) => x.id === l.productId);
+        const needSF = Number(l.qtySF) || 0;
+        if (!p || needSF <= 0 || !hasSF(p)) return null;
+        const haveSF = convertQty(p, p.onHand, canonicalUnitFor(p), "sf");
+        const gapSF = needSF - haveSF;
+        if (gapSF <= 0) return null;
+        // Two ways a product names its raw source: a finished SF good
+        // points at it directly (sourceBoardSku), while a sorted-but-
+        // unmilled board (185N/185P, sold as-is to customers who want
+        // unmilled stock) shares a groupId with its raw sibling instead —
+        // same pattern SortingTab uses to find where boards land.
+        const raw = p.sourceBoardSku
+          ? products.find((r) => r.sku === p.sourceBoardSku)
+          : (p.groupId ? products.find((r) => r.groupId === p.groupId && r.role === "raw") : null);
+        const rawCapacitySF = raw ? convertQty(p, raw.onHand, "board", "sf") : 0;
+        const shortSF = gapSF - rawCapacitySF;
+        if (shortSF <= 0) return null;
+        return { wo: w, product: p, raw, needSF, haveSF, rawCapacitySF, shortSF };
+      })
+      .filter(Boolean));
 
   // Throughput over the trailing 30 days — total boards sorted divided by
   // total logged hours. Only counts entries with an actual timer value;
@@ -1781,21 +1813,36 @@ function Dashboard({ workOrders, products, sortLog, units, onOpenWO, goTab, goal
   const aboveGoal = totalSeconds30 > 0 && goal > 0 && boardsPerHour >= goal;
   const belowGoal = totalSeconds30 > 0 && goal > 0 && boardsPerHour < goal;
 
-  // "A unit" is a pallet — 300 boards for 1x8 stock, 400 for 1x6, etc.
-  // Sorted stock (185N, 185P) accumulates as boards come in off the sort
-  // line; whatever doesn't divide evenly is the remainder still short of
-  // a full pallet. This is a live read of onHand, not a separate count
-  // anyone has to maintain.
-  const unitProducts = products
-    .filter((p) => p.kind === "board" && Number(p.boardsPerUnit) > 0)
-    .map((p) => {
-      const onHand = Number(p.onHand) || 0;
-      const perUnit = Number(p.boardsPerUnit) || 1;
-      return { ...p, units: Math.floor(onHand / perUnit), remainder: onHand % perUnit };
-    });
-
   return (
     <div>
+      {woShortages.length > 0 && (
+        <div className="rounded-sm p-5 mb-5" style={{ background: C.redwood, border: `2px solid ${C.redwoodDark}` }}>
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={24} color="#fff" style={{ flexShrink: 0 }} />
+            <div style={{ fontWeight: 900, fontSize: 19, color: "#fff" }}>
+              {woShortages.length} work order line{woShortages.length === 1 ? "" : "s"} short on material — reorder now
+            </div>
+          </div>
+          <div className="mt-3 space-y-2">
+            {woShortages.map(({ wo, product, raw, needSF, haveSF, rawCapacitySF, shortSF }, i) => (
+              <button
+                key={`${wo.id}-${product.id}-${i}`} onClick={() => onOpenWO(wo.id)}
+                className="w-full text-left px-3 py-2 rounded-sm hover:opacity-90 transition-opacity"
+                style={{ background: "rgba(255,255,255,0.14)", border: "1px solid rgba(255,255,255,0.4)" }}
+              >
+                <div style={{ color: "#fff", fontWeight: 800, fontFamily: MONO }}>
+                  {wo.number} · {wo.customerName || "No customer"}
+                </div>
+                <div style={{ color: "#fff", fontSize: 13, opacity: 0.92 }}>
+                  <strong>{product.sku}</strong> — need {num(needSF)} SF, have {num(haveSF)} SF on hand
+                  {raw ? ` + ${num(rawCapacitySF)} SF worth of ${raw.sku}` : " (no raw stock linked)"}
+                  {" "}— short {num(shortSF)} SF
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
       {short.length > 0 && (
         /* Sorting has run these SKUs past what the last count said was there.
            The work log is the true record, so the stock sat at zero and the
@@ -1854,19 +1901,35 @@ function Dashboard({ workOrders, products, sortLog, units, onOpenWO, goTab, goal
         )}
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 mb-5">
-        {unitProducts.map((p) => (
-          <div key={p.id} className="rounded-sm p-4" style={{ background: C.panel, border: `1px solid ${C.kraftDark}`, borderLeft: `4px solid ${C.moss}` }}>
-            <div style={{ fontFamily: MONO, fontSize: 10, color: C.faint, letterSpacing: "0.08em" }}>{p.sku} · UNITS READY</div>
-            <div className="flex items-baseline gap-2 mt-1">
-              <span style={{ fontSize: 28, fontWeight: 900 }}>{p.units}</span>
-              <span style={{ fontSize: 13, color: C.faint }}>full unit{p.units === 1 ? "" : "s"} ({p.boardsPerUnit}/unit)</span>
-            </div>
-            {p.remainder > 0 && (
-              <div className="text-xs mt-1" style={{ color: C.faint }}>+ {num(p.remainder)} boards short of the next unit</div>
-            )}
+      <div className="rounded-sm p-4 mb-5" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
+        <div className="flex items-center justify-between mb-3">
+          <div style={{ fontWeight: 800, fontSize: 15 }}>Open Work Orders</div>
+          <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>{active.length} open</span>
+        </div>
+        {active.length === 0 ? (
+          <div className="text-sm text-center py-6" style={{ color: C.faint }}>Nothing active right now.</div>
+        ) : (
+          <div className="grid gap-2 sm:grid-cols-2">
+            {active.map((w) => (
+              <button
+                key={w.id} onClick={() => onOpenWO(w.id)}
+                className="text-left flex items-center justify-between px-3 py-2 rounded-sm hover:opacity-80"
+                style={{ background: C.paper, border: `1px solid ${C.kraft}` }}
+              >
+                <div>
+                  <div style={{ fontFamily: MONO, fontWeight: 700, fontSize: 13 }}>{w.number}</div>
+                  <div style={{ fontSize: 12, color: C.faint }}>{w.customerName || "No customer"}</div>
+                </div>
+                <span
+                  className="px-2 py-0.5 rounded-sm text-xs font-bold"
+                  style={{ background: STATUS_COLOR[w.status], color: "#fff", fontFamily: MONO }}
+                >
+                  {STATUS_LABEL[w.status]}
+                </span>
+              </button>
+            ))}
           </div>
-        ))}
+        )}
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5 mb-5">
@@ -1883,95 +1946,31 @@ function Dashboard({ workOrders, products, sortLog, units, onOpenWO, goTab, goal
         ))}
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <div className="rounded-sm p-4" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
-          <div className="flex items-center justify-between mb-3">
-            <div style={{ fontWeight: 800, fontSize: 15 }}>Active Work Orders</div>
-            <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>{active.length} open</span>
-          </div>
-          {active.length === 0 ? (
-            <div className="text-sm text-center py-6" style={{ color: C.faint }}>Nothing active right now.</div>
-          ) : (
-            <div className="space-y-2">
-              {active.slice(0, 8).map((w) => (
-                <button
-                  key={w.id} onClick={() => onOpenWO(w.id)}
-                  className="w-full text-left flex items-center justify-between px-3 py-2 rounded-sm hover:opacity-80"
-                  style={{ background: C.paper, border: `1px solid ${C.kraft}` }}
-                >
-                  <div>
-                    <div style={{ fontFamily: MONO, fontWeight: 700, fontSize: 13 }}>{w.number}</div>
-                    <div style={{ fontSize: 12, color: C.faint }}>{w.customerName || "No customer"}</div>
-                  </div>
-                  <span
-                    className="px-2 py-0.5 rounded-sm text-xs font-bold"
-                    style={{ background: STATUS_COLOR[w.status], color: "#fff", fontFamily: MONO }}
-                  >
-                    {STATUS_LABEL[w.status]}
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
+      <div className="rounded-sm p-4" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
+        <div className="flex items-center justify-between mb-1">
+          <span style={{ fontFamily: MONO, fontSize: 10, color: C.faint, letterSpacing: "0.08em" }}>RECEIVED UNITS AWAITING SORT</span>
+          <button onClick={() => goTab("work")} style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>View →</button>
         </div>
+        {unclaimedUnits.length === 0 ? (
+          <div className="text-sm" style={{ color: C.faint }}>Nothing waiting.</div>
+        ) : (
+          <div className="text-sm">{unclaimedUnits.length} unit{unclaimedUnits.length === 1 ? "" : "s"} on hand</div>
+        )}
 
-        <div className="rounded-sm p-4" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-baseline gap-2">
-              <div style={{ fontWeight: 800, fontSize: 15 }}>Reordering</div>
-              {needsReorder.length > 0 && (
-                <span className="px-2 py-0.5 rounded-sm text-xs font-bold" style={{ background: C.redwood, color: "#fff", fontFamily: MONO }}>
-                  {needsReorder.length} SKU{needsReorder.length === 1 ? "" : "s"}
-                </span>
-              )}
-            </div>
-            <button onClick={() => goTab("inventory")} style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>View all →</button>
-          </div>
-          {needsReorder.length === 0 ? (
-            <div className="text-sm text-center py-6" style={{ color: C.moss }}>Everything's above its reorder point.</div>
+        <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${C.kraft}` }}>
+          <div style={{ fontFamily: MONO, fontSize: 10, color: C.faint, letterSpacing: "0.08em", marginBottom: 6 }}>TODAY'S SORTING</div>
+          {todaysSorts.length === 0 ? (
+            <div className="text-sm" style={{ color: C.faint }}>No sorting logged today.</div>
           ) : (
-            <div className="space-y-2">
-              {needsReorder.slice(0, 6).map((p) => (
-                <div key={p.id} className="flex items-center justify-between px-3 py-2 rounded-sm" style={{ background: "#FDF6F4", border: `1px solid ${C.redwood}22` }}>
-                  <div>
-                    <div style={{ fontFamily: MONO, fontSize: 13, fontWeight: 700 }}>{p.sku}</div>
-                    <div style={{ fontSize: 11, color: C.faint }}>{num(p.onHand)} on hand · reorder at {num(p.reorderPoint)}</div>
-                  </div>
-                  <div className="flex items-center gap-1" style={{ color: C.redwood, fontSize: 12, fontFamily: MONO }}>
-                    <AlertTriangle size={12} /> Reorder
-                  </div>
+            <div className="space-y-1">
+              {todaysSorts.map((s) => (
+                <div key={s.id} className="text-sm flex justify-between">
+                  <span>{s.batchLabel} · {s.by}</span>
+                  <span style={{ fontFamily: MONO, color: C.faint }}>{num(s.rawBoards)} bd → sorted</span>
                 </div>
               ))}
             </div>
           )}
-
-          <div className="mt-4 pt-3" style={{ borderTop: `1px solid ${C.kraft}` }}>
-            <div className="flex items-center justify-between mb-1">
-              <span style={{ fontFamily: MONO, fontSize: 10, color: C.faint, letterSpacing: "0.08em" }}>RECEIVED UNITS AWAITING SORT</span>
-              <button onClick={() => goTab("work")} style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>View →</button>
-            </div>
-            {unclaimedUnits.length === 0 ? (
-              <div className="text-sm" style={{ color: C.faint }}>Nothing waiting.</div>
-            ) : (
-              <div className="text-sm">{unclaimedUnits.length} unit{unclaimedUnits.length === 1 ? "" : "s"} on hand</div>
-            )}
-          </div>
-
-          <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${C.kraft}` }}>
-            <div style={{ fontFamily: MONO, fontSize: 10, color: C.faint, letterSpacing: "0.08em", marginBottom: 6 }}>TODAY'S SORTING</div>
-            {todaysSorts.length === 0 ? (
-              <div className="text-sm" style={{ color: C.faint }}>No sorting logged today.</div>
-            ) : (
-              <div className="space-y-1">
-                {todaysSorts.map((s) => (
-                  <div key={s.id} className="text-sm flex justify-between">
-                    <span>{s.batchLabel} · {s.by}</span>
-                    <span style={{ fontFamily: MONO, color: C.faint }}>{num(s.rawBoards)} bd → sorted</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
         </div>
       </div>
     </div>
