@@ -1357,6 +1357,10 @@ const STATUS_FLOW = ["not_started", "sorting", "milling", "packed", "shipped"];
 const STATUS_LABEL = {
   not_started: "Open", sorting: "Sorting", milling: "Milling", packed: "Packed", shipped: "Shipped",
 };
+// What "still on the floor" means for work-order pickers on the log
+// forms — packed and shipped orders are done, so logging against them
+// would just be a mistake waiting to happen.
+const ACTIVE_WO_STATUSES = ["not_started", "sorting", "milling"];
 const STATUS_COLOR = {
   not_started: C.faint, sorting: C.gold, milling: C.redwood, packed: C.moss, shipped: C.ink,
 };
@@ -5187,6 +5191,13 @@ function EditLogModal({ entry, products, workOrders, team, onAddTeamMember, onSa
   const inP = isProcess ? products.find((p) => p.id === entry.inboundProductId) : null;
   const outP = isProcess ? products.find((p) => p.id === entry.outboundProductId) : null;
 
+  // Only work orders still on the floor are pickable — but if this entry
+  // is already tied to one that's since been packed or shipped, keep that
+  // one in the list too, so editing something else on the entry doesn't
+  // silently blank out its work order.
+  const pickableWorkOrders = workOrders.filter((w) =>
+    ACTIVE_WO_STATUSES.includes(w.status) || w.id === entry.workOrderId);
+
   const secs = Number(entry.seconds) || 0;
   const [form, setForm] = useState({
     crew: entry.crew?.length ? entry.crew : (entry.by ? entry.by.split(" + ").filter(Boolean) : []),
@@ -5236,7 +5247,7 @@ function EditLogModal({ entry, products, workOrders, team, onAddTeamMember, onSa
           <Field label="Which work order is this for?">
             <select style={{ ...inputStyle, marginTop: 8 }} value={form.workOrderId} onChange={(e) => set({ workOrderId: e.target.value })}>
               <option value="">— Not tied to a specific WO —</option>
-              {workOrders.map((w) => <option key={w.id} value={w.id}>{w.number} · {w.customerName || "No customer"}</option>)}
+              {pickableWorkOrders.map((w) => <option key={w.id} value={w.id}>{w.number} · {w.customerName || "No customer"}</option>)}
             </select>
           </Field>
         </div>
@@ -5375,7 +5386,7 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
   const rawIn = Number(rawBoards) || 0;
   const mismatch = rawIn > 0 && sumSorted !== rawIn;
 
-  const openWorkOrders = workOrders.filter((w) => w.status !== "shipped");
+  const openWorkOrders = workOrders.filter((w) => ACTIVE_WO_STATUSES.includes(w.status));
   const availableUnits = units.filter((u) => Number(u.boardsRemaining) > 0);
   const selectedUnit = units.find((u) => u.id === unitId);
 
@@ -5702,7 +5713,7 @@ function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, o
   }, [inboundProductId, inboundBoards, outboundProductId, outboundBoards,
       wasteBoards, workOrderId, description, crew]);
   const canSubmit = inBoards > 0 && crew.length > 0 && inboundProductId && outboundProductId;
-  const openWorkOrders = workOrders.filter((w) => w.status !== "shipped");
+  const openWorkOrders = workOrders.filter((w) => ACTIVE_WO_STATUSES.includes(w.status));
   const stepEntries = sortLog.filter((s) => s.step === step);
   const shownLogCount = stepEntries.length;
 
