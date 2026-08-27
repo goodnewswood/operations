@@ -8,7 +8,7 @@ import {
   Ruler, Palette, StickyNote, ClipboardList, Truck, RefreshCw,
   Play, Pause, Square, Timer, CalendarDays, Tag, QrCode, Printer,
   FileText, X, Search, Pencil, Star, Settings, Menu, ExternalLink,
-  Archive, RotateCcw, GripVertical, Mail
+  Archive, RotateCcw, GripVertical, Mail, Camera
 } from "lucide-react";
 
 /* ============================================================
@@ -1294,7 +1294,9 @@ const Field = ({ label, children, w, required }) => (
 const Btn = ({ children, onClick, kind = "ghost", title, disabled, big }) => {
   const styles = {
     primary: { background: C.redwood, color: "#fff", border: `1px solid ${C.redwoodDark}` },
-    ghost: { background: "transparent", color: C.ink, border: `1px solid ${C.kraftDark}` },
+    // Solid, not transparent. These sit on dark ink panels as often as on the
+    // light page, and dark-on-transparent made them invisible on the dark ones.
+    ghost: { background: "#fff", color: C.ink, border: `1px solid ${C.kraftDark}` },
     dark: { background: C.ink, color: "#fff", border: `1px solid ${C.ink}` },
     moss: { background: C.moss, color: "#fff", border: `1px solid ${C.moss}` },
   }[kind];
@@ -2127,6 +2129,31 @@ const specSummary = (spec) => {
   ].filter(Boolean).join(" · ");
 };
 
+// Downscaled before it ever reaches state — a phone photo straight off the
+// camera is several MB, and every line's reference photos ride along in the
+// same shared work-orders blob on every save. Capped well below anything a
+// screen actually shows a swatch or grain pattern at.
+function resizeImageToDataUrl(file, maxDim = 900, quality = 0.82) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+        const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
+        const canvas = document.createElement("canvas");
+        canvas.width = w; canvas.height = h;
+        canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.onerror = () => reject(new Error("Could not read that image"));
+      img.src = reader.result;
+    };
+    reader.onerror = () => reject(new Error("Could not read that file"));
+    reader.readAsDataURL(file);
+  });
+}
+
 function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, team, whoWorking, setWhoWorking, onAddTeamMember, onUpdateCustomerSpec }) {
   const customer = customers.find((c) => c.id === wo.customerId);
   const update = (patch) => onChange({ ...wo, ...patch });
@@ -2236,7 +2263,7 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
         <div className="mt-4 flex gap-2">
           {wo.status === "shipped" ? (
             <Btn kind="ghost" onClick={reopen}>
-              <span style={{ color: "#fff" }}>↺ Reopen</span>
+              <span>↺ Reopen</span>
             </Btn>
           ) : (
             <Btn kind="moss" onClick={pushThrough} big>
@@ -2329,6 +2356,45 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
                       <Field label="Paint tolerance"><input style={inputStyle} value={line.spec?.paintTolerance || ""} onChange={(e) => updateLineSpec(line, { paintTolerance: e.target.value })} placeholder="e.g. one side painted OK" /></Field>
                       <Field label="Knot / defect tolerance"><input style={inputStyle} value={line.spec?.knotTolerance || ""} onChange={(e) => updateLineSpec(line, { knotTolerance: e.target.value })} placeholder="e.g. no knots over 1 inch" /></Field>
                       <Field label="Other spec notes"><textarea style={{ ...inputStyle, minHeight: 50 }} value={line.spec?.notes || ""} onChange={(e) => updateLineSpec(line, { notes: e.target.value })} /></Field>
+                      <Field label="Reference photos — desired look, color, etc. (optional)">
+                        <div className="flex flex-wrap gap-2 mt-1">
+                          {(line.spec?.photos || []).map((ph) => (
+                            <div key={ph.id} className="relative" style={{ width: 64, height: 64 }}>
+                              <img
+                                src={ph.dataUrl} alt="" className="w-full h-full object-cover rounded-sm"
+                                style={{ border: `1px solid ${C.kraftDark}` }}
+                              />
+                              <button
+                                onClick={() => updateLineSpec(line, { photos: (line.spec?.photos || []).filter((x) => x.id !== ph.id) })}
+                                className="absolute -top-1.5 -right-1.5 rounded-full flex items-center justify-center"
+                                style={{ width: 18, height: 18, background: C.ink, color: "#fff" }}
+                                title="Remove photo"
+                              >
+                                <X size={11} />
+                              </button>
+                            </div>
+                          ))}
+                          <label
+                            className="flex items-center justify-center rounded-sm cursor-pointer"
+                            style={{ width: 64, height: 64, border: `1px dashed ${C.kraftDark}`, color: C.faint }}
+                            title="Add a reference photo"
+                          >
+                            <Camera size={18} />
+                            <input
+                              type="file" accept="image/*" multiple hidden
+                              onChange={async (e) => {
+                                const files = Array.from(e.target.files || []);
+                                e.target.value = "";
+                                if (!files.length) return;
+                                const dataUrls = await Promise.all(files.map((f) => resizeImageToDataUrl(f)));
+                                updateLineSpec(line, {
+                                  photos: [...(line.spec?.photos || []), ...dataUrls.map((dataUrl) => ({ id: uid(), dataUrl }))],
+                                });
+                              }}
+                            />
+                          </label>
+                        </div>
+                      </Field>
                       {customer?.spec && specSummary(customer.spec) && (
                         <button
                           onClick={() => updateLine(line.id, { spec: { ...customer.spec } })}
@@ -4104,9 +4170,13 @@ function BOLModal({ wo, customer, products, onClose }) {
             </tbody>
           </table>
 
-          <div className="grid grid-cols-2 gap-10" style={{ marginTop: 48 }}>
+          <div className="grid grid-cols-3 gap-6" style={{ marginTop: 48 }}>
             <div>
               <div style={{ borderTop: "1px solid #000", paddingTop: 4 }}>Shipper Signature</div>
+              <div style={{ marginTop: 24, borderTop: "1px solid #000", paddingTop: 4 }}>Date</div>
+            </div>
+            <div>
+              <div style={{ borderTop: "1px solid #000", paddingTop: 4 }}>Driver Signature</div>
               <div style={{ marginTop: 24, borderTop: "1px solid #000", paddingTop: 4 }}>Date</div>
             </div>
             <div>
@@ -5102,6 +5172,116 @@ function RateTarget({ sortLog, step }) {
   );
 }
 
+// Full editor for one work-log entry (a Sort batch or a generalized process
+// step). Replaces the old inline quantity-only mini-form: time, crew, and
+// work order are all real fields here, not just the numbers a batch sorted
+// into. Shape of the editable quantity fields depends on which kind of
+// entry this is — a Sort batch carries rawBoards/toN/toP/toMill/toWaste,
+// everything else carries inbound/outbound/waste.
+function EditLogModal({ entry, products, workOrders, team, onAddTeamMember, onSave, onClose }) {
+  useBackLayer(true, onClose);
+  const isProcess = !!(entry.inboundProductId || entry.outboundProductId);
+  const entryRaw = isProcess ? null : resolveRawProduct(entry, products);
+  const entryN = entryRaw ? (products.find((p) => (entry.toNProductId ? p.id === entry.toNProductId : (p.groupId === entryRaw.groupId && p.role === "sortedN")))) : null;
+  const entryP = entryRaw ? (products.find((p) => (entry.toPProductId ? p.id === entry.toPProductId : (p.groupId === entryRaw.groupId && p.role === "sortedP")))) : null;
+  const inP = isProcess ? products.find((p) => p.id === entry.inboundProductId) : null;
+  const outP = isProcess ? products.find((p) => p.id === entry.outboundProductId) : null;
+
+  const secs = Number(entry.seconds) || 0;
+  const [form, setForm] = useState({
+    crew: entry.crew?.length ? entry.crew : (entry.by ? entry.by.split(" + ").filter(Boolean) : []),
+    workOrderId: entry.workOrderId || "",
+    h: String(Math.floor(secs / 3600)), m: String(Math.floor((secs % 3600) / 60)), s: String(secs % 60),
+    description: entry.description || "",
+    batchLabel: entry.batchLabel || "",
+    rawBoards: entry.rawBoards ?? "",
+    toN: entry.toN ?? "",
+    toP: entry.toP ?? "",
+    toMill: entry.toMill ?? "",
+    toWaste: entry.toWaste ?? "",
+    inboundBoards: entry.inboundBoards ?? "",
+    outboundBoards: entry.outboundBoards ?? "",
+    wasteBoards: entry.wasteBoards ?? "",
+  });
+  const set = (patch) => setForm((f) => ({ ...f, ...patch }));
+
+  const save = () => {
+    const wo = workOrders.find((w) => w.id === form.workOrderId);
+    const seconds = (Number(form.h) || 0) * 3600 + (Number(form.m) || 0) * 60 + (Number(form.s) || 0);
+    const base = {
+      ...entry,
+      crew: form.crew,
+      by: form.crew.join(" + "),
+      workOrderId: form.workOrderId || "",
+      workOrderNumber: wo?.number || "",
+      seconds,
+      description: form.description,
+    };
+    onSave(isProcess
+      ? { ...base, inboundBoards: Number(form.inboundBoards) || 0, outboundBoards: Number(form.outboundBoards) || 0, wasteBoards: Number(form.wasteBoards) || 0 }
+      : { ...base, batchLabel: form.batchLabel || "Unlabeled batch", rawBoards: Number(form.rawBoards) || 0, toN: Number(form.toN) || 0, toP: Number(form.toP) || 0, toMill: Number(form.toMill) || 0, toWaste: Number(form.toWaste) || 0 });
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 overflow-auto p-4" style={{ background: "rgba(34,29,25,0.6)" }}>
+      <div className="rounded-sm p-5 w-full max-w-lg mx-auto my-8" style={{ background: C.panel }}>
+        <div className="flex items-center justify-between mb-4">
+          <div style={{ fontWeight: 800, fontSize: 16 }}>Edit work log entry</div>
+          <CloseBtn onClose={onClose} />
+        </div>
+
+        <CrewSelect team={team} crew={form.crew} onChange={(crew) => set({ crew })} onAddMember={onAddTeamMember} />
+
+        <div className="mt-3">
+          <Field label="Which work order is this for?">
+            <select style={{ ...inputStyle, marginTop: 8 }} value={form.workOrderId} onChange={(e) => set({ workOrderId: e.target.value })}>
+              <option value="">— Not tied to a specific WO —</option>
+              {workOrders.map((w) => <option key={w.id} value={w.id}>{w.number} · {w.customerName || "No customer"}</option>)}
+            </select>
+          </Field>
+        </div>
+
+        {isProcess ? (
+          <div className="grid grid-cols-3 gap-2 mt-3">
+            <Field label={`In (${inP?.sku || "?"})`}><input type="number" style={inputStyle} value={form.inboundBoards} onChange={(e) => set({ inboundBoards: e.target.value })} /></Field>
+            <Field label={`Out (${outP?.sku || "?"})`}><input type="number" style={inputStyle} value={form.outboundBoards} onChange={(e) => set({ outboundBoards: e.target.value })} /></Field>
+            <Field label="Waste"><input type="number" style={inputStyle} value={form.wasteBoards} onChange={(e) => set({ wasteBoards: e.target.value })} /></Field>
+          </div>
+        ) : (
+          <>
+            <div className="mt-3"><Field label="Batch label"><input style={inputStyle} value={form.batchLabel} onChange={(e) => set({ batchLabel: e.target.value })} /></Field></div>
+            <div className="grid grid-cols-2 gap-2 mt-2">
+              <Field label="Raw boards"><input type="number" style={inputStyle} value={form.rawBoards} onChange={(e) => set({ rawBoards: e.target.value })} /></Field>
+              <Field label={`→ ${entryN?.sku || "?"}`}><input type="number" style={inputStyle} value={form.toN} onChange={(e) => set({ toN: e.target.value })} /></Field>
+              <Field label={`→ ${entryP?.sku || "?"}`}><input type="number" style={inputStyle} value={form.toP} onChange={(e) => set({ toP: e.target.value })} /></Field>
+              <Field label="→ Mill Stock"><input type="number" style={inputStyle} value={form.toMill} onChange={(e) => set({ toMill: e.target.value })} /></Field>
+              <Field label="→ Waste"><input type="number" style={inputStyle} value={form.toWaste} onChange={(e) => set({ toWaste: e.target.value })} /></Field>
+            </div>
+          </>
+        )}
+
+        <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${C.kraft}` }}>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Time on this batch</div>
+          <div className="flex items-center gap-2">
+            <input type="number" style={{ ...inputStyle, width: 60 }} value={form.h} onChange={(e) => set({ h: e.target.value })} /><span style={{ fontFamily: MONO, fontSize: 12 }}>h</span>
+            <input type="number" style={{ ...inputStyle, width: 60 }} value={form.m} onChange={(e) => set({ m: e.target.value })} /><span style={{ fontFamily: MONO, fontSize: 12 }}>m</span>
+            <input type="number" style={{ ...inputStyle, width: 60 }} value={form.s} onChange={(e) => set({ s: e.target.value })} /><span style={{ fontFamily: MONO, fontSize: 12 }}>s</span>
+          </div>
+        </div>
+
+        <div className="mt-3">
+          <Field label="Description"><textarea style={{ ...inputStyle, minHeight: 60 }} value={form.description} onChange={(e) => set({ description: e.target.value })} /></Field>
+        </div>
+
+        <div className="flex gap-2 mt-4">
+          <Btn kind="moss" onClick={save}><Check size={14} /> Save changes</Btn>
+          <Btn onClick={onClose}><X size={14} /> Cancel</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSort, onDeleteSort, team, whoWorking, setWhoWorking, onAddTeamMember, workOrders, units, onUnitsChange, jumpToUnitId, runGrouped, purchaseOrders }) {
   const millStock = products.find((p) => p.role === "millStock");
   const rawProducts = products.filter((p) => p.kind === "board" && p.role === "raw");
@@ -5123,8 +5303,7 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
   const [manualEdit, setManualEdit] = useState(false);
   const [manualHMS, setManualHMS] = useState({ h: "0", m: "0", s: "0" });
 
-  const [editingId, setEditingId] = useState(null);
-  const [editForm, setEditForm] = useState({});
+  const [editingEntry, setEditingEntry] = useState(null);
   const [scannerOpen, setScannerOpen] = useState(false);
   const [scanError, setScanError] = useState("");
 
@@ -5191,31 +5370,6 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
     setRawBoards(String(Number(unit.boardsRemaining) || ""));
   };
 
-  const startEdit = (s) => {
-    setEditingId(s.id);
-    setEditForm({
-      batchLabel: s.batchLabel || "",
-      rawBoards: s.rawBoards ?? "",
-      toN: s.toN ?? "",
-      toP: s.toP ?? "",
-      toMill: s.toMill ?? "",
-      toWaste: s.toWaste ?? "",
-    });
-  };
-  const cancelEdit = () => { setEditingId(null); setEditForm({}); };
-  const saveEdit = (original) => {
-    onUpdateSort(original, {
-      ...original,
-      batchLabel: editForm.batchLabel || "Unlabeled batch",
-      rawBoards: Number(editForm.rawBoards) || 0,
-      toN: Number(editForm.toN) || 0,
-      toP: Number(editForm.toP) || 0,
-      toMill: Number(editForm.toMill) || 0,
-      toWaste: Number(editForm.toWaste) || 0,
-    });
-    setEditingId(null);
-    setEditForm({});
-  };
 
   const sumSorted = (Number(toN) || 0) + (Number(toP) || 0) + (Number(toMill) || 0) + (Number(toWaste) || 0);
   const rawIn = Number(rawBoards) || 0;
@@ -5454,44 +5608,24 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
         ) : (
           <div className="space-y-2">
             {sortLog.slice().sort(byNewest).slice(0, logLimit).map((s) => {
-              const isEditing = editingId === s.id;
               const entryRaw = resolveRawProduct(s, products);
               const entryN = products.find((p) => p.groupId === entryRaw?.groupId && p.role === "sortedN");
               const entryP = products.find((p) => p.groupId === entryRaw?.groupId && p.role === "sortedP");
               return (
                 <div key={s.id} className="px-3 py-2 rounded-sm text-sm" style={{ background: C.paper, border: `1px solid ${C.kraft}` }}>
-                  {isEditing ? (
-                    <div>
-                      <Field label="Batch label"><input style={inputStyle} value={editForm.batchLabel} onChange={(e) => setEditForm({ ...editForm, batchLabel: e.target.value })} /></Field>
-                      <div className="grid grid-cols-2 gap-2 mt-2">
-                        <Field label="Raw boards"><input type="number" style={inputStyle} value={editForm.rawBoards} onChange={(e) => setEditForm({ ...editForm, rawBoards: e.target.value })} /></Field>
-                        <Field label={`→ ${entryN?.sku || "?"}`}><input type="number" style={inputStyle} value={editForm.toN} onChange={(e) => setEditForm({ ...editForm, toN: e.target.value })} /></Field>
-                        <Field label={`→ ${entryP?.sku || "?"}`}><input type="number" style={inputStyle} value={editForm.toP} onChange={(e) => setEditForm({ ...editForm, toP: e.target.value })} /></Field>
-                        <Field label="→ Mill Stock"><input type="number" style={inputStyle} value={editForm.toMill} onChange={(e) => setEditForm({ ...editForm, toMill: e.target.value })} /></Field>
-                        <Field label="→ Waste"><input type="number" style={inputStyle} value={editForm.toWaste} onChange={(e) => setEditForm({ ...editForm, toWaste: e.target.value })} /></Field>
-                      </div>
-                      <div className="flex gap-2 mt-2">
-                        <Btn kind="moss" onClick={() => saveEdit(s)}><Check size={13} /> Save</Btn>
-                        <Btn onClick={cancelEdit}><X size={13} /> Cancel</Btn>
-                      </div>
+                  <div className="flex justify-between items-start gap-2">
+                    <span style={{ fontWeight: 700 }}>{s.batchLabel}{s.workOrderNumber ? ` · ${s.workOrderNumber}` : ""}</span>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>{s.date} · {s.by}</span>
+                      <button onClick={() => setEditingEntry(s)} title="Edit" className="opacity-50 hover:opacity-100"><Pencil size={13} /></button>
+                      <button onClick={() => onDeleteSort(s)} title="Delete" className="opacity-50 hover:opacity-100"><Trash2 size={13} /></button>
                     </div>
-                  ) : (
-                    <>
-                      <div className="flex justify-between items-start gap-2">
-                        <span style={{ fontWeight: 700 }}>{s.batchLabel}{s.workOrderNumber ? ` · ${s.workOrderNumber}` : ""}</span>
-                        <div className="flex items-center gap-2 shrink-0">
-                          <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>{s.date} · {s.by}</span>
-                          <button onClick={() => startEdit(s)} title="Edit" className="opacity-50 hover:opacity-100"><Pencil size={13} /></button>
-                          <button onClick={() => onDeleteSort(s)} title="Delete" className="opacity-50 hover:opacity-100"><Trash2 size={13} /></button>
-                        </div>
-                      </div>
-                      <div style={{ fontFamily: MONO, fontSize: 11, color: C.faint, marginTop: 2 }}>
-                        {num(s.rawBoards)} bd → {num(s.toN)} {entryN?.sku || "?"} · {num(s.toP)} {entryP?.sku || "?"} · {num(s.toMill)} mill · {num(s.toWaste)} waste
-                        {s.seconds ? ` · ${fmtDuration(s.seconds)}` : ""}
-                      </div>
-                      {s.description && <div style={{ fontSize: 12, marginTop: 4 }}>{s.description}</div>}
-                    </>
-                  )}
+                  </div>
+                  <div style={{ fontFamily: MONO, fontSize: 11, color: C.faint, marginTop: 2 }}>
+                    {num(s.rawBoards)} bd → {num(s.toN)} {entryN?.sku || "?"} · {num(s.toP)} {entryP?.sku || "?"} · {num(s.toMill)} mill · {num(s.toWaste)} waste
+                    {s.seconds ? ` · ${fmtDuration(s.seconds)}` : ""}
+                  </div>
+                  {s.description && <div style={{ fontSize: 12, marginTop: 4 }}>{s.description}</div>}
                 </div>
               );
             })}
@@ -5510,6 +5644,14 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
       {scannerOpen && (
         <QRScannerModal onClose={() => setScannerOpen(false)} onDecoded={handleScanned} />
       )}
+      {editingEntry && (
+        <EditLogModal
+          entry={editingEntry} products={products} workOrders={workOrders}
+          team={team} onAddTeamMember={onAddTeamMember}
+          onSave={(updated) => { onUpdateSort(editingEntry, updated); setEditingEntry(null); }}
+          onClose={() => setEditingEntry(null)}
+        />
+      )}
     </div>
   );
 }
@@ -5520,7 +5662,8 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
 // existing one or create a new one inline. Pack/Ship allow picking any
 // wood product as outbound (not just WIP) since they may target a
 // finished, sellable SKU rather than another intermediate stage.
-function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, onDeleteSort, team, whoWorking, setWhoWorking, onAddTeamMember, workOrders, runGrouped }) {
+function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, onUpdateSort, onDeleteSort, team, whoWorking, setWhoWorking, onAddTeamMember, workOrders, runGrouped }) {
+  const [editingEntry, setEditingEntry] = useState(null);
   const stepDef = PROCESS_STEPS.find((s) => s.id === step);
   const { saved: draft0 } = useDraft(`gnws-draft-${step}`);
   const [inboundProductId, setInboundProductId] = useState(draft0.inboundProductId || "");
@@ -5691,6 +5834,7 @@ function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, o
                     <span style={{ fontWeight: 700 }}>{inP?.sku || "?"} → {outP?.sku || "?"}{s.workOrderNumber ? ` · ${s.workOrderNumber}` : ""}</span>
                     <div className="flex items-center gap-2 shrink-0">
                       <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>{s.date} · {s.by}</span>
+                      <button onClick={() => setEditingEntry(s)} title="Edit" className="opacity-50 hover:opacity-100"><Pencil size={13} /></button>
                       <button onClick={() => onDeleteSort(s)} title="Delete" className="opacity-50 hover:opacity-100"><Trash2 size={13} /></button>
                     </div>
                   </div>
@@ -5714,6 +5858,14 @@ function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, o
           </button>
         )}
       </div>
+      {editingEntry && (
+        <EditLogModal
+          entry={editingEntry} products={products} workOrders={workOrders}
+          team={team} onAddTeamMember={onAddTeamMember}
+          onSave={(updated) => { onUpdateSort(editingEntry, updated); setEditingEntry(null); }}
+          onClose={() => setEditingEntry(null)}
+        />
+      )}
     </div>
   );
 }
@@ -7076,6 +7228,20 @@ export default function App() {
   // new one — otherwise counts drift every time someone fixes a typo.
   const updateSortEntry = (original, updated) => {
     runGrouped(() => {
+      // Generalized process-log entries reference exact product ids
+      // directly — same split deleteSortEntry makes below.
+      if (original.inboundProductId || original.outboundProductId || updated.inboundProductId || updated.outboundProductId) {
+        setProducts((prev) => prev.map((p) => {
+          let onHand = Number(p.onHand) || 0;
+          if (p.id === original.inboundProductId) onHand += Number(original.inboundBoards) || 0;
+          if (p.id === original.outboundProductId) onHand -= Number(original.outboundBoards) || 0;
+          if (p.id === updated.inboundProductId) onHand -= Number(updated.inboundBoards) || 0;
+          if (p.id === updated.outboundProductId) onHand += Number(updated.outboundBoards) || 0;
+          return onHand === (Number(p.onHand) || 0) ? p : { ...p, onHand };
+        }));
+        setSortLog((prev) => prev.map((s) => (s.id === original.id ? { ...updated, id: original.id } : s)));
+        return;
+      }
       setProducts((prev) => {
         const origRaw = resolveRawProduct(original, prev);
         const newRaw = resolveRawProduct(updated, prev);
