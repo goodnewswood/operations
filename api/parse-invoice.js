@@ -13,12 +13,15 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "ANTHROPIC_API_KEY is not set on the server" });
   }
 
-  const { base64 } = req.body || {};
-  if (!base64) {
-    return res.status(400).json({ error: "Missing PDF data" });
+  // Either a PDF (base64) or plain pasted text (an emailed order, a note
+  // typed straight from a phone call) — same extraction either way, just
+  // a different content block for Claude to read it from.
+  const { base64, text } = req.body || {};
+  if (!base64 && !text) {
+    return res.status(400).json({ error: "Missing PDF data or pasted text" });
   }
 
-  const prompt = `Extract structured data from this wholesale reclaimed-wood invoice or quote PDF. Respond with ONLY valid JSON, no markdown fences, no preamble, exactly this shape:
+  const prompt = `Extract structured data from this wholesale reclaimed-wood order, invoice, or quote${text ? " (pasted as plain text, possibly from an email)" : ""}. Respond with ONLY valid JSON, no markdown fences, no preamble, exactly this shape:
 {
   "customerName": string,
   "contactName": string,
@@ -41,10 +44,14 @@ export default async function handler(req, res) {
         max_tokens: 1200,
         messages: [{
           role: "user",
-          content: [
-            { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
-            { type: "text", text: prompt },
-          ],
+          content: base64
+            ? [
+                { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
+                { type: "text", text: prompt },
+              ]
+            : [
+                { type: "text", text: `${prompt}\n\n---\n${text}` },
+              ],
         }],
       }),
     });

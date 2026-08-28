@@ -2056,7 +2056,7 @@ function WorkOrderBoard({ workOrders, customers, onOpen, onNew, onImport, onPush
     <div>
       <div className="flex flex-wrap items-center gap-2 mb-4">
         <Btn kind="primary" onClick={onNew}><Plus size={14} /> New work order</Btn>
-        <Btn onClick={onImport}><FileText size={14} /> Import invoice (PDF)</Btn>
+        <Btn onClick={onImport}><FileText size={14} /> Paste / import order</Btn>
         {[["active", "Active"], ["all", "All"]].map(([id, label]) => (
           <button
             key={id} onClick={() => setFilter(id)}
@@ -2189,8 +2189,16 @@ function StartWorkModal({ wo, products, team, onAddTeamMember, onStart, onClose 
   const startJob = (job) => {
     // Packing pulls already-finished stock, not raw material — everything
     // else is a guess at the raw source behind the finished product.
-    const seedProduct = job.step.id === "pack" ? job.product : findRawSource(job.product, products);
-    onStart({ step: job.step.id, crew, workOrderId: wo.id, seedProductId: seedProduct?.id || "" });
+    // Outbound isn't tracked as its own chain of intermediate SKUs, so
+    // every step's best-guess "what comes out" is the line's own finished
+    // product — right for the last step before Ship, a starting point to
+    // correct otherwise, but always something rather than blank.
+    const seedInbound = job.step.id === "pack" ? job.product : findRawSource(job.product, products);
+    onStart({
+      step: job.step.id, crew, workOrderId: wo.id,
+      seedInboundId: seedInbound?.id || "",
+      seedOutboundId: job.product?.id || "",
+    });
   };
 
   return (
@@ -2618,28 +2626,26 @@ function SettingsModal({ team, onAddTeamMember, onRemoveTeamMember, goals, onGoa
 }
 
 function ImportInvoiceModal({ customers, onClose, onImported }) {
+  const [mode, setMode] = useState("paste");
+  const [pasted, setPasted] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  const handleFile = async (file) => {
-    if (!file) return;
+  // Same extraction either way — a PDF and pasted text just become
+  // different content blocks for the server to hand Claude (see
+  // api/parse-invoice.js). fileName is only ever set for the PDF path;
+  // it's just what goes in the new work order's notes.
+  const parseAndImport = async (body, fileName) => {
     setBusy(true);
     setError("");
     try {
-      const base64 = await new Promise((resolve, reject) => {
-        const r = new FileReader();
-        r.onload = () => resolve(String(r.result).split(",")[1]);
-        r.onerror = () => reject(new Error("Could not read that file"));
-        r.readAsDataURL(file);
-      });
-
       const response = await fetch("/api/parse-invoice", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ base64 }),
+        body: JSON.stringify(body),
       });
       const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Server couldn't read the invoice");
+      if (!response.ok) throw new Error(data.error || "Server couldn't read that");
       const textBlock = (data.content || []).find((b) => b.type === "text");
       if (!textBlock) throw new Error("No readable response came back");
       const cleaned = textBlock.text.replace(/```json|```/g, "").trim();
@@ -2650,30 +2656,81 @@ function ImportInvoiceModal({ customers, onClose, onImported }) {
         ? customers.find((c) => c.company && (c.company.toLowerCase().includes(nameKey) || nameKey.includes(c.company.toLowerCase())))
         : null;
 
-      onImported({ parsed, matchedCustomerId: match?.id || "", fileName: file.name });
+      onImported({ parsed, matchedCustomerId: match?.id || "", fileName });
     } catch (e) {
-      setError(`Couldn't read that file automatically, so nothing was created — you can still start a work order manually. (${e.message || "unknown error"})`);
+      setError(`Couldn't read that automatically, so nothing was created — you can still start a work order manually. (${e.message || "unknown error"})`);
     } finally {
       setBusy(false);
     }
+  };
+
+  const handleFileUpload = async (file) => {
+    if (!file) return;
+    try {
+      const base64 = await new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(String(r.result).split(",")[1]);
+        r.onerror = () => reject(new Error("Could not read that file"));
+        r.readAsDataURL(file);
+      });
+      await parseAndImport({ base64 }, file.name);
+    } catch (e) {
+      setError(`Couldn't read that file. (${e.message || "unknown error"})`);
+    }
+  };
+  const handlePaste = () => {
+    if (!pasted.trim()) return;
+    parseAndImport({ text: pasted.trim() }, null);
   };
 
   return (
     <div className="fixed inset-0 z-50 overflow-auto p-4" style={{ background: "rgba(34,29,25,0.6)" }}>
       <div className="rounded-sm p-5 w-full max-w-md mx-auto my-8" style={{ background: C.panel }}>
         <div className="flex items-center justify-between mb-3">
-          <div style={{ fontWeight: 800, fontSize: 16 }}>Import invoice / quote (PDF)</div>
+          <div style={{ fontWeight: 800, fontSize: 16 }}>Start a work order from an order</div>
           <CloseBtn onClose={onClose} />
         </div>
         <p className="text-sm mb-3" style={{ color: C.faint }}>
-          Upload the PDF from Good News Ops or QuickBooks. It'll try to pull the customer and line items into a new draft work order — review and fix it up before the crew works from it.
+          Paste the order — an email, a text, whatever the customer sent — or upload the PDF. It'll try to pull the customer and line items into a new draft work order; review and fix it up before the crew works from it.
         </p>
-        <input
-          type="file" accept="application/pdf" disabled={busy}
-          onChange={(e) => handleFile(e.target.files?.[0])}
-          style={{ fontSize: 13 }}
-        />
-        {busy && <div className="text-sm mt-3" style={{ color: C.faint }}>Reading the document…</div>}
+
+        <div className="flex gap-2 mb-3">
+          {[["paste", "Paste text"], ["pdf", "Upload PDF"]].map(([id, label]) => (
+            <button
+              key={id} onClick={() => { setMode(id); setError(""); }} disabled={busy}
+              className="px-3 py-1.5 rounded-sm text-xs"
+              style={{ fontFamily: MONO, background: mode === id ? C.ink : "transparent", color: mode === id ? "#fff" : C.faint, border: `1px solid ${mode === id ? C.ink : C.kraftDark}` }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {mode === "paste" ? (
+          <>
+            <textarea
+              autoFocus
+              style={{ ...inputStyle, minHeight: 160 }}
+              placeholder="Paste the order here…"
+              value={pasted}
+              onChange={(e) => setPasted(e.target.value)}
+              disabled={busy}
+            />
+            <div className="mt-3">
+              <Btn kind="primary" onClick={handlePaste} disabled={busy || !pasted.trim()} big>
+                <Check size={16} /> Create work order
+              </Btn>
+            </div>
+          </>
+        ) : (
+          <input
+            type="file" accept="application/pdf" disabled={busy}
+            onChange={(e) => handleFileUpload(e.target.files?.[0])}
+            style={{ fontSize: 13 }}
+          />
+        )}
+
+        {busy && <div className="text-sm mt-3" style={{ color: C.faint }}>Reading it…</div>}
         {error && <div className="text-sm mt-3" style={{ color: C.warn }}>{error}</div>}
       </div>
     </div>
@@ -7172,18 +7229,21 @@ export default function App() {
   }, []);
 
   // Seeds the exact same localStorage draft the Work tab's log form reads
-  // on mount (see useDraft) — crew, work order, and a starting guess at
-  // what's being pulled — then jumps straight to that step. The form
-  // itself doesn't know or care this came from a work order rather than
-  // someone filling it in by hand; it's the same draft either way.
-  const startWork = ({ step, crew, workOrderId, seedProductId }) => {
+  // on mount (see useDraft) — crew, work order, and starting guesses at
+  // what's coming in and what it turns into — then jumps straight to that
+  // step. The form itself doesn't know or care this came from a work
+  // order rather than someone filling it in by hand; it's the same draft
+  // either way.
+  const startWork = ({ step, crew, workOrderId, seedInboundId, seedOutboundId }) => {
     try {
       const draftKey = step === "sorting" ? "gnws-draft-sorting" : `gnws-draft-${step}`;
       const existing = JSON.parse(localStorage.getItem(draftKey) || "null") || {};
       const patch = { ...existing, workOrderId, crew };
-      if (seedProductId) {
-        if (step === "sorting") patch.rawProductId = seedProductId;
-        else patch.inboundProductId = seedProductId;
+      if (step === "sorting") {
+        if (seedInboundId) patch.rawProductId = seedInboundId;
+      } else {
+        if (seedInboundId) patch.inboundProductId = seedInboundId;
+        if (seedOutboundId) patch.outboundProductId = seedOutboundId;
       }
       localStorage.setItem(draftKey, JSON.stringify(patch));
     } catch (e) { /* private browsing or a full quota — the flow still works, just unseeded */ }
@@ -7569,7 +7629,7 @@ export default function App() {
       customerId: matchedCustomerId || "", customerName: cust?.company || parsed.customerName || "",
       status: "not_started", date: today(),
       lines, readyByDate: "", shipDate: parsed.shipDate || "", shipVia: "",
-      notes: [parsed.notes, `Imported from invoice: ${fileName}`, unmatchedFlag].filter(Boolean).join("\n"),
+      notes: [parsed.notes, fileName ? `Imported from invoice: ${fileName}` : "Imported from pasted order text", unmatchedFlag].filter(Boolean).join("\n"),
     };
     setWorkOrders([w, ...workOrders]);
     setActiveWOId(w.id);
