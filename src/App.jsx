@@ -1177,6 +1177,17 @@ function stepRate(sortLog, step) {
 const canonicalUnitFor = (p) =>
   p.category === "paint" ? "gal" : p.category === "packing" ? (p.unitLabel || "ea") : (p.kind === "sf" ? "sf" : "board");
 const hasSF = (p) => canonicalUnitFor(p) === "sf" || Object.keys(buildUnitGraph(p)).includes("sf");
+// A product names its raw source one of two ways: a finished SF good
+// points at it directly (sourceBoardSku), while a sorted-but-unmilled
+// board (185N/185P — sold as-is to customers who want unmilled stock)
+// shares a groupId with its raw sibling instead — same pattern SortingTab
+// uses to find where boards land.
+const findRawSource = (p, products) => {
+  if (!p) return null;
+  if (p.sourceBoardSku) return products.find((r) => r.sku === p.sourceBoardSku) || null;
+  if (p.groupId) return products.find((r) => r.groupId === p.groupId && r.role === "raw") || null;
+  return null;
+};
 
 const resolveRawProduct = (entry, products) => {
   if (entry?.rawProductId) return products.find((p) => p.id === entry.rawProductId) || null;
@@ -1784,14 +1795,7 @@ function Dashboard({ workOrders, products, sortLog, units, onOpenWO, goTab, goal
         const haveSF = convertQty(p, p.onHand, canonicalUnitFor(p), "sf");
         const gapSF = needSF - haveSF;
         if (gapSF <= 0) return null;
-        // Two ways a product names its raw source: a finished SF good
-        // points at it directly (sourceBoardSku), while a sorted-but-
-        // unmilled board (185N/185P, sold as-is to customers who want
-        // unmilled stock) shares a groupId with its raw sibling instead —
-        // same pattern SortingTab uses to find where boards land.
-        const raw = p.sourceBoardSku
-          ? products.find((r) => r.sku === p.sourceBoardSku)
-          : (p.groupId ? products.find((r) => r.groupId === p.groupId && r.role === "raw") : null);
+        const raw = findRawSource(p, products);
         const rawCapacitySF = raw ? convertQty(p, raw.onHand, "board", "sf") : 0;
         const shortSF = gapSF - rawCapacitySF;
         if (shortSF <= 0) return null;
@@ -2157,13 +2161,98 @@ function resizeImageToDataUrl(file, maxDim = 900, quality = 0.82) {
   });
 }
 
-function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, team, whoWorking, setWhoWorking, onAddTeamMember, onUpdateCustomerSpec }) {
+/* ---------------- Start Working (from a work order) ----------------
+   Launched from a work order's own screen so the crew never has to
+   separately hunt down "which work order is this for" mid-form on the
+   Work tab. Two screens — who, then what job — and the actual logging
+   happens in the normal Sort/process-step form, just pre-seeded with the
+   crew, this work order, and (when a raw source or, for packing, the
+   finished product itself is known) a starting guess at what they're
+   pulling from. Nothing here is locked; it's a running start, not a cage. */
+function StartWorkModal({ wo, products, team, onAddTeamMember, onStart, onClose }) {
+  useBackLayer(true, onClose);
+  const [crew, setCrew] = useState([]);
+  const [screen, setScreen] = useState("who");
+
+  // Every (line, step) combination still open on this order — a line
+  // already marked done, or a step already unchecked for it, isn't
+  // offered as something to start.
+  const jobs = (wo.lines || [])
+    .filter((l) => !l.done)
+    .flatMap((l) => {
+      const p = products.find((x) => x.id === l.productId);
+      return PROCESS_STEPS
+        .filter((s) => l.steps && l.steps[s.id])
+        .map((s) => ({ line: l, product: p, step: s }));
+    });
+
+  const startJob = (job) => {
+    // Packing pulls already-finished stock, not raw material — everything
+    // else is a guess at the raw source behind the finished product.
+    const seedProduct = job.step.id === "pack" ? job.product : findRawSource(job.product, products);
+    onStart({ step: job.step.id, crew, workOrderId: wo.id, seedProductId: seedProduct?.id || "" });
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 overflow-auto p-4" style={{ background: "rgba(34,29,25,0.6)" }}>
+      <div className="rounded-sm p-5 w-full max-w-lg mx-auto my-8" style={{ background: C.panel }}>
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <div style={{ fontWeight: 800, fontSize: 16 }}>Start working</div>
+            <div style={{ fontFamily: MONO, fontSize: 12, color: C.faint }}>{wo.number} · {wo.customerName || "No customer"}</div>
+          </div>
+          <CloseBtn onClose={onClose} />
+        </div>
+
+        {screen === "who" ? (
+          <>
+            <CrewSelect team={team} crew={crew} onChange={setCrew} onAddMember={onAddTeamMember} />
+            <div className="mt-4">
+              <Btn kind="primary" big disabled={!crew.length} onClick={() => setScreen("job")}>
+                <Play size={16} /> Continue
+              </Btn>
+              {!crew.length && <div className="mt-2 text-xs" style={{ color: C.warn }}>Pick who's working first.</div>}
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="text-sm mb-3" style={{ color: C.faint }}>What are you doing?</div>
+            {jobs.length === 0 ? (
+              <div className="text-sm text-center py-6" style={{ color: C.faint }}>
+                Nothing left checked off on this order's line items. Add steps on the work order itself first.
+              </div>
+            ) : (
+              <div className="grid gap-2 sm:grid-cols-2">
+                {jobs.map((job, i) => (
+                  <button
+                    key={i} onClick={() => startJob(job)}
+                    className="text-left rounded-sm p-3 hover:opacity-85"
+                    style={{ background: C.paper, border: `1px solid ${C.kraft}` }}
+                  >
+                    <div style={{ fontWeight: 700 }}>{job.step.label}</div>
+                    <div style={{ fontSize: 12, color: C.faint }}>{job.product?.sku || job.line.desc || "Custom item"}</div>
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="mt-4">
+              <Btn onClick={() => setScreen("who")}><ChevronLeft size={14} /> Back</Btn>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, team, whoWorking, setWhoWorking, onAddTeamMember, onUpdateCustomerSpec, onStartWork }) {
   const customer = customers.find((c) => c.id === wo.customerId);
   const update = (patch) => onChange({ ...wo, ...patch });
   const [bolOpen, setBolOpen] = useState(false);
   const [woPrintOpen, setWoPrintOpen] = useState(false);
   const [palletModalOpen, setPalletModalOpen] = useState(false);
   const [printLabels, setPrintLabels] = useState(null);
+  const [startWorkOpen, setStartWorkOpen] = useState(false);
 
   const updateLine = (lineId, patch) => update({ lines: wo.lines.map((l) => (l.id === lineId ? { ...l, ...patch } : l)) });
   const removeLine = (lineId) => update({ lines: wo.lines.filter((l) => l.id !== lineId) });
@@ -2263,7 +2352,12 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
           </div>
         )}
 
-        <div className="mt-4 flex gap-2">
+        <div className="mt-4 flex gap-2 flex-wrap">
+          {ACTIVE_WO_STATUSES.includes(wo.status) && (
+            <Btn kind="primary" onClick={() => setStartWorkOpen(true)} big>
+              <Play size={16} /> Start Working
+            </Btn>
+          )}
           {wo.status === "shipped" ? (
             <Btn kind="ghost" onClick={reopen}>
               <span>↺ Reopen</span>
@@ -2449,6 +2543,13 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
       )}
       {printLabels && printLabels.length > 0 && (
         <FinishedLabelPrintView labels={printLabels} onClose={() => setPrintLabels(null)} />
+      )}
+      {startWorkOpen && (
+        <StartWorkModal
+          wo={wo} products={products} team={team} onAddTeamMember={onAddTeamMember}
+          onClose={() => setStartWorkOpen(false)}
+          onStart={(job) => { setStartWorkOpen(false); onStartWork(job); }}
+        />
       )}
     </div>
   );
@@ -5067,10 +5168,31 @@ function ReceivingTab({ suppliers, purchaseOrders, onPOChange, units, onUnitsCha
 // form (SortingTab, unchanged below); every other step shares one
 // generalized work-in-process log form (ProcessLogTab, further below).
 function WorkTab(props) {
-  const { jumpToUnitId } = props;
-  const [activeStep, setActiveStep] = useState(null);
+  const { jumpToUnitId, jumpToWorkStep, onJumpToWorkStepConsumed } = props;
+  // Which step screen you're on survives a reload too, same reason the tab
+  // itself does — otherwise landing back on "What are you working on?"
+  // after the phone reclaimed the tab reads as the in-progress batch
+  // having vanished, when the timer and form were fine the whole time.
+  const [activeStep, _setActiveStep] = useState(() => {
+    try {
+      const saved = localStorage.getItem("gnws-nav-workstep");
+      return saved && PROCESS_STEPS.some((s) => s.id === saved) ? saved : null;
+    } catch { return null; }
+  });
+  const setActiveStep = (step) => {
+    _setActiveStep(step);
+    try {
+      if (step) localStorage.setItem("gnws-nav-workstep", step);
+      else localStorage.removeItem("gnws-nav-workstep");
+    } catch { /* private browsing or full quota */ }
+  };
   useBackLayer(!!activeStep, () => setActiveStep(null));
   useEffect(() => { if (jumpToUnitId) setActiveStep("sorting"); }, [jumpToUnitId]);
+  useEffect(() => {
+    if (!jumpToWorkStep) return;
+    setActiveStep(jumpToWorkStep);
+    onJumpToWorkStepConsumed?.();
+  }, [jumpToWorkStep]);
 
   if (!activeStep) {
     return (
@@ -6869,7 +6991,18 @@ function SyncBar({ state, remoteAhead, lastSyncedAt, onSave, onSync, compact, sa
 
 export default function App() {
   const [loaded, setLoaded] = useState(false);
-  const [tab, setTab] = useState("dashboard");
+  // Which tab you're on survives a reload — phones reclaim a backgrounded
+  // tab often enough that "closed it for a bit, came back" was silently
+  // dumping people back at the dashboard mid-batch. Draft data (the timer,
+  // what's typed into the log form) already survived that in localStorage;
+  // this makes the screen itself come back too, not just the data behind it.
+  const [tab, _setTab] = useState(() => {
+    try { return localStorage.getItem("gnws-nav-tab") || "dashboard"; } catch { return "dashboard"; }
+  });
+  const setTab = (next) => {
+    _setTab(next);
+    try { localStorage.setItem("gnws-nav-tab", next); } catch { /* private browsing or full quota */ }
+  };
   const [customers, _setCustomers] = useState(SEED_CUSTOMERS);
   const [products, _setProducts] = useState(SEED_PRODUCTS);
   const [workOrders, _setWorkOrders] = useState([]);
@@ -7021,6 +7154,7 @@ export default function App() {
   const [activeWOId, setActiveWOId] = useState(null);
   const [activeProductId, setActiveProductId] = useState(null);
   const [jumpToUnitId, setJumpToUnitId] = useState(null);
+  const [jumpToWorkStep, setJumpToWorkStep] = useState(null);
   const [importOpen, setImportOpen] = useState(false);
   const [exitHint, setExitHint] = useState(false);
   const [saveError, setSaveError] = useState(null);
@@ -7036,6 +7170,27 @@ export default function App() {
       if (u) { setJumpToUnitId(u); setTab("work"); }
     } catch (e) { /* no-op if URL access is unavailable */ }
   }, []);
+
+  // Seeds the exact same localStorage draft the Work tab's log form reads
+  // on mount (see useDraft) — crew, work order, and a starting guess at
+  // what's being pulled — then jumps straight to that step. The form
+  // itself doesn't know or care this came from a work order rather than
+  // someone filling it in by hand; it's the same draft either way.
+  const startWork = ({ step, crew, workOrderId, seedProductId }) => {
+    try {
+      const draftKey = step === "sorting" ? "gnws-draft-sorting" : `gnws-draft-${step}`;
+      const existing = JSON.parse(localStorage.getItem(draftKey) || "null") || {};
+      const patch = { ...existing, workOrderId, crew };
+      if (seedProductId) {
+        if (step === "sorting") patch.rawProductId = seedProductId;
+        else patch.inboundProductId = seedProductId;
+      }
+      localStorage.setItem(draftKey, JSON.stringify(patch));
+    } catch (e) { /* private browsing or a full quota — the flow still works, just unseeded */ }
+    setWhoWorking(crew[0] || "");
+    setJumpToWorkStep(step);
+    goTab("work");
+  };
 
   /* ---- Storage sync ------------------------------------------------
      Collections are pulled and pushed through one table, so a tab that
@@ -7622,6 +7777,7 @@ export default function App() {
               onChange={updateWO} onDelete={() => deleteWO(activeWO.id)} onBack={() => setActiveWOId(null)}
               team={team} whoWorking={whoWorking} setWhoWorking={setWhoWorking} onAddTeamMember={addTeamMember}
               onUpdateCustomerSpec={(customerId, patch) => setCustomers(customers.map((c) => (c.id === customerId ? { ...c, spec: { ...c.spec, ...patch } } : c)))}
+              onStartWork={startWork}
             />
           ) : (
             <WorkOrderBoard workOrders={workOrders} customers={customers} onOpen={(id) => setActiveWOId(id)} onNew={newWorkOrder} onImport={() => setImportOpen(true)} onPushThrough={pushWOThrough} onStatusChange={(id, status) => setWorkOrders(workOrders.map((w) => (w.id === id
@@ -7667,6 +7823,8 @@ export default function App() {
             workOrders={workOrders}
             units={units} onUnitsChange={setUnits}
             jumpToUnitId={jumpToUnitId}
+            jumpToWorkStep={jumpToWorkStep}
+            onJumpToWorkStepConsumed={() => setJumpToWorkStep(null)}
             runGrouped={runGrouped}
             purchaseOrders={purchaseOrders}
           />
