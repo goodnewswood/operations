@@ -1083,6 +1083,25 @@ function nextNumber(records, prefix) {
   }, 0);
   return `${prefix}-${year}-${dayStr}${maxSeq + 1}`;
 }
+// Splits a WO number into its nextNumber() base and whatever's been
+// appended after it, if anything.
+const WO_NUMBER_BASE_RE = /^([A-Z]+-\d{4}-\d+)(-.*)?$/;
+// The shorthand the crew already types into WO numbers by hand — "400SF-
+// 187N" for one product, a summed total for several. Empty until at
+// least one line has both a product and a quantity.
+function productSuffix(lines, products) {
+  const valid = (lines || []).filter((l) => (Number(l.qtySF) || 0) > 0);
+  if (!valid.length) return "";
+  const skuOf = (l) => (products.find((p) => p.id === l.productId)?.sku || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 14);
+  if (valid.length === 1) {
+    const qty = Math.round(Number(valid[0].qtySF) || 0);
+    const sku = skuOf(valid[0]);
+    return sku ? `${qty}SF-${sku}` : `${qty}SF`;
+  }
+  const totalSF = Math.round(valid.reduce((sum, l) => sum + (Number(l.qtySF) || 0), 0));
+  const skus = [...new Set(valid.map(skuOf).filter(Boolean))];
+  return skus.length === 1 ? `${totalSF}SF-${skus[0]}` : `${totalSF}SF`;
+}
 // Resolves which raw product a sort-log entry refers to. Prefers the
 // stable rawProductId (immune to renaming the SKU later); falls back to
 // the legacy rawSku text match only for entries logged before this field
@@ -2262,7 +2281,26 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
   const [printLabels, setPrintLabels] = useState(null);
   const [startWorkOpen, setStartWorkOpen] = useState(false);
 
-  const updateLine = (lineId, patch) => update({ lines: wo.lines.map((l) => (l.id === lineId ? { ...l, ...patch } : l)) });
+  const updateLine = (lineId, patch) => {
+    const lines = wo.lines.map((l) => (l.id === lineId ? { ...l, ...patch } : l));
+    const patchOut = { lines };
+    // Keeps the number's product suffix in sync with the lines — but only
+    // as long as it still exactly matches what we generated last time.
+    // The moment someone types something else into the number field by
+    // hand, this stops following along; there's no reliable way to tell
+    // "our old suffix, now stale" from "a name someone typed on purpose."
+    const m = WO_NUMBER_BASE_RE.exec(wo.number || "");
+    if (m) {
+      const base = m[1];
+      const currentSuffix = m[2] ? m[2].slice(1) : "";
+      const priorSuffix = productSuffix(wo.lines, products);
+      if (currentSuffix === priorSuffix) {
+        const nextSuffix = productSuffix(lines, products);
+        patchOut.number = nextSuffix ? `${base}-${nextSuffix}` : base;
+      }
+    }
+    update(patchOut);
+  };
   const removeLine = (lineId) => update({ lines: wo.lines.filter((l) => l.id !== lineId) });
   const updateLineSpec = (line, patch) => updateLine(line.id, { spec: { ...(line.spec || {}), ...patch } });
   const addLine = () => update({
@@ -7337,9 +7375,15 @@ export default function App() {
     setSyncState("saving");
     for (const key of keys) {
       if (saveTimers.current[key]) { clearTimeout(saveTimers.current[key]); delete saveTimers.current[key]; }
-      const { value, base } = pendingRef.current[key];
-      try { await writeKey(key, value, base); delete pendingRef.current[key]; }
-      catch (e) {
+      const entry = pendingRef.current[key];
+      if (!entry) continue; // already flushed by something else mid-loop
+      try {
+        await writeKey(key, entry.value, entry.base);
+        // Only clear if nothing newer queued while this write was in
+        // flight — otherwise a keystroke mid-await gets silently dropped
+        // instead of waiting for its own turn.
+        if (pendingRef.current[key] === entry) delete pendingRef.current[key];
+      } catch (e) {
         // Leave it pending so the next save or flush retries it, and say so
         // out loud — a silent failure here is how a day's work disappears.
         console.error("Save failed for", key, e);
@@ -7370,14 +7414,19 @@ export default function App() {
 
   const saveKey = (key, value) => {
     // Capture the baseline now, while it still matches the value.
-    pendingRef.current[key] = { value, base: pendingRef.current[key]?.base ?? baselineRef.current[key] };
+    const entry = { value, base: pendingRef.current[key]?.base ?? baselineRef.current[key] };
+    pendingRef.current[key] = entry;
     if (saveTimers.current[key]) clearTimeout(saveTimers.current[key]);
     saveTimers.current[key] = setTimeout(async () => {
       delete saveTimers.current[key];
-      const { value: v, base } = pendingRef.current[key];
+      // A concurrent flushSaves (tab hidden, another save mid-flight) may
+      // have already written and cleared this — nothing left to do.
+      if (!pendingRef.current[key]) return;
       setSyncState("saving");
-      try { await writeKey(key, v, base); delete pendingRef.current[key]; }
-      catch (e) {
+      try {
+        await writeKey(key, entry.value, entry.base);
+        if (pendingRef.current[key] === entry) delete pendingRef.current[key];
+      } catch (e) {
         console.error("Save failed for", key, e);
         setSaveError(e?.message || String(e));
         setSyncState("error");
@@ -7624,8 +7673,10 @@ export default function App() {
     const unmatchedFlag = !matchedCustomerId && parsed.customerName
       ? `⚠ No matching customer found for "${parsed.customerName}" — assign one above.`
       : "";
+    const baseNumber = nextNumber(workOrders, "WO");
+    const suffix = productSuffix(lines, products);
     const w = {
-      id: uid(), number: nextNumber(workOrders, "WO"),
+      id: uid(), number: suffix ? `${baseNumber}-${suffix}` : baseNumber,
       customerId: matchedCustomerId || "", customerName: cust?.company || parsed.customerName || "",
       status: "not_started", date: today(),
       lines, readyByDate: "", shipDate: parsed.shipDate || "", shipVia: "",
