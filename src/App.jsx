@@ -2183,15 +2183,22 @@ function resizeImageToDataUrl(file, maxDim = 900, quality = 0.82) {
 /* ---------------- Start Working (from a work order) ----------------
    Launched from a work order's own screen so the crew never has to
    separately hunt down "which work order is this for" mid-form on the
-   Work tab. Two screens — who, then what job — and the actual logging
+   Work tab. Two screens — who, then what job(s) — and the actual logging
    happens in the normal Sort/process-step form, just pre-seeded with the
    crew, this work order, and (when a raw source or, for packing, the
    finished product itself is known) a starting guess at what they're
-   pulling from. Nothing here is locked; it's a running start, not a cage. */
+   pulling from. Nothing here is locked; it's a running start, not a cage.
+
+   A linear run — sort, then chop, then rip, all in one sitting on the
+   same batch — is checking off more than one job here. Each still becomes
+   its own log entry (so per-task rates stay meaningful), but the crew
+   only picks crew/job once; App chains straight from one step's form to
+   the next instead of dropping back to this screen between them. */
 function StartWorkModal({ wo, products, team, onAddTeamMember, onStart, onClose }) {
   useBackLayer(true, onClose);
   const [crew, setCrew] = useState([]);
   const [screen, setScreen] = useState("who");
+  const [selected, setSelected] = useState([]); // job keys, in the order picked
 
   // Every (line, step) combination still open on this order — a line
   // already marked done, or a step already unchecked for it, isn't
@@ -2202,22 +2209,28 @@ function StartWorkModal({ wo, products, team, onAddTeamMember, onStart, onClose 
       const p = products.find((x) => x.id === l.productId);
       return PROCESS_STEPS
         .filter((s) => l.steps && l.steps[s.id])
-        .map((s) => ({ line: l, product: p, step: s }));
+        .map((s) => ({ key: `${l.id}:${s.id}`, line: l, product: p, step: s }));
     });
 
-  const startJob = (job) => {
-    // Packing pulls already-finished stock, not raw material — everything
-    // else is a guess at the raw source behind the finished product.
-    // Outbound isn't tracked as its own chain of intermediate SKUs, so
-    // every step's best-guess "what comes out" is the line's own finished
-    // product — right for the last step before Ship, a starting point to
-    // correct otherwise, but always something rather than blank.
-    const seedInbound = job.step.id === "pack" ? job.product : findRawSource(job.product, products);
-    onStart({
-      step: job.step.id, crew, workOrderId: wo.id,
-      seedInboundId: seedInbound?.id || "",
-      seedOutboundId: job.product?.id || "",
+  const toggleJob = (key) => setSelected((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
+
+  const startJobs = () => {
+    const chosen = selected.map((key) => jobs.find((j) => j.key === key)).filter(Boolean);
+    const queue = chosen.map((job) => {
+      // Packing pulls already-finished stock, not raw material — everything
+      // else is a guess at the raw source behind the finished product.
+      // Outbound isn't tracked as its own chain of intermediate SKUs, so
+      // every step's best-guess "what comes out" is the line's own finished
+      // product — right for the last step before Ship, a starting point to
+      // correct otherwise, but always something rather than blank.
+      const seedInbound = job.step.id === "pack" ? job.product : findRawSource(job.product, products);
+      return {
+        step: job.step.id, crew, workOrderId: wo.id,
+        seedInboundId: seedInbound?.id || "",
+        seedOutboundId: job.product?.id || "",
+      };
     });
+    onStart(queue);
   };
 
   return (
@@ -2243,27 +2256,35 @@ function StartWorkModal({ wo, products, team, onAddTeamMember, onStart, onClose 
           </>
         ) : (
           <>
-            <div className="text-sm mb-3" style={{ color: C.faint }}>What are you doing?</div>
+            <div className="text-sm mb-3" style={{ color: C.faint }}>
+              What are you doing? Check off more than one if it's a straight run — sort, then chop, then rip, all in one sitting.
+            </div>
             {jobs.length === 0 ? (
               <div className="text-sm text-center py-6" style={{ color: C.faint }}>
                 Nothing left checked off on this order's line items. Add steps on the work order itself first.
               </div>
             ) : (
               <div className="grid gap-2 sm:grid-cols-2">
-                {jobs.map((job, i) => (
-                  <button
-                    key={i} onClick={() => startJob(job)}
-                    className="text-left rounded-sm p-3 hover:opacity-85"
-                    style={{ background: C.paper, border: `1px solid ${C.kraft}` }}
-                  >
-                    <div style={{ fontWeight: 700 }}>{job.step.label}</div>
-                    <div style={{ fontSize: 12, color: C.faint }}>{job.product?.sku || job.line.desc || "Custom item"}</div>
-                  </button>
-                ))}
+                {jobs.map((job) => {
+                  const on = selected.includes(job.key);
+                  return (
+                    <button
+                      key={job.key} onClick={() => toggleJob(job.key)}
+                      className="text-left rounded-sm p-3 hover:opacity-85"
+                      style={{ background: on ? C.ink : C.paper, color: on ? "#fff" : C.ink, border: `1px solid ${on ? C.ink : C.kraft}` }}
+                    >
+                      <div style={{ fontWeight: 700 }}>{on ? "✓ " : ""}{job.step.label}</div>
+                      <div style={{ fontSize: 12, color: on ? C.kraftDark : C.faint }}>{job.product?.sku || job.line.desc || "Custom item"}</div>
+                    </button>
+                  );
+                })}
               </div>
             )}
-            <div className="mt-4">
+            <div className="mt-4 flex gap-2">
               <Btn onClick={() => setScreen("who")}><ChevronLeft size={14} /> Back</Btn>
+              <Btn kind="primary" big disabled={!selected.length} onClick={startJobs}>
+                <Play size={16} /> Start {selected.length > 1 ? `${selected.length} jobs` : "working"}
+              </Btn>
             </div>
           </>
         )}
@@ -2594,7 +2615,7 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
         <StartWorkModal
           wo={wo} products={products} team={team} onAddTeamMember={onAddTeamMember}
           onClose={() => setStartWorkOpen(false)}
-          onStart={(job) => { setStartWorkOpen(false); onStartWork(job); }}
+          onStart={(jobs) => { setStartWorkOpen(false); onStartWork(jobs); }}
         />
       )}
     </div>
@@ -5283,9 +5304,12 @@ function WorkTab(props) {
   };
   useBackLayer(!!activeStep, () => setActiveStep(null));
   useEffect(() => { if (jumpToUnitId) setActiveStep("sorting"); }, [jumpToUnitId]);
+  // jumpToWorkStep carries a nonce so a queued run that revisits the same
+  // step twice in a row (rare, but possible) still re-triggers — a plain
+  // string wouldn't change and the effect would silently no-op.
   useEffect(() => {
     if (!jumpToWorkStep) return;
-    setActiveStep(jumpToWorkStep);
+    setActiveStep(jumpToWorkStep.step);
     onJumpToWorkStepConsumed?.();
   }, [jumpToWorkStep]);
 
@@ -5312,7 +5336,9 @@ function WorkTab(props) {
   return (
     <div>
       <div className="mb-3"><Btn onClick={back}><ChevronLeft size={14} /> All work types</Btn></div>
-      {activeStep === "sorting" ? <SortingTab {...props} /> : <ProcessLogTab {...props} step={activeStep} />}
+      {activeStep === "sorting" ? <SortingTab {...props} />
+        : activeStep === "ship" ? <ShipLogTab {...props} />
+        : <ProcessLogTab {...props} step={activeStep} />}
     </div>
   );
 }
@@ -5392,20 +5418,21 @@ function RateTarget({ sortLog, step }) {
   );
 }
 
+const shapeOfStep = (step) => (step === "sorting" ? "sorting" : "process");
+
 // Full editor for one work-log entry (a Sort batch or a generalized process
-// step). Replaces the old inline quantity-only mini-form: time, crew, and
-// work order are all real fields here, not just the numbers a batch sorted
-// into. Shape of the editable quantity fields depends on which kind of
-// entry this is — a Sort batch carries rawBoards/toN/toP/toMill/toWaste,
-// everything else carries inbound/outbound/waste.
-function EditLogModal({ entry, products, workOrders, team, onAddTeamMember, onSave, onClose }) {
+// step). Time, crew, work order, and — now — which task this entry is are
+// all real fields here, not just the numbers a batch sorted into: a batch
+// logged under the wrong task (Rip instead of Chop) can be reassigned
+// instead of deleted and redone. Reassigning across the Sort/everything-
+// else divide resets the quantity fields that don't apply to the new
+// shape — there's nothing sensible to carry a raw/N/P split into an
+// inbound/outbound pair, or back.
+function EditLogModal({ entry, products, workOrders, team, onAddTeamMember, onProductsChange, onSave, onClose }) {
   useBackLayer(true, onClose);
-  const isProcess = !!(entry.inboundProductId || entry.outboundProductId);
-  const entryRaw = isProcess ? null : resolveRawProduct(entry, products);
-  const entryN = entryRaw ? (products.find((p) => (entry.toNProductId ? p.id === entry.toNProductId : (p.groupId === entryRaw.groupId && p.role === "sortedN")))) : null;
-  const entryP = entryRaw ? (products.find((p) => (entry.toPProductId ? p.id === entry.toPProductId : (p.groupId === entryRaw.groupId && p.role === "sortedP")))) : null;
-  const inP = isProcess ? products.find((p) => p.id === entry.inboundProductId) : null;
-  const outP = isProcess ? products.find((p) => p.id === entry.outboundProductId) : null;
+  const initialStep = entry.step || "sorting";
+  const initialIsProcess = !!(entry.inboundProductId || entry.outboundProductId);
+  const initialRaw = initialIsProcess ? null : resolveRawProduct(entry, products);
 
   // Only work orders still on the floor are pickable — but if this entry
   // is already tied to one that's since been packed or shipped, keep that
@@ -5416,27 +5443,51 @@ function EditLogModal({ entry, products, workOrders, team, onAddTeamMember, onSa
 
   const secs = Number(entry.seconds) || 0;
   const [form, setForm] = useState({
+    step: initialStep,
     crew: entry.crew?.length ? entry.crew : (entry.by ? entry.by.split(" + ").filter(Boolean) : []),
     workOrderId: entry.workOrderId || "",
     h: String(Math.floor(secs / 3600)), m: String(Math.floor((secs % 3600) / 60)), s: String(secs % 60),
     description: entry.description || "",
     batchLabel: entry.batchLabel || "",
+    rawProductId: initialRaw?.id || "",
+    toNProductId: entry.toNProductId || "",
+    toPProductId: entry.toPProductId || "",
     rawBoards: entry.rawBoards ?? "",
     toN: entry.toN ?? "",
     toP: entry.toP ?? "",
     toMill: entry.toMill ?? "",
     toWaste: entry.toWaste ?? "",
+    inboundProductId: entry.inboundProductId || "",
+    outboundProductId: entry.outboundProductId || "",
     inboundBoards: entry.inboundBoards ?? "",
     outboundBoards: entry.outboundBoards ?? "",
     wasteBoards: entry.wasteBoards ?? "",
   });
   const set = (patch) => setForm((f) => ({ ...f, ...patch }));
+  const isProcess = shapeOfStep(form.step) === "process";
+
+  const setStep = (step) => {
+    setForm((f) => {
+      if (shapeOfStep(step) === shapeOfStep(f.step)) return { ...f, step };
+      return shapeOfStep(step) === "sorting"
+        ? { ...f, step, rawProductId: "", toNProductId: "", toPProductId: "", rawBoards: "", toN: "", toP: "", toMill: "", toWaste: "" }
+        : { ...f, step, inboundProductId: "", outboundProductId: "", inboundBoards: "", outboundBoards: "", wasteBoards: "" };
+    });
+  };
+
+  const rawProduct = products.find((p) => p.id === form.rawProductId);
+  const familyN = products.find((p) => rawProduct?.groupId && p.groupId === rawProduct.groupId && p.role === "sortedN");
+  const familyP = products.find((p) => rawProduct?.groupId && p.groupId === rawProduct.groupId && p.role === "sortedP");
+  const nProduct = products.find((p) => p.id === form.toNProductId) || familyN;
+  const pProduct = products.find((p) => p.id === form.toPProductId) || familyP;
+  const onCreate = (np) => onProductsChange([...products, np]);
 
   const save = () => {
     const wo = workOrders.find((w) => w.id === form.workOrderId);
     const seconds = (Number(form.h) || 0) * 3600 + (Number(form.m) || 0) * 60 + (Number(form.s) || 0);
     const base = {
       ...entry,
+      step: form.step,
       crew: form.crew,
       by: form.crew.join(" + "),
       workOrderId: form.workOrderId || "",
@@ -5445,8 +5496,21 @@ function EditLogModal({ entry, products, workOrders, team, onAddTeamMember, onSa
       description: form.description,
     };
     onSave(isProcess
-      ? { ...base, inboundBoards: Number(form.inboundBoards) || 0, outboundBoards: Number(form.outboundBoards) || 0, wasteBoards: Number(form.wasteBoards) || 0 }
-      : { ...base, batchLabel: form.batchLabel || "Unlabeled batch", rawBoards: Number(form.rawBoards) || 0, toN: Number(form.toN) || 0, toP: Number(form.toP) || 0, toMill: Number(form.toMill) || 0, toWaste: Number(form.toWaste) || 0 });
+      ? {
+          ...base,
+          inboundProductId: form.inboundProductId || "", outboundProductId: form.outboundProductId || "",
+          inboundBoards: Number(form.inboundBoards) || 0, outboundBoards: Number(form.outboundBoards) || 0, wasteBoards: Number(form.wasteBoards) || 0,
+          rawProductId: undefined, toNProductId: undefined, toPProductId: undefined,
+          rawBoards: undefined, toN: undefined, toP: undefined, toMill: undefined, toWaste: undefined,
+        }
+      : {
+          ...base,
+          batchLabel: form.batchLabel || "Unlabeled batch",
+          rawProductId: form.rawProductId || "", toNProductId: nProduct?.id || "", toPProductId: pProduct?.id || "",
+          rawBoards: Number(form.rawBoards) || 0, toN: Number(form.toN) || 0, toP: Number(form.toP) || 0, toMill: Number(form.toMill) || 0, toWaste: Number(form.toWaste) || 0,
+          inboundProductId: undefined, outboundProductId: undefined,
+          inboundBoards: undefined, outboundBoards: undefined, wasteBoards: undefined,
+        });
   };
 
   return (
@@ -5460,6 +5524,14 @@ function EditLogModal({ entry, products, workOrders, team, onAddTeamMember, onSa
         <CrewSelect team={team} crew={form.crew} onChange={(crew) => set({ crew })} onAddMember={onAddTeamMember} />
 
         <div className="mt-3">
+          <Field label="Which task is this?">
+            <select style={{ ...inputStyle, marginTop: 8 }} value={form.step} onChange={(e) => setStep(e.target.value)}>
+              {PROCESS_STEPS.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+            </select>
+          </Field>
+        </div>
+
+        <div className="mt-3">
           <Field label="Which work order is this for?">
             <select style={{ ...inputStyle, marginTop: 8 }} value={form.workOrderId} onChange={(e) => set({ workOrderId: e.target.value })}>
               <option value="">— Not tied to a specific WO —</option>
@@ -5469,18 +5541,47 @@ function EditLogModal({ entry, products, workOrders, team, onAddTeamMember, onSa
         </div>
 
         {isProcess ? (
-          <div className="grid grid-cols-3 gap-2 mt-3">
-            <Field label={`In (${inP?.sku || "?"})`}><input type="number" style={inputStyle} value={form.inboundBoards} onChange={(e) => set({ inboundBoards: e.target.value })} /></Field>
-            <Field label={`Out (${outP?.sku || "?"})`}><input type="number" style={inputStyle} value={form.outboundBoards} onChange={(e) => set({ outboundBoards: e.target.value })} /></Field>
-            <Field label="Waste"><input type="number" style={inputStyle} value={form.wasteBoards} onChange={(e) => set({ wasteBoards: e.target.value })} /></Field>
-          </div>
+          <>
+            <div className="mt-3">
+              <Field label="Inbound stock">
+                <SkuPicker products={products} value={form.inboundProductId} onChange={(id) => set({ inboundProductId: id })} onCreate={onCreate} placeholder="— Select what's going in —" />
+              </Field>
+            </div>
+            <div className="mt-2">
+              <Field label="Outbound stock (SKU produced)">
+                <SkuPicker products={products} value={form.outboundProductId} onChange={(id) => set({ outboundProductId: id })} onCreate={onCreate} placeholder="— Select what's coming out —" />
+              </Field>
+            </div>
+            <div className="grid grid-cols-3 gap-2 mt-2">
+              <Field label="Inbound boards"><input type="number" style={inputStyle} value={form.inboundBoards} onChange={(e) => set({ inboundBoards: e.target.value })} /></Field>
+              <Field label="Outbound boards"><input type="number" style={inputStyle} value={form.outboundBoards} onChange={(e) => set({ outboundBoards: e.target.value })} /></Field>
+              <Field label="Waste"><input type="number" style={inputStyle} value={form.wasteBoards} onChange={(e) => set({ wasteBoards: e.target.value })} /></Field>
+            </div>
+          </>
         ) : (
           <>
             <div className="mt-3"><Field label="Batch label"><input style={inputStyle} value={form.batchLabel} onChange={(e) => set({ batchLabel: e.target.value })} /></Field></div>
+            <div className="mt-2">
+              <Field label="What was sorted?">
+                <SkuPicker products={products} value={form.rawProductId} onChange={(id) => set({ rawProductId: id })} onCreate={onCreate} placeholder="— Select what's coming in —" newRole="raw" />
+              </Field>
+              <Field label="Raw boards"><input type="number" style={{ ...inputStyle, marginTop: 8 }} value={form.rawBoards} onChange={(e) => set({ rawBoards: e.target.value })} /></Field>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2 mt-2">
+              <div>
+                <Field label="Sorted Clean">
+                  <SkuPicker products={products} value={nProduct?.id || ""} onChange={(id) => set({ toNProductId: id })} onCreate={onCreate} placeholder="— Select destination —" newRole="sortedN" />
+                </Field>
+                <Field label={`→ ${nProduct?.sku || "boards"}`}><input type="number" style={{ ...inputStyle, marginTop: 8 }} value={form.toN} onChange={(e) => set({ toN: e.target.value })} /></Field>
+              </div>
+              <div>
+                <Field label="Sorted Paint">
+                  <SkuPicker products={products} value={pProduct?.id || ""} onChange={(id) => set({ toPProductId: id })} onCreate={onCreate} placeholder="— Select destination —" newRole="sortedP" />
+                </Field>
+                <Field label={`→ ${pProduct?.sku || "boards"}`}><input type="number" style={{ ...inputStyle, marginTop: 8 }} value={form.toP} onChange={(e) => set({ toP: e.target.value })} /></Field>
+              </div>
+            </div>
             <div className="grid grid-cols-2 gap-2 mt-2">
-              <Field label="Raw boards"><input type="number" style={inputStyle} value={form.rawBoards} onChange={(e) => set({ rawBoards: e.target.value })} /></Field>
-              <Field label={`→ ${entryN?.sku || "?"}`}><input type="number" style={inputStyle} value={form.toN} onChange={(e) => set({ toN: e.target.value })} /></Field>
-              <Field label={`→ ${entryP?.sku || "?"}`}><input type="number" style={inputStyle} value={form.toP} onChange={(e) => set({ toP: e.target.value })} /></Field>
               <Field label="→ Mill Stock"><input type="number" style={inputStyle} value={form.toMill} onChange={(e) => set({ toMill: e.target.value })} /></Field>
               <Field label="→ Waste"><input type="number" style={inputStyle} value={form.toWaste} onChange={(e) => set({ toWaste: e.target.value })} /></Field>
             </div>
@@ -5509,7 +5610,7 @@ function EditLogModal({ entry, products, workOrders, team, onAddTeamMember, onSa
   );
 }
 
-function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSort, onDeleteSort, team, whoWorking, setWhoWorking, onAddTeamMember, workOrders, units, onUnitsChange, jumpToUnitId, runGrouped, purchaseOrders }) {
+function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSort, onDeleteSort, team, whoWorking, setWhoWorking, onAddTeamMember, workOrders, units, onUnitsChange, jumpToUnitId, onBatchLogged, queuedSteps, runGrouped, purchaseOrders }) {
   const millStock = products.find((p) => p.role === "millStock");
   const rawProducts = products.filter((p) => p.kind === "board" && p.role === "raw");
 
@@ -5644,6 +5745,7 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
     setWorkOrderId(""); setUnitId(""); setRawProductId(""); setRawBoards(""); setToN(""); setToP(""); setToMill(""); setToWaste(""); setDescription(""); setToNProductId(""); setToPProductId("");
     sw.reset();
     clearDraft();
+    onBatchLogged?.();
   };
 
   return (
@@ -5652,6 +5754,11 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
         <div className="flex items-center justify-between mb-3">
           <div style={{ fontWeight: 800, fontSize: 16 }}>Log a Sorting Batch</div>
         </div>
+        {queuedSteps?.length > 0 && (
+          <div className="mb-3 text-xs" style={{ fontFamily: MONO, color: C.faint }}>
+            Up next: {queuedSteps.map((s) => PROCESS_STEPS.find((p) => p.id === s)?.label || s).join(", ")}
+          </div>
+        )}
         <RateTarget sortLog={sortLog} step="sorting" />
         <div className="mb-3 pb-3" style={{ borderBottom: `1px solid ${C.kraft}` }}>
           <CrewSelect team={team} crew={crew} onChange={setCrewSynced} onAddMember={onAddTeamMember} />
@@ -5874,7 +5981,7 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
       {editingEntry && (
         <EditLogModal
           entry={editingEntry} products={products} workOrders={workOrders}
-          team={team} onAddTeamMember={onAddTeamMember}
+          team={team} onAddTeamMember={onAddTeamMember} onProductsChange={onProductsChange}
           onSave={(updated) => { onUpdateSort(editingEntry, updated); setEditingEntry(null); }}
           onClose={() => setEditingEntry(null)}
         />
@@ -5889,7 +5996,7 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
 // existing one or create a new one inline. Pack/Ship allow picking any
 // wood product as outbound (not just WIP) since they may target a
 // finished, sellable SKU rather than another intermediate stage.
-function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, onUpdateSort, onDeleteSort, team, whoWorking, setWhoWorking, onAddTeamMember, workOrders, runGrouped }) {
+function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, onUpdateSort, onDeleteSort, team, whoWorking, setWhoWorking, onAddTeamMember, workOrders, onBatchLogged, queuedSteps, runGrouped }) {
   const [editingEntry, setEditingEntry] = useState(null);
   const stepDef = PROCESS_STEPS.find((s) => s.id === step);
   const { saved: draft0 } = useDraft(`gnws-draft-${step}`);
@@ -5958,6 +6065,7 @@ function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, o
     setInboundProductId(""); setInboundBoards(""); setOutboundProductId(""); setOutboundBoards(""); setWasteBoards(""); setWorkOrderId(""); setDescription("");
     sw.reset();
     clearDraft();
+    onBatchLogged?.();
   };
 
   return (
@@ -5966,6 +6074,11 @@ function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, o
         <div className="flex items-center justify-between mb-3">
           <div style={{ fontWeight: 800, fontSize: 16 }}>Log — {stepDef?.label || step}</div>
         </div>
+        {queuedSteps?.length > 0 && (
+          <div className="mb-3 text-xs" style={{ fontFamily: MONO, color: C.faint }}>
+            Up next: {queuedSteps.map((s) => PROCESS_STEPS.find((p) => p.id === s)?.label || s).join(", ")}
+          </div>
+        )}
         <RateTarget sortLog={sortLog} step={step} />
 
         <Field label="Who's working on this" required>
@@ -6088,11 +6201,333 @@ function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, o
       {editingEntry && (
         <EditLogModal
           entry={editingEntry} products={products} workOrders={workOrders}
-          team={team} onAddTeamMember={onAddTeamMember}
+          team={team} onAddTeamMember={onAddTeamMember} onProductsChange={onProductsChange}
           onSave={(updated) => { onUpdateSort(editingEntry, updated); setEditingEntry(null); }}
           onClose={() => setEditingEntry(null)}
         />
       )}
+    </div>
+  );
+}
+
+/* ---------------- Ship log ----------------
+   Shipping is a counting job, not a conversion job: you walk the truck
+   and tally what physically goes on it, SKU by SKU, usually on a phone
+   with one hand. The generalized ProcessLogTab (one inbound SKU -> one
+   outbound SKU, typed board counts) doesn't describe that at all, which
+   is why Ship read as nonsense there. It gets its own page instead: a
+   tap-to-count tally that draws stock down as it goes and, when the load
+   is tied to a work order, counts each SKU against what that order
+   actually calls for. -------------------------------------------- */
+
+// Is there a real conversion path between two units on this product?
+// convertViaGraph returns the quantity UNCONVERTED when there isn't one,
+// so anything that shows a converted number has to ask this first —
+// otherwise 20 SF renders as "20 boxes" and nobody can tell.
+function unitReaches(product, fromUnit, toUnit) {
+  if (fromUnit === toUnit) return true;
+  const graph = buildUnitGraph(product);
+  const visited = new Set([fromUnit]);
+  const queue = [fromUnit];
+  while (queue.length) {
+    const node = queue.shift();
+    if (node === toUnit) return true;
+    for (const next in (graph[node] || {})) {
+      if (!visited.has(next)) { visited.add(next); queue.push(next); }
+    }
+  }
+  return false;
+}
+
+function ShipLogTab({ products, onProductsChange, sortLog, onLogSort, onDeleteSort, team, whoWorking, setWhoWorking, onAddTeamMember, workOrders, onBatchLogged, runGrouped }) {
+  const { saved: draft0, save: saveDraft, clear: clearDraft } = useDraft("gnws-draft-ship");
+  const [workOrderId, setWorkOrderId] = useState(draft0.workOrderId || "");
+  // [{ productId, unit, count }] — unit is what a tap means for that row.
+  const [rows, setRows] = useState(draft0.rows || []);
+  const [description, setDescription] = useState(draft0.description || "");
+  const [crew, setCrew] = useState(() => (draft0.crew?.length ? draft0.crew : whoWorking ? [whoWorking] : []));
+  const [logLimit, setLogLimit] = useState(15);
+  const sw = useStopwatch(draft0.timer);
+  const [manualEdit, setManualEdit] = useState(false);
+  const [manualHMS, setManualHMS] = useState({ h: "0", m: "0", s: "0" });
+
+  const setCrewSynced = (next) => { setCrew(next); setWhoWorking(next[0] || ""); };
+  useEffect(() => { saveDraft({ workOrderId, rows, description, crew }); }, [workOrderId, rows, description, crew]);
+
+  const openWorkOrders = workOrders.filter((w) => ACTIVE_WO_STATUSES.includes(w.status));
+  const wo = workOrders.find((w) => w.id === workOrderId);
+  const productOf = (id) => products.find((p) => p.id === id);
+
+  // A tap should move stock by a real amount, so a row counts in a unit
+  // that actually converts to the unit onHand is kept in. Anything that
+  // doesn't convert falls back to the stock unit itself.
+  const unitsForRow = (p) => {
+    const canonical = canonicalUnitFor(p);
+    return unitsFor(p).filter((u) => unitReaches(p, canonical, u));
+  };
+  const preferredUnit = (p) => {
+    const avail = unitsForRow(p);
+    return ["box", "pallet", "plank", "board"].find((u) => avail.includes(u)) || canonicalUnitFor(p);
+  };
+
+  const addRow = (p) => {
+    if (!p || rows.some((r) => r.productId === p.id)) return;
+    setRows((prev) => [...prev, { productId: p.id, unit: preferredUnit(p), count: 0 }]);
+  };
+  const bump = (productId, by) =>
+    setRows((prev) => prev.map((r) => (r.productId === productId ? { ...r, count: Math.max(0, (Number(r.count) || 0) + by) } : r)));
+  const setRowUnit = (productId, unit) =>
+    setRows((prev) => prev.map((r) => (r.productId === productId ? { ...r, unit } : r)));
+  const removeRow = (productId) => setRows((prev) => prev.filter((r) => r.productId !== productId));
+
+  // Pull this order's SKUs onto the board so the truck can be counted
+  // without hunting for each one in a picker.
+  const loadFromWorkOrder = () => {
+    if (!wo) return;
+    const next = [...rows];
+    (wo.lines || []).forEach((l) => {
+      const p = productOf(l.productId);
+      if (!p || next.some((r) => r.productId === p.id)) return;
+      next.push({ productId: p.id, unit: preferredUnit(p), count: 0 });
+    });
+    setRows(next);
+  };
+
+  // What the order calls for, in the unit this row is being counted in —
+  // only when the product can actually make that conversion.
+  const targetFor = (row) => {
+    const p = productOf(row.productId);
+    if (!p || !wo) return null;
+    const line = (wo.lines || []).find((l) => l.productId === row.productId);
+    const sf = Number(line?.qtySF) || 0;
+    if (!sf || !unitReaches(p, "sf", row.unit)) return null;
+    return convertQty(p, sf, "sf", row.unit);
+  };
+
+  const applyManualTime = () => {
+    const h = Number(manualHMS.h) || 0, m = Number(manualHMS.m) || 0, s = Number(manualHMS.s) || 0;
+    sw.setManual(h * 3600 + m * 60 + s);
+    setManualEdit(false);
+  };
+
+  const counted = rows.reduce((s, r) => s + (Number(r.count) || 0), 0);
+  const canSubmit = crew.length > 0 && counted > 0;
+  const shipEntries = sortLog.filter((s) => s.step === "ship");
+
+  const submit = () => {
+    if (!canSubmit) return;
+    const tallies = rows
+      .filter((r) => (Number(r.count) || 0) > 0)
+      .map((r) => {
+        const p = productOf(r.productId);
+        const canonical = p ? canonicalUnitFor(p) : "board";
+        return {
+          productId: r.productId,
+          sku: p?.sku || "?",
+          count: Number(r.count) || 0,
+          unit: r.unit,
+          // Stock moves in the product's own unit; store it so a delete
+          // can put back exactly what was taken.
+          stockQty: p ? convertQty(p, Number(r.count) || 0, r.unit, canonical) : 0,
+          stockUnit: canonical,
+        };
+      });
+    runGrouped(() => {
+      const byId = Object.fromEntries(tallies.map((t) => [t.productId, t.stockQty]));
+      onProductsChange(products.map((p) => (byId[p.id] ? { ...p, onHand: (Number(p.onHand) || 0) - byId[p.id] } : p)));
+      onLogSort({
+        id: uid(), date: today(), by: crew.join(" + "), crew,
+        step: "ship",
+        batchLabel: `Ship${wo ? ` — ${wo.number}` : ""}`,
+        workOrderId: workOrderId || "", workOrderNumber: wo?.number || "",
+        tallies,
+        // Reports read throughput off inboundBoards; without it a shipping
+        // run would time itself and then not show up in any rate table.
+        inboundBoards: tallies.reduce((s, t) => s + t.stockQty, 0),
+        description,
+        seconds: sw.elapsed,
+        startedAt: new Date().toISOString(),
+      });
+    });
+    setRows([]); setWorkOrderId(""); setDescription("");
+    sw.reset();
+    clearDraft();
+    onBatchLogged?.();
+  };
+
+  return (
+    <div className="max-w-2xl">
+      <div className="rounded-sm p-4 mb-4" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
+        <div className="flex items-center gap-2 mb-3">
+          <Truck size={17} style={{ color: C.faint }} />
+          <div style={{ fontWeight: 800, fontSize: 16 }}>Ship — count the load</div>
+        </div>
+
+        <Field label="Who's loading" required>
+          <CrewSelect team={team} crew={crew} onChange={setCrewSynced} onAddMember={onAddTeamMember} />
+        </Field>
+
+        <Field label="Which work order is this truck for?">
+          <select style={{ ...inputStyle, marginTop: 8 }} value={workOrderId} onChange={(e) => setWorkOrderId(e.target.value)}>
+            <option value="">— Not tied to a specific WO —</option>
+            {openWorkOrders.map((w) => <option key={w.id} value={w.id}>{w.number} · {w.customerName || "No customer"}</option>)}
+          </select>
+        </Field>
+        {wo && (wo.lines || []).length > 0 && (
+          <div className="mt-2">
+            <Btn onClick={loadFromWorkOrder}><Plus size={13} /> Load this order's SKUs</Btn>
+          </div>
+        )}
+
+        {/* ---- the tally board ---- */}
+        <div className="mt-4 pt-3" style={{ borderTop: `1px solid ${C.kraft}` }}>
+          <div className="flex items-center justify-between mb-2">
+            <div style={{ fontWeight: 700, fontSize: 13 }}>Tally</div>
+            <div style={{ fontFamily: MONO, fontSize: 13, color: C.faint }}>{num(counted)} counted</div>
+          </div>
+
+          {rows.length === 0 ? (
+            <div className="text-sm text-center py-4" style={{ color: C.faint }}>
+              Add the SKUs on this truck, then tap each one as it loads.
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {rows.map((r) => {
+                const p = productOf(r.productId);
+                const target = targetFor(r);
+                const units = p ? unitsForRow(p) : [];
+                const over = target != null && r.count > target;
+                return (
+                  <div key={r.productId} className="rounded-sm" style={{ background: C.paper, border: `1px solid ${over ? C.warn : C.kraft}` }}>
+                    <div className="flex items-stretch">
+                      {/* whole left side is the tap target */}
+                      <button
+                        onClick={() => bump(r.productId, 1)}
+                        className="flex-1 text-left px-3 py-3 active:opacity-70"
+                        style={{ minHeight: 62 }}
+                      >
+                        <div style={{ fontWeight: 800, fontSize: 15 }}>{p?.sku || "?"}</div>
+                        <div style={{ fontFamily: MONO, fontSize: 11, color: over ? C.warn : C.faint, marginTop: 2 }}>
+                          {target != null
+                            ? `${num(r.count)} of ${num(target)} ${unitLabel(r.unit)}${over ? " — over" : ""}`
+                            : `${unitLabel(r.unit)} · tap to add`}
+                        </div>
+                      </button>
+                      <div className="flex items-center gap-2 pr-2">
+                        <div style={{ fontFamily: MONO, fontSize: 30, fontWeight: 800, minWidth: 54, textAlign: "right", color: over ? C.warn : C.ink }}>
+                          {num(r.count)}
+                        </div>
+                        <button
+                          onClick={() => bump(r.productId, -1)}
+                          className="rounded-sm"
+                          style={{ width: 40, height: 40, border: `1px solid ${C.kraftDark}`, background: "#fff", fontFamily: MONO, fontSize: 20, fontWeight: 800, lineHeight: 1 }}
+                          title="Undo one"
+                        >−</button>
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-between px-3 pb-2 pt-1" style={{ borderTop: `1px solid ${C.kraft}` }}>
+                      <select
+                        value={r.unit} onChange={(e) => setRowUnit(r.productId, e.target.value)}
+                        style={{ ...inputStyle, padding: "3px 6px", fontSize: 11, width: "auto" }}
+                      >
+                        {units.map((u) => <option key={u} value={u}>{unitLabel(u)}</option>)}
+                      </select>
+                      <button onClick={() => removeRow(r.productId)} className="opacity-50 hover:opacity-100" title="Remove from tally">
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <div className="mt-3">
+            <Field label="Add a SKU to the tally">
+              <SkuPicker
+                products={products} value="" onChange={(id) => addRow(productOf(id))}
+                onCreate={(np) => { onProductsChange([...products, np]); addRow(np); }}
+                placeholder="— Add SKU —"
+              />
+            </Field>
+          </div>
+        </div>
+
+        <Field label="Notes">
+          <textarea style={{ ...inputStyle, marginTop: 8, minHeight: 50 }} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Seal number, carrier, anything odd about the load…" />
+        </Field>
+
+        <div className="mt-4 pt-4" style={{ borderTop: `1px solid ${C.kraft}` }}>
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-1.5" style={{ fontWeight: 700, fontSize: 13 }}>
+              <Timer size={15} style={{ color: C.faint }} /> Time loading
+            </div>
+            <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 800, color: sw.running ? C.moss : C.ink }}>{fmtDuration(sw.elapsed)}</div>
+          </div>
+          <div className="flex gap-2">
+            {!sw.running ? (
+              <Btn kind="moss" onClick={sw.start}><Play size={13} /> {sw.elapsed > 0 ? "Resume" : "Start"}</Btn>
+            ) : (
+              <Btn kind="ghost" onClick={sw.pause}><Pause size={13} /> Pause</Btn>
+            )}
+            <Btn onClick={() => { setManualEdit(!manualEdit); const s = sw.elapsed; setManualHMS({ h: String(Math.floor(s / 3600)), m: String(Math.floor((s % 3600) / 60)), s: String(s % 60) }); }}>
+              <Clock size={13} /> Edit time
+            </Btn>
+            <Btn onClick={sw.reset}><RefreshCw size={13} /> Reset</Btn>
+          </div>
+          {manualEdit && (
+            <div className="mt-2 flex items-center gap-2">
+              <input type="number" style={{ ...inputStyle, width: 60 }} value={manualHMS.h} onChange={(e) => setManualHMS({ ...manualHMS, h: e.target.value })} /><span style={{ fontFamily: MONO, fontSize: 12 }}>h</span>
+              <input type="number" style={{ ...inputStyle, width: 60 }} value={manualHMS.m} onChange={(e) => setManualHMS({ ...manualHMS, m: e.target.value })} /><span style={{ fontFamily: MONO, fontSize: 12 }}>m</span>
+              <input type="number" style={{ ...inputStyle, width: 60 }} value={manualHMS.s} onChange={(e) => setManualHMS({ ...manualHMS, s: e.target.value })} /><span style={{ fontFamily: MONO, fontSize: 12 }}>s</span>
+              <Btn kind="primary" onClick={applyManualTime}><Check size={13} /> Set</Btn>
+            </div>
+          )}
+        </div>
+
+        <div className="mt-4">
+          <Btn kind="primary" onClick={submit} disabled={!canSubmit} big>
+            <Check size={16} /> Log this load ({num(counted)})
+          </Btn>
+          {!crew.length && <div className="mt-2 text-xs" style={{ color: C.warn }}>Pick your name above first.</div>}
+          {!counted && <div className="mt-2 text-xs" style={{ color: C.warn }}>Nothing counted yet.</div>}
+        </div>
+      </div>
+
+      <div className="rounded-sm p-4" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
+        <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 10 }}>Recent Ship Log</div>
+        {shipEntries.length === 0 ? (
+          <div className="text-sm text-center py-4" style={{ color: C.faint }}>Nothing shipped yet.</div>
+        ) : (
+          <div className="space-y-2">
+            {shipEntries.slice().sort(byNewest).slice(0, logLimit).map((s) => (
+              <div key={s.id} className="px-3 py-2 rounded-sm text-sm" style={{ background: C.paper, border: `1px solid ${C.kraft}` }}>
+                <div className="flex justify-between items-start gap-2">
+                  <span style={{ fontWeight: 700 }}>{s.workOrderNumber || "No work order"}</span>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>{s.date} · {s.by}</span>
+                    <button onClick={() => onDeleteSort(s)} title="Delete" className="opacity-50 hover:opacity-100"><Trash2 size={13} /></button>
+                  </div>
+                </div>
+                <div style={{ fontFamily: MONO, fontSize: 11, color: C.faint, marginTop: 2 }}>
+                  {(s.tallies || []).map((t) => `${t.sku} ${num(t.count)}${t.unit ? ` ${unitLabel(t.unit)}` : ""}`).join(" · ") || "—"}
+                  {s.seconds ? ` · ${fmtDuration(s.seconds)}` : ""}
+                </div>
+                {s.description && <div style={{ fontSize: 12, marginTop: 4 }}>{s.description}</div>}
+              </div>
+            ))}
+          </div>
+        )}
+        {logLimit < shipEntries.length && (
+          <button
+            onClick={() => setLogLimit(shipEntries.length)}
+            className="mt-3 w-full py-2 rounded-sm text-xs"
+            style={{ fontFamily: MONO, color: C.ink, border: `1px solid ${C.kraftDark}` }}
+          >
+            Show all {shipEntries.length} entries
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -7250,6 +7685,10 @@ export default function App() {
   const [activeProductId, setActiveProductId] = useState(null);
   const [jumpToUnitId, setJumpToUnitId] = useState(null);
   const [jumpToWorkStep, setJumpToWorkStep] = useState(null);
+  // Jobs still to come in a linear run started from a work order — sort,
+  // then chop, then rip, all picked at once. The current job isn't in
+  // here; it's whatever's already seeded into the active step's draft.
+  const [workQueue, setWorkQueue] = useState([]);
   const [importOpen, setImportOpen] = useState(false);
   const [exitHint, setExitHint] = useState(false);
   const [saveError, setSaveError] = useState(null);
@@ -7268,11 +7707,10 @@ export default function App() {
 
   // Seeds the exact same localStorage draft the Work tab's log form reads
   // on mount (see useDraft) — crew, work order, and starting guesses at
-  // what's coming in and what it turns into — then jumps straight to that
-  // step. The form itself doesn't know or care this came from a work
-  // order rather than someone filling it in by hand; it's the same draft
-  // either way.
-  const startWork = ({ step, crew, workOrderId, seedInboundId, seedOutboundId }) => {
+  // what's coming in and what it turns into. The form itself doesn't know
+  // or care this came from a work order rather than someone filling it in
+  // by hand; it's the same draft either way.
+  const seedDraftFor = ({ step, crew, workOrderId, seedInboundId, seedOutboundId }) => {
     try {
       const draftKey = step === "sorting" ? "gnws-draft-sorting" : `gnws-draft-${step}`;
       const existing = JSON.parse(localStorage.getItem(draftKey) || "null") || {};
@@ -7285,9 +7723,33 @@ export default function App() {
       }
       localStorage.setItem(draftKey, JSON.stringify(patch));
     } catch (e) { /* private browsing or a full quota — the flow still works, just unseeded */ }
-    setWhoWorking(crew[0] || "");
-    setJumpToWorkStep(step);
+  };
+
+  // jobs is the whole queue for a linear run — seed and jump to the
+  // first, hold the rest for advanceQueue to work through as each one
+  // gets logged.
+  const startWork = (jobs) => {
+    if (!jobs.length) return;
+    const [first, ...rest] = jobs;
+    seedDraftFor(first);
+    setWhoWorking(first.crew[0] || "");
+    setJumpToWorkStep({ step: first.step, nonce: Math.random() });
+    setWorkQueue(rest);
     goTab("work");
+  };
+
+  // Fired by the log form right after a batch is submitted. If there's
+  // more queued from a linear run, seed the next one and jump — the crew
+  // never sees "What are you working on?" again until the whole run is
+  // logged.
+  const advanceQueue = () => {
+    setWorkQueue((queue) => {
+      if (!queue.length) return queue;
+      const [next, ...rest] = queue;
+      seedDraftFor(next);
+      setJumpToWorkStep({ step: next.step, nonce: Math.random() });
+      return rest;
+    });
   };
 
   /* ---- Storage sync ------------------------------------------------
@@ -7500,47 +7962,46 @@ export default function App() {
   // Editing or deleting a sort-log entry has to undo its original inventory
   // effect (raw boards consumed, sorted outputs added) before applying the
   // new one — otherwise counts drift every time someone fixes a typo.
+  // original and updated can each independently be sort-shaped or
+  // process-shaped now that the edit dialog can reassign an entry's task
+  // — e.g. correcting a batch logged as Rip to actually have been Chop.
+  // Reverse whichever shape the original was in, then apply whichever
+  // shape the update is in; same math as before when they match, correct
+  // when they don't.
+  const isProcessShapedEntry = (e) => !!(e.inboundProductId || e.outboundProductId);
   const updateSortEntry = (original, updated) => {
     runGrouped(() => {
-      // Generalized process-log entries reference exact product ids
-      // directly — same split deleteSortEntry makes below.
-      if (original.inboundProductId || original.outboundProductId || updated.inboundProductId || updated.outboundProductId) {
-        setProducts((prev) => prev.map((p) => {
-          let onHand = Number(p.onHand) || 0;
-          if (p.id === original.inboundProductId) onHand += Number(original.inboundBoards) || 0;
-          if (p.id === original.outboundProductId) onHand -= Number(original.outboundBoards) || 0;
-          if (p.id === updated.inboundProductId) onHand -= Number(updated.inboundBoards) || 0;
-          if (p.id === updated.outboundProductId) onHand += Number(updated.outboundBoards) || 0;
-          return onHand === (Number(p.onHand) || 0) ? p : { ...p, onHand };
-        }));
-        setSortLog((prev) => prev.map((s) => (s.id === original.id ? { ...updated, id: original.id } : s)));
-        return;
-      }
       setProducts((prev) => {
-        const origRaw = resolveRawProduct(original, prev);
-        const newRaw = resolveRawProduct(updated, prev);
+        const origRaw = isProcessShapedEntry(original) ? null : resolveRawProduct(original, prev);
+        const newRaw = isProcessShapedEntry(updated) ? null : resolveRawProduct(updated, prev);
         return prev.map((p) => {
           let onHand = Number(p.onHand) || 0;
-          // Reverse the original entry's effect using ITS group, then apply
-          // the updated entry's effect using ITS group — these can differ if
-          // someone corrects which size was actually sorted. Matching by
-          // groupId/role means this still works even if SKUs got renamed.
-          const origN = original.toNProductId;
-          const origP = original.toPProductId;
-          const updN = updated.toNProductId;
-          const updP = updated.toPProductId;
-          if (origRaw) {
-            if (p.id === origRaw.id) onHand += Number(original.rawBoards) || 0;
-            if (origN ? p.id === origN : (p.groupId === origRaw.groupId && p.role === "sortedN")) onHand -= Number(original.toN) || 0;
-            if (origP ? p.id === origP : (p.groupId === origRaw.groupId && p.role === "sortedP")) onHand -= Number(original.toP) || 0;
+          if (isProcessShapedEntry(original)) {
+            if (p.id === original.inboundProductId) onHand += Number(original.inboundBoards) || 0;
+            if (p.id === original.outboundProductId) onHand -= Number(original.outboundBoards) || 0;
+          } else {
+            // Matching by groupId/role means this still works even if
+            // SKUs got renamed since the entry was logged.
+            const origN = original.toNProductId, origP = original.toPProductId;
+            if (origRaw) {
+              if (p.id === origRaw.id) onHand += Number(original.rawBoards) || 0;
+              if (origN ? p.id === origN : (p.groupId === origRaw.groupId && p.role === "sortedN")) onHand -= Number(original.toN) || 0;
+              if (origP ? p.id === origP : (p.groupId === origRaw.groupId && p.role === "sortedP")) onHand -= Number(original.toP) || 0;
+            }
+            if (p.role === "millStock") onHand -= Number(original.toMill) || 0;
           }
-          if (p.role === "millStock") onHand -= Number(original.toMill) || 0;
-          if (newRaw) {
-            if (p.id === newRaw.id) onHand -= Number(updated.rawBoards) || 0;
-            if (updN ? p.id === updN : (p.groupId === newRaw.groupId && p.role === "sortedN")) onHand += Number(updated.toN) || 0;
-            if (updP ? p.id === updP : (p.groupId === newRaw.groupId && p.role === "sortedP")) onHand += Number(updated.toP) || 0;
+          if (isProcessShapedEntry(updated)) {
+            if (p.id === updated.inboundProductId) onHand -= Number(updated.inboundBoards) || 0;
+            if (p.id === updated.outboundProductId) onHand += Number(updated.outboundBoards) || 0;
+          } else {
+            const updN = updated.toNProductId, updP = updated.toPProductId;
+            if (newRaw) {
+              if (p.id === newRaw.id) onHand -= Number(updated.rawBoards) || 0;
+              if (updN ? p.id === updN : (p.groupId === newRaw.groupId && p.role === "sortedN")) onHand += Number(updated.toN) || 0;
+              if (updP ? p.id === updP : (p.groupId === newRaw.groupId && p.role === "sortedP")) onHand += Number(updated.toP) || 0;
+            }
+            if (p.role === "millStock") onHand += Number(updated.toMill) || 0;
           }
-          if (p.role === "millStock") onHand += Number(updated.toMill) || 0;
           return onHand === (Number(p.onHand) || 0) ? p : { ...p, onHand };
         });
       });
@@ -7556,6 +8017,18 @@ export default function App() {
 
   const deleteSortEntry = (entry) => {
     runGrouped(() => {
+      // A ship load is a tally across many SKUs at once, so it puts back
+      // each line's own stock quantity. This has to come first: ship
+      // entries carry no inbound/outbound product id, and would otherwise
+      // fall through to the Sort path and be reversed as if they were a
+      // raw-size split.
+      if (entry.tallies?.length) {
+        const back = {};
+        entry.tallies.forEach((t) => { back[t.productId] = (back[t.productId] || 0) + (Number(t.stockQty) || 0); });
+        setProducts((prev) => prev.map((p) => (back[p.id] ? { ...p, onHand: (Number(p.onHand) || 0) + back[p.id] } : p)));
+        setSortLog((prev) => prev.filter((s) => s.id !== entry.id));
+        return;
+      }
       // Generalized process-log entries (ProcessLogTab) reference exact
       // product ids directly — no groupId indirection needed, unlike the
       // Sort-specific path below which resolves by raw-size family.
@@ -7936,6 +8409,8 @@ export default function App() {
             jumpToUnitId={jumpToUnitId}
             jumpToWorkStep={jumpToWorkStep}
             onJumpToWorkStepConsumed={() => setJumpToWorkStep(null)}
+            onBatchLogged={advanceQueue}
+            queuedSteps={workQueue.map((j) => j.step)}
             runGrouped={runGrouped}
             purchaseOrders={purchaseOrders}
           />
