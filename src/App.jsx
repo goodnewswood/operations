@@ -2917,7 +2917,12 @@ function CustomersTab({ customers, onChange }) {
    "planks" on a SKU with no plank conversion would read 1:1 and imply a
    relationship that was never configured. */
 const CATEGORY_UNITS = {
-  wood: ["board", "pallet"],
+  // Raw and sorted stock lives on pallets and gets counted that way — a
+  // rack is "six pallets and change", not "2,400 boards". Boards stay as
+  // the second figure, since that's what the logs move in. SKUs with no
+  // boards-per-pallet set (the 11xx family) have no pallet conversion to
+  // fall back on, so they show boards alone.
+  wood: ["pallet", "board"],
   milled: ["plank", "box"],
   paint: ["gal", "qt"],
   packing: [],
@@ -3502,10 +3507,159 @@ function InventoryCountSheet({ products, group, onClose }) {
   );
 }
 
+/* The count sheet above is paper — this is the same walk done on a phone.
+   Stock sits on the rack as whole pallets plus a loose remainder, so it
+   gets counted that way: tick the pallets off one at a time, type the
+   leftover boards, and the row does the multiplication. Nothing is
+   written until Commit, and only rows actually touched are written at
+   all — an untouched SKU is one nobody counted, which is different from
+   one counted at zero. */
+function InventoryCountEntry({ products, group, onCommit, onClose }) {
+  useBackLayer(true, onClose);
+  const [cat, setCat] = useState(group || "all");
+  // { [productId]: { pallets, loose } } — strings, so a half-typed "1" in
+  // the loose box doesn't get coerced to a count mid-keystroke.
+  const [entries, setEntries] = useState({});
+
+  const rows = products
+    .filter((p) => !p.archived)
+    .filter((p) => (cat === "all" ? true : (p.category || "wood") === cat))
+    .slice()
+    .sort(bySkuFavoritesFirst);
+
+  const entryOf = (id) => entries[id] || { pallets: "", loose: "" };
+  // Always derives from the latest state, never the render that drew the
+  // button: someone ticking off a rack taps faster than React re-renders,
+  // and reading the closed-over value made eight taps land as one.
+  const setEntry = (id, patch) => setEntries((prev) => {
+    const cur = prev[id] || { pallets: "", loose: "" };
+    return { ...prev, [id]: { ...cur, ...(typeof patch === "function" ? patch(cur) : patch) } };
+  });
+  const touched = (id) => {
+    const e = entries[id];
+    return !!e && (String(e.pallets).trim() !== "" || String(e.loose).trim() !== "");
+  };
+  const hasPallets = (p) => unitReaches(p, canonicalUnitFor(p), "pallet");
+
+  // Counted total in the unit on-hand is stored in.
+  const countedOf = (p) => {
+    const e = entryOf(p.id);
+    const canonical = canonicalUnitFor(p);
+    const pal = Number(e.pallets) || 0;
+    const loose = Number(e.loose) || 0;
+    const fromPallets = hasPallets(p) ? convertQty(p, pal, "pallet", canonical) : 0;
+    const fromLoose = canonical === "board" ? loose : convertQty(p, loose, "board", canonical);
+    return fromPallets + fromLoose;
+  };
+
+  const countedRows = rows.filter((p) => touched(p.id));
+  const commit = () => {
+    if (!countedRows.length) return;
+    const next = new Map(countedRows.map((p) => [p.id, countedOf(p)]));
+    onCommit(products.map((p) => (next.has(p.id) ? { ...p, onHand: next.get(p.id) } : p)));
+    onClose();
+  };
+
+  const Tick = ({ label, onClick }) => (
+    <button
+      onClick={onClick}
+      className="rounded-sm"
+      style={{ width: 34, height: 34, border: `1px solid ${C.kraftDark}`, background: "#fff", fontFamily: MONO, fontSize: 17, fontWeight: 800, lineHeight: 1 }}
+    >{label}</button>
+  );
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-auto p-3" style={{ background: "rgba(0,0,0,0.45)" }}>
+      <div className="rounded-sm w-full max-w-2xl my-4" style={{ background: C.paper, border: `1px solid ${C.kraftDark}` }}>
+        <div className="flex items-center justify-between px-4 py-3" style={{ background: C.ink, color: "#fff" }}>
+          <div style={{ fontWeight: 800, fontSize: 15 }}>Enter counts</div>
+          <button onClick={onClose}><X size={18} /></button>
+        </div>
+
+        <div className="px-4 pt-3 flex flex-wrap gap-2">
+          {[["all", "All"], ["wood", "Wood"], ["milled", "Milled"], ["paint", "Paint"], ["packing", "Packaging"]].map(([id, label]) => (
+            <button
+              key={id} onClick={() => setCat(id)}
+              className="px-3 py-1.5 rounded-sm text-xs"
+              style={{ fontFamily: MONO, background: cat === id ? C.ink : "transparent", color: cat === id ? "#fff" : C.faint, border: `1px solid ${cat === id ? C.ink : C.kraftDark}` }}
+            >{label}</button>
+          ))}
+        </div>
+
+        <div className="p-4 space-y-2">
+          {rows.map((p) => {
+            const canonical = canonicalUnitFor(p);
+            const e = entryOf(p.id);
+            const book = Number(p.onHand) || 0;
+            const counted = countedOf(p);
+            const diff = counted - book;
+            const on = touched(p.id);
+            const pal = hasPallets(p);
+            return (
+              <div key={p.id} className="rounded-sm px-3 py-2" style={{ background: C.panel, border: `1px solid ${on ? (diff === 0 ? C.moss : C.warn) : C.kraft}` }}>
+                <div className="flex items-baseline justify-between gap-2">
+                  <div style={{ fontWeight: 800, fontSize: 14 }}>{p.sku}</div>
+                  <div style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>
+                    book {num(book)} {unitLabel(canonical)}
+                    {pal ? ` · ${fmtConv(convertQty(p, book, canonical, "pallet"))} pallets` : ""}
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-end gap-3 mt-2">
+                  {pal && (
+                    <div>
+                      <div style={{ fontSize: 9.5, textTransform: "uppercase", letterSpacing: 0.6, color: C.faint, marginBottom: 3 }}>Pallets</div>
+                      <div className="flex items-center gap-1.5">
+                        <Tick label="−" onClick={() => setEntry(p.id, (cur) => ({ pallets: String(Math.max(0, (Number(cur.pallets) || 0) - 1)) }))} />
+                        <input
+                          inputMode="numeric" value={e.pallets}
+                          onChange={(ev) => setEntry(p.id, { pallets: ev.target.value })}
+                          style={{ ...inputStyle, width: 58, textAlign: "center", fontFamily: MONO, fontWeight: 800, fontSize: 16 }}
+                          placeholder="0"
+                        />
+                        <Tick label="+" onClick={() => setEntry(p.id, (cur) => ({ pallets: String((Number(cur.pallets) || 0) + 1) }))} />
+                      </div>
+                    </div>
+                  )}
+                  <div>
+                    <div style={{ fontSize: 9.5, textTransform: "uppercase", letterSpacing: 0.6, color: C.faint, marginBottom: 3 }}>
+                      {pal ? "Loose boards" : unitLabel(canonical)}
+                    </div>
+                    <input
+                      inputMode="numeric" value={e.loose}
+                      onChange={(ev) => setEntry(p.id, { loose: ev.target.value })}
+                      style={{ ...inputStyle, width: 88, fontFamily: MONO, fontSize: 15 }}
+                      placeholder="0"
+                    />
+                  </div>
+                  {on && (
+                    <div style={{ fontFamily: MONO, fontSize: 12, paddingBottom: 6, color: diff === 0 ? C.moss : C.warn }}>
+                      = {num(counted)} {unitLabel(canonical)}
+                      {diff === 0 ? " · matches" : ` · ${diff > 0 ? "+" : ""}${num(diff)} vs book`}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="px-4 pb-4 flex items-center gap-3">
+          <Btn kind="primary" onClick={commit} disabled={!countedRows.length} big>
+            <Check size={16} /> Commit {countedRows.length || ""} count{countedRows.length === 1 ? "" : "s"}
+          </Btn>
+          <Btn onClick={onClose}>Cancel</Btn>
+          <span className="text-xs" style={{ color: C.faint }}>Untouched rows are left alone.</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function InventoryTab({ products, onChange, invLog, activeId, setActiveId }) {
   const [group, setGroup] = useState("all");
   const [pinnedId, setPinnedId] = useState(null);
   const [countSheetOpen, setCountSheetOpen] = useState(false);
+  const [countEntryOpen, setCountEntryOpen] = useState(false);
   const active = products.find((p) => p.id === activeId) || null;
   useBackLayer(!!active, () => setActiveId(null));
 
@@ -3641,6 +3795,7 @@ function InventoryTab({ products, onChange, invLog, activeId, setActiveId }) {
       <div className="flex items-center justify-between mb-3">
         <div style={{ fontWeight: 800, fontSize: 18 }}>Inventory</div>
         <div className="flex gap-2">
+          <Btn onClick={() => setCountEntryOpen(true)}><ClipboardList size={14} /> Enter counts</Btn>
           <Btn onClick={() => setCountSheetOpen(true)}><Printer size={14} /> Count sheet</Btn>
           <Btn kind="primary" onClick={add}><Plus size={14} /> New item</Btn>
         </div>
@@ -3667,6 +3822,13 @@ function InventoryTab({ products, onChange, invLog, activeId, setActiveId }) {
       />
       {countSheetOpen && (
         <InventoryCountSheet products={products} group={group} onClose={() => setCountSheetOpen(false)} />
+      )}
+      {countEntryOpen && (
+        <InventoryCountEntry
+          products={products} group={group}
+          onCommit={(next) => onChange(next, { reason: "count", note: "Physical count" })}
+          onClose={() => setCountEntryOpen(false)}
+        />
       )}
     </div>
   );
@@ -6265,9 +6427,14 @@ function ShipLogTab({ products, onProductsChange, sortLog, onLogSort, onDeleteSo
     const canonical = canonicalUnitFor(p);
     return unitsFor(p).filter((u) => unitReaches(p, canonical, u));
   };
+  // Count in whatever unit Inventory leads with for that SKU — pallets for
+  // raw/sorted stock, boxes for milled goods — so the tally and the shelf
+  // never disagree about what one tap means.
   const preferredUnit = (p) => {
     const avail = unitsForRow(p);
-    return ["box", "pallet", "plank", "board"].find((u) => avail.includes(u)) || canonicalUnitFor(p);
+    return defaultUnitsFor(p).find((u) => avail.includes(u))
+      || ["box", "pallet", "plank", "board"].find((u) => avail.includes(u))
+      || canonicalUnitFor(p);
   };
 
   const addRow = (p) => {
