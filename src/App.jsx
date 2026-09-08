@@ -2210,6 +2210,54 @@ function WorkOrderBoard({ workOrders, customers, products, onOpen, onNew, onImpo
   );
 }
 
+/* The square-foot math the crew was redoing by hand on every order: what
+   one piece covers, how many pieces the line works out to, and which box
+   it packs into. Only states what the SKU can actually prove — a product
+   with no plank or box conversion set says so rather than showing a
+   number derived from nothing. */
+function LineMath({ product, qtySF, products }) {
+  if (!product) return null;
+  const sf = Number(qtySF) || 0;
+  const per = (unit) => (unitReaches(product, unit, "sf") ? convertQty(product, 1, unit, "sf") : null);
+  const sfPerPlank = per("plank");
+  const sfPerBoard = per("board");
+
+  const each = [];
+  if (sfPerPlank) each.push(`1 plank = ${fmtConv(sfPerPlank)} SF`);
+  if (sfPerBoard) each.push(`1 board = ${fmtConv(sfPerBoard)} SF`);
+
+  const totals = [];
+  if (sf > 0) {
+    if (sfPerPlank) totals.push(`${fmtConv(sf / sfPerPlank)} planks`);
+    if (sfPerBoard) totals.push(`${fmtConv(sf / sfPerBoard)} boards`);
+    if (unitReaches(product, "sf", "box")) {
+      const boxes = convertQty(product, sf, "sf", "box");
+      const box = products?.find((x) => x.id === product.boxProductId);
+      totals.push(`${fmtConv(boxes)} boxes${box ? ` · ${box.sku}` : ""}`);
+    }
+  }
+
+  if (!each.length && !totals.length) return null;
+  const missing = !unitReaches(product, "sf", "box");
+  return (
+    <div className="mt-1.5 px-2 py-1.5 rounded-sm" style={{ background: "#F3F5F0", border: `1px solid ${C.kraft}` }}>
+      {each.length > 0 && (
+        <div style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>{each.join("   ·   ")}</div>
+      )}
+      {totals.length > 0 && (
+        <div style={{ fontFamily: MONO, fontSize: 11.5, fontWeight: 700, color: C.ink, marginTop: each.length ? 2 : 0 }}>
+          {fmtConv(sf)} SF = {totals.join("  ·  ")}
+        </div>
+      )}
+      {missing && (
+        <div style={{ fontFamily: MONO, fontSize: 10, color: C.faint, marginTop: 2 }}>
+          set boards-per-box on {product.sku} to get box counts
+        </div>
+      )}
+    </div>
+  );
+}
+
 // One-line summary of a spec, for collapsed headers and the printed sheet.
 const specSummary = (spec) => {
   if (!spec) return "";
@@ -2560,6 +2608,7 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
                   onDisplayUnitChange={(u) => updateLine(line.id, { displayUnit: u })}
                   width={110}
                 />
+                <LineMath product={p} qtySF={line.qtySF} products={products} />
                 <input className="mt-2" style={inputStyle} placeholder="Note for this line" value={line.note || ""} onChange={(e) => updateLine(line.id, { note: e.target.value })} />
 
                 {/* Spec lives on the line, not the customer. One order can mix
@@ -3209,6 +3258,19 @@ function InventoryDetail({ product, products, invLog, onChange, onBack, onDelete
                     hand-built in the conversions list below. */}
                 <Field label="Planks per board"><input type="number" style={inputStyle} value={p.planksPerBoard ?? ""} placeholder="—" onChange={(e) => update({ planksPerBoard: e.target.value })} /></Field>
                 <Field label="Boards per box"><input type="number" style={inputStyle} value={p.boardsPerBox ?? ""} placeholder="—" onChange={(e) => update({ boardsPerBox: e.target.value })} /></Field>
+              </div>
+              {/* Which box this SKU actually packs into. Knowing a box holds
+                  16 boards doesn't say which box off the shelf to grab, and
+                  that was being worked out fresh on every order. */}
+              <div className="mt-2">
+                <Field label="Packs into">
+                  <select style={inputStyle} value={p.boxProductId || ""} onChange={(e) => update({ boxProductId: e.target.value })}>
+                    <option value="">— No box set —</option>
+                    {products.filter((x) => x.category === "packing" && !x.archived).map((x) => (
+                      <option key={x.id} value={x.id}>{x.sku} — {x.name}</option>
+                    ))}
+                  </select>
+                </Field>
               </div>
             </div>
 
