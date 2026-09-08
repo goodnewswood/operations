@@ -2003,7 +2003,7 @@ function Dashboard({ workOrders, products, sortLog, units, onOpenWO, goTab, goal
 /* Kanban view of the shop floor: one column per pipeline stage, drag a
    card between columns to move the job along. Same board the office side
    sees, so both halves of the business describe a job the same way. */
-function WorkOrderKanban({ workOrders, onOpen, onStatusChange }) {
+function WorkOrderKanban({ workOrders, products, onOpen, onStatusChange }) {
   const [draggedId, setDraggedId] = useState(null);
   const [overCol, setOverCol] = useState(null);
 
@@ -2052,9 +2052,14 @@ function WorkOrderKanban({ workOrders, onOpen, onStatusChange }) {
                   >
                     <div style={{ fontFamily: MONO, fontWeight: 700, fontSize: 12 }}>{w.number}</div>
                     <div className="mt-0.5" style={{ fontSize: 12, color: C.faint }}>{w.customerName || "No customer"}</div>
-                    <div className="mt-1" style={{ fontFamily: MONO, fontSize: 11, color: late ? C.redwood : C.faint }}>
-                      {late ? "\u26a0 " : ""}{w.readyByDate ? `ready ${w.readyByDate}` : `${w.lines?.length || 0} line${(w.lines?.length || 0) === 1 ? "" : "s"}`}
+                    <div className="mt-1" style={{ fontFamily: MONO, fontSize: 11, fontWeight: late ? 800 : 400, color: late ? C.redwood : C.ink }}>
+                      {late ? "\u26a0 " : ""}{w.readyByDate ? `ready ${w.readyByDate}` : "no ready date"}
                     </div>
+                    {woLineSummary(w, products, 2) && (
+                      <div className="mt-1" style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint, lineHeight: 1.45 }}>
+                        {woLineSummary(w, products, 2)}
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -2066,10 +2071,49 @@ function WorkOrderKanban({ workOrders, onOpen, onStatusChange }) {
   );
 }
 
-function WorkOrderBoard({ workOrders, customers, onOpen, onNew, onImport, onPushThrough, onStatusChange }) {
+// What a work order is actually for, in one line — the SKUs on it rather
+// than "3 lines", which says nothing when you're deciding what to run next.
+function woLineSummary(wo, products, max = 3) {
+  const lines = wo.lines || [];
+  if (!lines.length) return "";
+  const parts = lines.map((l) => {
+    const p = products?.find((x) => x.id === l.productId);
+    const label = p?.sku || (l.desc || "").trim() || "—";
+    const qty = Number(l.qtySF) || 0;
+    return qty ? `${label} ${fmtConv(qty)} SF` : label;
+  });
+  const head = parts.slice(0, max).join(" · ");
+  return parts.length > max ? `${head} +${parts.length - max} more` : head;
+}
+
+// Undated orders sort to the bottom rather than the top: an empty string
+// sorts before every real date, which would have parked everything with
+// no ready date ahead of the job shipping tomorrow.
+const byReadyDate = (a, b) => {
+  const A = a.readyByDate || "", B = b.readyByDate || "";
+  if (!A && !B) return 0;
+  if (!A) return 1;
+  if (!B) return -1;
+  return A < B ? -1 : A > B ? 1 : 0;
+};
+
+function WorkOrderBoard({ workOrders, customers, products, onOpen, onNew, onImport, onPushThrough, onStatusChange }) {
   const [filter, setFilter] = useState("active");
-  const [view, setView] = useState("cards");
-  const shown = workOrders.filter((w) => (filter === "active" ? w.status !== "shipped" : true));
+  // Board is what the floor actually reads — the pipeline, not a wall of
+  // cards. The choice sticks so switching to Cards isn't undone on reload.
+  const [view, _setView] = useState(() => {
+    try { return localStorage.getItem("gnws-nav-woview") || "board"; } catch { return "board"; }
+  });
+  const setView = (v) => { _setView(v); try { localStorage.setItem("gnws-nav-woview", v); } catch { /* private browsing */ } };
+  const [sort, setSort] = useState("ready");
+
+  const sorted = workOrders
+    .filter((w) => (filter === "active" ? w.status !== "shipped" : true))
+    .slice()
+    .sort(sort === "ready" ? byReadyDate
+      : sort === "number" ? (a, b) => String(b.number || "").localeCompare(String(a.number || ""))
+      : (a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+  const shown = sorted;
 
   return (
     <div>
@@ -2081,6 +2125,16 @@ function WorkOrderBoard({ workOrders, customers, onOpen, onNew, onImport, onPush
             key={id} onClick={() => setFilter(id)}
             className="px-3 py-1.5 rounded-sm text-xs"
             style={{ fontFamily: MONO, background: filter === id ? C.ink : "transparent", color: filter === id ? "#fff" : C.faint, border: `1px solid ${filter === id ? C.ink : C.kraftDark}` }}
+          >
+            {label}
+          </button>
+        ))}
+        <span className="text-xs ml-2" style={{ fontFamily: MONO, color: C.faint }}>sort</span>
+        {[["ready", "Ready by"], ["number", "Number"], ["date", "Created"]].map(([id, label]) => (
+          <button
+            key={id} onClick={() => setSort(id)}
+            className="px-3 py-1.5 rounded-sm text-xs"
+            style={{ fontFamily: MONO, background: sort === id ? C.moss : "transparent", color: sort === id ? "#fff" : C.faint, border: `1px solid ${sort === id ? C.moss : C.kraftDark}` }}
           >
             {label}
           </button>
@@ -2099,7 +2153,7 @@ function WorkOrderBoard({ workOrders, customers, onOpen, onNew, onImport, onPush
       </div>
 
       {view === "board" && (
-        <WorkOrderKanban workOrders={shown} onOpen={onOpen} onStatusChange={onStatusChange} />
+        <WorkOrderKanban workOrders={shown} products={products} onOpen={onOpen} onStatusChange={onStatusChange} />
       )}
 
       {view === "cards" && (shown.length === 0 ? (
@@ -2124,7 +2178,20 @@ function WorkOrderBoard({ workOrders, customers, onOpen, onNew, onImport, onPush
                   </span>
                 </div>
                 <div className="mt-1 text-sm" style={{ color: C.faint }}>{w.customerName || "No customer"}</div>
-                <div className="mt-2 text-xs" style={{ fontFamily: MONO, color: C.faint }}>{w.lines?.length || 0} line{(w.lines?.length || 0) === 1 ? "" : "s"} · {w.date}</div>
+                {(() => {
+                  const late = w.readyByDate && w.readyByDate < today() && w.status !== "shipped";
+                  return (
+                    <div className="mt-1.5 text-xs" style={{ fontFamily: MONO, fontWeight: late ? 800 : 400, color: late ? C.redwood : C.ink }}>
+                      {late ? "⚠ " : ""}{w.readyByDate ? `ready ${w.readyByDate}` : "no ready date"}
+                    </div>
+                  );
+                })()}
+                {woLineSummary(w, products) && (
+                  <div className="mt-1.5 text-xs" style={{ fontFamily: MONO, color: C.faint, lineHeight: 1.5 }}>
+                    {woLineSummary(w, products)}
+                  </div>
+                )}
+                <div className="mt-1.5 text-xs" style={{ fontFamily: MONO, color: C.faint }}>{w.lines?.length || 0} line{(w.lines?.length || 0) === 1 ? "" : "s"} · {w.date}</div>
               </button>
               {w.status !== "shipped" && (
                 <button
@@ -8531,7 +8598,7 @@ export default function App() {
               onStartWork={startWork}
             />
           ) : (
-            <WorkOrderBoard workOrders={workOrders} customers={customers} onOpen={(id) => setActiveWOId(id)} onNew={newWorkOrder} onImport={() => setImportOpen(true)} onPushThrough={pushWOThrough} onStatusChange={(id, status) => setWorkOrders(workOrders.map((w) => (w.id === id
+            <WorkOrderBoard workOrders={workOrders} customers={customers} products={products} onOpen={(id) => setActiveWOId(id)} onNew={newWorkOrder} onImport={() => setImportOpen(true)} onPushThrough={pushWOThrough} onStatusChange={(id, status) => setWorkOrders(workOrders.map((w) => (w.id === id
               ? { ...w, status, ...(status === "shipped" ? { shippedAt: w.shippedAt || new Date().toISOString() } : { shippedAt: "" }) }
               : w)))} />
           )
