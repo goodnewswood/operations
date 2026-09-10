@@ -2645,6 +2645,95 @@ function ClockBadge({ wo, goals }) {
   );
 }
 
+/* How long a work order has been open, and how long until it has to ship.
+
+   "Open for" runs from when the order was created. Orders made before
+   createdAt existed only carry a date, so those read in whole days: an
+   hour count from midnight would be a number that looks exact and isn't.
+   Once an order ships, it stops at the ship moment.
+
+   The ship countdown runs to the ship date at the ship time. With no
+   time set it counts to 5:00 PM, the end of the working day, and says
+   so, so nobody reads a made-up deadline as a real one. */
+const DEFAULT_SHIP_TIME = "17:00";
+
+function woOpenedAt(wo) {
+  const t = Date.parse(wo.createdAt || "");
+  if (Number.isFinite(t)) return { at: t, exact: true };
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(wo.date || "");
+  return m ? { at: new Date(+m[1], +m[2] - 1, +m[3]).getTime(), exact: false } : null;
+}
+
+function woShipDeadline(wo) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(wo.shipDate || "");
+  if (!m) return null;
+  const [hh, mi] = (wo.shipTime || DEFAULT_SHIP_TIME).split(":").map(Number);
+  return new Date(+m[1], +m[2] - 1, +m[3], hh || 0, mi || 0).getTime();
+}
+
+// Days and hours when it's more than a day out, hours and minutes inside
+// a day, since that's when the minutes start to matter.
+function fmtSpan(ms) {
+  const mins = Math.floor(Math.abs(ms) / 60000);
+  const d = Math.floor(mins / 1440), h = Math.floor((mins % 1440) / 60), m = mins % 60;
+  return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`;
+}
+
+function WoTimers({ wo }) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setTick((n) => n + 1), 30000);
+    return () => clearInterval(t);
+  }, []);
+  const now = Date.now();
+  const shipped = wo.status === "shipped";
+  const shippedAt = Date.parse(wo.shippedAt || "");
+  const end = shipped && Number.isFinite(shippedAt) ? shippedAt : now;
+
+  const opened = woOpenedAt(wo);
+  const deadline = woShipDeadline(wo);
+
+  let openText = "no open date";
+  if (opened) {
+    const ms = Math.max(0, end - opened.at);
+    openText = opened.exact ? fmtSpan(ms) : `${Math.floor(ms / 86400000)} day${Math.floor(ms / 86400000) === 1 ? "" : "s"}`;
+  }
+
+  let shipLabel = "SHIPS IN", shipText = "no ship date", shipColor = "#fff", shipSub = "";
+  if (deadline) {
+    const when = new Date(deadline);
+    shipSub = `${when.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}, ${when.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}${wo.shipTime ? "" : " (no ship time set)"}`;
+    if (shipped && Number.isFinite(shippedAt)) {
+      const diff = deadline - shippedAt;
+      shipLabel = "SHIPPED";
+      shipText = diff >= 0 ? `${fmtSpan(diff)} early` : `${fmtSpan(diff)} late`;
+      shipColor = diff >= 0 ? C.mossLight : "#E8A08F";
+    } else if (deadline < now) {
+      shipLabel = "PAST SHIP TIME";
+      shipText = `${fmtSpan(now - deadline)} over`;
+      shipColor = "#E8A08F";
+    } else {
+      shipText = fmtSpan(deadline - now);
+      shipColor = deadline - now < 86400000 ? C.gold : "#fff";
+    }
+  }
+
+  const tile = (label, value, color, sub) => (
+    <div className="flex-1 rounded-sm px-3 py-2" style={{ background: "#2a241d", border: "1px solid #4a423a", minWidth: 150 }}>
+      <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: "0.08em", color: C.kraftDark }}>{label}</div>
+      <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 800, color, lineHeight: 1.15 }}>{value}</div>
+      {sub && <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.kraftDark }}>{sub}</div>}
+    </div>
+  );
+
+  return (
+    <div className="mt-3 flex flex-wrap gap-2">
+      {tile(shipped ? "WAS OPEN" : "OPEN FOR", openText, "#fff", opened ? `since ${new Date(opened.at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}` : "")}
+      {tile(shipLabel, shipText, shipColor, shipSub)}
+    </div>
+  );
+}
+
 function WorkOrderDetail({ wo, customers, products, goals, sortLog, onChange, onDelete, onBack, team, whoWorking, setWhoWorking, onAddTeamMember, onUpdateCustomerSpec, onStartWork }) {
   const customer = customers.find((c) => c.id === wo.customerId);
   const update = (patch) => onChange({ ...wo, ...patch });
@@ -2771,6 +2860,8 @@ function WorkOrderDetail({ wo, customers, products, goals, sortLog, onChange, on
           </div>
         )}
 
+        <WoTimers wo={wo} />
+
         <div className="mt-4 flex gap-2 flex-wrap">
           {ACTIVE_WO_STATUSES.includes(wo.status) && (
             <Btn kind="primary" onClick={() => setStartWorkOpen(true)} big>
@@ -2793,6 +2884,7 @@ function WorkOrderDetail({ wo, customers, products, goals, sortLog, onChange, on
         <div className="flex flex-wrap gap-3">
           <Field label="Ready by" w={160}><input type="date" style={inputStyle} value={wo.readyByDate || ""} onChange={(e) => update({ readyByDate: e.target.value })} /></Field>
           <Field label="Ship date" w={160}><input type="date" style={inputStyle} value={wo.shipDate || ""} onChange={(e) => update({ shipDate: e.target.value })} /></Field>
+          <Field label="Ship time" w={120}><input type="time" style={inputStyle} value={wo.shipTime || ""} onChange={(e) => update({ shipTime: e.target.value })} /></Field>
           <Field label="Ship via" w={160}><input style={inputStyle} value={wo.shipVia || ""} onChange={(e) => update({ shipVia: e.target.value })} placeholder="Dry van, pickup…" /></Field>
         </div>
         <Field label="General notes">
@@ -8620,6 +8712,7 @@ export default function App() {
     const w = {
       id: uid(), number: nextNumber(workOrders, "WO"),
       customerId: "", customerName: "", status: "not_started", brand: DEFAULT_BRAND, date: today(),
+      createdAt: new Date().toISOString(),
       lines: [], readyByDate: "", shipDate: "", shipVia: "", notes: "",
     };
     setWorkOrders([w, ...workOrders]);
@@ -8706,7 +8799,7 @@ export default function App() {
     const w = {
       id: uid(), number: suffix ? `${baseNumber}-${suffix}` : baseNumber,
       customerId: matchedCustomerId || "", customerName: cust?.company || parsed.customerName || "",
-      status: "not_started", date: today(),
+      status: "not_started", date: today(), createdAt: new Date().toISOString(),
       lines, readyByDate: "", shipDate: parsed.shipDate || "", shipVia: "",
       notes: [parsed.notes, fileName ? `Imported from invoice: ${fileName}` : "Imported from pasted order text", unmatchedFlag].filter(Boolean).join("\n"),
     };
