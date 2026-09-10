@@ -2003,7 +2003,7 @@ function Dashboard({ workOrders, products, sortLog, units, onOpenWO, goTab, goal
 /* Kanban view of the shop floor: one column per pipeline stage, drag a
    card between columns to move the job along. Same board the office side
    sees, so both halves of the business describe a job the same way. */
-function WorkOrderKanban({ workOrders, products, onOpen, onStatusChange }) {
+function WorkOrderKanban({ workOrders, products, goals, onOpen, onStatusChange }) {
   const [draggedId, setDraggedId] = useState(null);
   const [overCol, setOverCol] = useState(null);
 
@@ -2060,6 +2060,7 @@ function WorkOrderKanban({ workOrders, products, onOpen, onStatusChange }) {
                         {woLineSummary(w, products, 2)}
                       </div>
                     )}
+                    <ClockBadge wo={w} goals={goals} />
                   </div>
                 );
               })}
@@ -2097,7 +2098,7 @@ const byReadyDate = (a, b) => {
   return A < B ? -1 : A > B ? 1 : 0;
 };
 
-function WorkOrderBoard({ workOrders, customers, products, onOpen, onNew, onImport, onPushThrough, onStatusChange }) {
+function WorkOrderBoard({ workOrders, customers, products, goals, onOpen, onNew, onImport, onPushThrough, onStatusChange }) {
   const [filter, setFilter] = useState("active");
   // Board is what the floor actually reads — the pipeline, not a wall of
   // cards. The choice sticks so switching to Cards isn't undone on reload.
@@ -2153,7 +2154,7 @@ function WorkOrderBoard({ workOrders, customers, products, onOpen, onNew, onImpo
       </div>
 
       {view === "board" && (
-        <WorkOrderKanban workOrders={shown} products={products} onOpen={onOpen} onStatusChange={onStatusChange} />
+        <WorkOrderKanban workOrders={shown} products={products} goals={goals} onOpen={onOpen} onStatusChange={onStatusChange} />
       )}
 
       {view === "cards" && (shown.length === 0 ? (
@@ -2192,6 +2193,7 @@ function WorkOrderBoard({ workOrders, customers, products, onOpen, onNew, onImpo
                   </div>
                 )}
                 <div className="mt-1.5 text-xs" style={{ fontFamily: MONO, color: C.faint }}>{w.lines?.length || 0} line{(w.lines?.length || 0) === 1 ? "" : "s"} · {w.date}</div>
+                <ClockBadge wo={w} goals={goals} />
               </button>
               {w.status !== "shipped" && (
                 <button
@@ -2408,7 +2410,242 @@ function StartWorkModal({ wo, products, team, onAddTeamMember, onStart, onClose 
   );
 }
 
-function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, team, whoWorking, setWhoWorking, onAddTeamMember, onUpdateCustomerSpec, onStartWork }) {
+/* ---------------- Labor estimate & job clock ----------------
+   What a work order should take in man-hours, step by step, and a clock
+   running against it. The estimate is square feet on each line times the
+   steps checked on that line, divided by how many square feet one person
+   gets through in an hour at that step.
+
+   The clock lives on the work order itself, not on a phone, so everyone
+   (office included) sees the same running number, and it keeps counting
+   if the app is closed: it stores when it started and how many people
+   are on it, never a ticking value. */
+
+// Square feet per man-hour for each step, measured on the InStone run
+// (31 timed runs on the production travelers, $25/man-hour, 11,040 SF
+// shipped). Paint carries the dry/rack time too, since only painted stock
+// gets racked and drying has no step of its own. Plane, trim and ship
+// weren't broken out on those travelers, so they have no baseline and
+// stay out of the total until a rate is set for them in Settings.
+const BASELINE_SF_PER_MANHOUR = {
+  sorting: 266, chop: 262, metal: 419, rip: 267, resaw: 196,
+  mold: 535, brush: 229, paint: 56, distress: 229, pack: 179,
+};
+
+function stepSfRate(step, goals) {
+  const set = Number(goals?.stepRates?.[step]);
+  if (set > 0) return { rate: set, source: "set" };
+  const base = BASELINE_SF_PER_MANHOUR[step];
+  return base ? { rate: base, source: "baseline" } : { rate: 0, source: "none" };
+}
+
+function estimateWorkOrder(wo, goals) {
+  const byStep = {};
+  let unsized = 0;
+  (wo.lines || []).forEach((line) => {
+    const steps = PROCESS_STEPS.filter((s) => line.steps?.[s.id]);
+    if (!steps.length) return;
+    const sf = Number(line.qtySF) || 0;
+    if (!sf) { unsized += 1; return; }
+    steps.forEach((s) => {
+      if (!byStep[s.id]) byStep[s.id] = { step: s.id, label: s.label, sf: 0, hours: 0, ...stepSfRate(s.id, goals) };
+      byStep[s.id].sf += sf;
+      if (byStep[s.id].rate > 0) byStep[s.id].hours += sf / byStep[s.id].rate;
+    });
+  });
+  const rows = PROCESS_STEPS.map((s) => byStep[s.id]).filter(Boolean);
+  return { rows, hours: rows.reduce((a, r) => a + r.hours, 0), missing: rows.filter((r) => !r.rate), unsized };
+}
+
+// Banked man-seconds plus the running stretch times the headcount on it.
+function clockManSeconds(clock, now = Date.now()) {
+  const banked = Number(clock?.bankedManSec) || 0;
+  if (!clock?.runningSince) return banked;
+  const since = Date.parse(clock.runningSince);
+  if (!Number.isFinite(since)) return banked;
+  return banked + Math.max(0, (now - since) / 1000) * (Number(clock.crew) || 1);
+}
+
+// Man-hours already logged in work batches against this order, by step.
+// A batch timer is wall-clock time, so it's multiplied by how many people
+// were on the batch; older entries only name the crew in `by`.
+function loggedManSecondsByStep(sortLog, woId) {
+  const out = {};
+  (sortLog || []).forEach((e) => {
+    if (e.workOrderId !== woId || !(Number(e.seconds) > 0)) return;
+    const crew = e.crew?.length || String(e.by || "").split(" + ").filter(Boolean).length || 1;
+    const k = logStep(e);
+    out[k] = (out[k] || 0) + Number(e.seconds) * crew;
+  });
+  return out;
+}
+
+const fmtManHours = (manSec) => ((Number(manSec) || 0) / 3600).toFixed(1);
+
+function LaborPanel({ wo, goals, sortLog, onClockChange }) {
+  const est = estimateWorkOrder(wo, goals);
+  const clock = wo.clock || {};
+  const running = !!clock.runningSince;
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!running) return;
+    const t = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [running]);
+  const [editing, setEditing] = useState(false);
+  const [editHrs, setEditHrs] = useState("");
+
+  const now = Date.now();
+  const actual = clockManSeconds(clock, now);
+  const estSec = est.hours * 3600;
+  const pct = estSec > 0 ? actual / estSec : 0;
+  const over = estSec > 0 && actual > estSec;
+  const crew = Math.max(1, Number(clock.crew) || 1);
+  const loggedBy = loggedManSecondsByStep(sortLog, wo.id);
+  const loggedTotal = Object.values(loggedBy).reduce((a, b) => a + b, 0);
+
+  const set = (patch) => onClockChange({ crew, bankedManSec: Number(clock.bankedManSec) || 0, runningSince: clock.runningSince || "", ...patch });
+  const start = () => set({ runningSince: new Date().toISOString() });
+  const pause = () => set({ bankedManSec: clockManSeconds(clock), runningSince: "" });
+  // Changing headcount mid-run banks the stretch so far at the old
+  // headcount first, so hours already on the clock aren't repriced.
+  const setCrew = (n) => {
+    const next = Math.max(1, n);
+    set(running ? { crew: next, bankedManSec: clockManSeconds(clock), runningSince: new Date().toISOString() } : { crew: next });
+  };
+  const applyEdit = () => {
+    const h = Number(editHrs);
+    if (Number.isFinite(h) && h >= 0) set({ bankedManSec: h * 3600, ...(running ? { runningSince: new Date().toISOString() } : {}) });
+    setEditing(false);
+  };
+  const reset = () => { if (window.confirm("Reset the job clock to zero?")) set({ bankedManSec: 0, runningSince: "" }); };
+
+  const stepIds = PROCESS_STEPS.map((s) => s.id).filter((id) => est.rows.some((r) => r.step === id) || loggedBy[id]);
+  const cell = { padding: "4px 6px", fontFamily: MONO, fontSize: 11.5, textAlign: "right" };
+  const sq = { width: 30, height: 30, border: `1px solid ${C.kraftDark}`, background: "#fff", fontFamily: MONO, fontSize: 16, fontWeight: 800, lineHeight: 1, borderRadius: 3 };
+
+  return (
+    <div className="rounded-sm p-4 mb-4" style={{ background: C.panel, border: `1px solid ${over ? C.redwood : C.kraftDark}` }}>
+      <div className="flex items-center gap-1.5 mb-2" style={{ fontWeight: 800 }}>
+        <Timer size={16} style={{ color: C.faint }} /> Labor
+      </div>
+
+      <div className="flex items-end justify-between flex-wrap gap-2">
+        <div>
+          <div style={{ fontFamily: MONO, fontSize: 30, fontWeight: 800, lineHeight: 1, color: over ? C.redwood : running ? C.moss : C.ink }}>
+            {fmtManHours(actual)}
+            <span style={{ fontSize: 15, color: C.faint, fontWeight: 700 }}> / {estSec > 0 ? fmtManHours(estSec) : "?"} man-hrs</span>
+          </div>
+          <div className="mt-1" style={{ fontFamily: MONO, fontSize: 11, color: over ? C.redwood : C.faint }}>
+            {estSec > 0
+              ? (over ? `${fmtManHours(actual - estSec)} hrs over the estimate` : `${fmtManHours(estSec - actual)} hrs left · ${Math.round(pct * 100)}% used`)
+              : "no estimate yet"}
+          </div>
+        </div>
+        {running && (
+          <div style={{ fontFamily: MONO, fontSize: 12, color: C.moss, fontWeight: 700 }}>
+            ● running {fmtDuration((now - Date.parse(clock.runningSince)) / 1000)} · {crew} on it
+          </div>
+        )}
+      </div>
+
+      {estSec > 0 && (
+        <div className="mt-2 rounded-sm overflow-hidden" style={{ height: 8, background: C.kraft }}>
+          <div style={{ width: `${Math.min(100, pct * 100)}%`, height: "100%", background: over ? C.redwood : C.moss }} />
+        </div>
+      )}
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {running
+          ? <Btn kind="ghost" onClick={pause}><Pause size={13} /> Pause</Btn>
+          : <Btn kind="moss" onClick={start}><Play size={13} /> {actual > 0 ? "Resume" : "Start job clock"}</Btn>}
+        <div className="flex items-center gap-1.5 px-1">
+          <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>crew</span>
+          <button style={sq} onClick={() => setCrew(crew - 1)}>−</button>
+          <span style={{ fontFamily: MONO, fontWeight: 800, fontSize: 16, minWidth: 22, textAlign: "center" }}>{crew}</span>
+          <button style={sq} onClick={() => setCrew(crew + 1)}>+</button>
+        </div>
+        <Btn onClick={() => { setEditing(!editing); setEditHrs(fmtManHours(actual)); }}><Clock size={13} /> Edit hours</Btn>
+        <Btn onClick={reset}><RefreshCw size={13} /> Reset</Btn>
+      </div>
+      {editing && (
+        <div className="mt-2 flex items-center gap-2">
+          <input type="number" style={{ ...inputStyle, width: 90 }} value={editHrs} onChange={(e) => setEditHrs(e.target.value)} />
+          <span style={{ fontFamily: MONO, fontSize: 12 }}>man-hrs</span>
+          <Btn kind="primary" onClick={applyEdit}><Check size={13} /> Set</Btn>
+        </div>
+      )}
+
+      {stepIds.length > 0 && (
+        <div className="mt-3 overflow-x-auto">
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ borderBottom: `1px solid ${C.kraftDark}` }}>
+                {["Step", "SF", "SF/man-hr", "Estimate", "Logged"].map((h, i) => (
+                  <th key={h} style={{ ...cell, textAlign: i === 0 ? "left" : "right", fontSize: 10, color: C.faint, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5 }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {stepIds.map((id) => {
+                const r = est.rows.find((x) => x.step === id);
+                const logged = loggedBy[id] || 0;
+                const stepOver = r?.hours > 0 && logged > r.hours * 3600;
+                return (
+                  <tr key={id} style={{ borderBottom: `1px solid ${C.kraft}` }}>
+                    <td style={{ ...cell, textAlign: "left", fontFamily: "inherit", fontSize: 13 }}>{PROCESS_STEPS.find((s) => s.id === id)?.label || id}</td>
+                    <td style={cell}>{r ? fmtConv(r.sf) : ""}</td>
+                    <td style={{ ...cell, color: r?.rate ? C.faint : C.warn }}>{r ? (r.rate ? `${num(r.rate)}${r.source === "set" ? " set" : ""}` : "no rate") : ""}</td>
+                    <td style={{ ...cell, fontWeight: 700 }}>{r?.rate ? fmtManHours(r.hours * 3600) : ""}</td>
+                    <td style={{ ...cell, color: stepOver ? C.redwood : C.ink }}>{logged ? fmtManHours(logged) : ""}</td>
+                  </tr>
+                );
+              })}
+              <tr>
+                <td style={{ ...cell, textAlign: "left", fontFamily: "inherit", fontSize: 13, fontWeight: 800 }}>Total</td>
+                <td style={cell} />
+                <td style={cell} />
+                <td style={{ ...cell, fontWeight: 800 }}>{fmtManHours(estSec)}</td>
+                <td style={{ ...cell, fontWeight: 800 }}>{loggedTotal ? fmtManHours(loggedTotal) : ""}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div className="mt-2 space-y-0.5" style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint }}>
+        {est.rows.length === 0 && (wo.lines || []).length > 0 && <div>Check the process steps on each line to get an estimate.</div>}
+        {est.missing.length > 0 && <div style={{ color: C.warn }}>No rate for {est.missing.map((r) => r.label).join(", ")}. Set one in Settings to count it.</div>}
+        {est.unsized > 0 && <div style={{ color: C.warn }}>{est.unsized} line{est.unsized === 1 ? " has" : "s have"} steps checked but no quantity.</div>}
+        {loggedTotal > 0 && <div>Logged = time from work batches tied to this order. The clock above is separate.</div>}
+      </div>
+    </div>
+  );
+}
+
+// Small running-clock line for the work order list, so a job's hours are
+// visible without opening it. Only shows once a clock has been used.
+function ClockBadge({ wo, goals }) {
+  const c = wo.clock;
+  const running = !!c?.runningSince;
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!running) return;
+    const t = setInterval(() => setTick((n) => n + 1), 15000);
+    return () => clearInterval(t);
+  }, [running]);
+  const actual = clockManSeconds(c);
+  if (!running && !(actual > 0)) return null;
+  const est = estimateWorkOrder(wo, goals).hours * 3600;
+  const over = est > 0 && actual > est;
+  return (
+    <div className="mt-1" style={{ fontFamily: MONO, fontSize: 10.5, fontWeight: 700, color: over ? C.redwood : running ? C.moss : C.faint }}>
+      {running ? "● " : ""}{fmtManHours(actual)}{est > 0 ? ` / ${fmtManHours(est)}` : ""} man-hrs
+    </div>
+  );
+}
+
+function WorkOrderDetail({ wo, customers, products, goals, sortLog, onChange, onDelete, onBack, team, whoWorking, setWhoWorking, onAddTeamMember, onUpdateCustomerSpec, onStartWork }) {
   const customer = customers.find((c) => c.id === wo.customerId);
   const update = (patch) => onChange({ ...wo, ...patch });
   const [bolOpen, setBolOpen] = useState(false);
@@ -2562,6 +2799,8 @@ function WorkOrderDetail({ wo, customers, products, onChange, onDelete, onBack, 
           <textarea style={{ ...inputStyle, minHeight: 70, marginTop: 8 }} value={wo.notes || ""} onChange={(e) => update({ notes: e.target.value })} placeholder="Anything the crew needs to know…" />
         </Field>
       </div>
+
+      <LaborPanel wo={wo} goals={goals} sortLog={sortLog} onClockChange={(clock) => update({ clock })} />
 
       <div className="rounded-sm overflow-hidden mb-4" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
         <div className="px-4 py-3 flex items-center justify-between" style={{ borderBottom: `1px solid ${C.kraftDark}` }}>
@@ -2787,6 +3026,26 @@ function SettingsModal({ team, onAddTeamMember, onRemoveTeamMember, goals, onGoa
               placeholder="Add name" onKeyDown={(e) => { if (e.key === "Enter" && newName.trim()) { onAddTeamMember(newName.trim()); setNewName(""); } }}
             />
             <Btn onClick={() => { if (newName.trim()) { onAddTeamMember(newName.trim()); setNewName(""); } }}><Plus size={14} /> Add</Btn>
+          </div>
+        </div>
+
+        <div className="mb-5">
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 2 }}>Estimating rates</div>
+          <p className="text-xs mb-2" style={{ color: C.faint }}>
+            Square feet one person gets through per hour at each step. Work order labor estimates use these. Blank uses the baseline measured on the InStone run.
+          </p>
+          <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">
+            {PROCESS_STEPS.map((s) => (
+              <label key={s.id} className="flex items-center justify-between gap-2 text-sm">
+                <span>{s.label}</span>
+                <input
+                  type="number" style={{ ...inputStyle, width: 80, padding: "3px 6px" }}
+                  value={goals?.stepRates?.[s.id] ?? ""}
+                  placeholder={BASELINE_SF_PER_MANHOUR[s.id] ? String(BASELINE_SF_PER_MANHOUR[s.id]) : "none"}
+                  onChange={(e) => onGoalsChange({ ...goals, stepRates: { ...(goals?.stepRates || {}), [s.id]: e.target.value } })}
+                />
+              </label>
+            ))}
           </div>
         </div>
 
@@ -8653,14 +8912,14 @@ export default function App() {
         {tab === "orders" && ordersSubTab === "workorders" && (
           activeWO ? (
             <WorkOrderDetail
-              wo={activeWO} customers={customers} products={products}
+              wo={activeWO} customers={customers} products={products} goals={goals} sortLog={sortLog}
               onChange={updateWO} onDelete={() => deleteWO(activeWO.id)} onBack={() => setActiveWOId(null)}
               team={team} whoWorking={whoWorking} setWhoWorking={setWhoWorking} onAddTeamMember={addTeamMember}
               onUpdateCustomerSpec={(customerId, patch) => setCustomers(customers.map((c) => (c.id === customerId ? { ...c, spec: { ...c.spec, ...patch } } : c)))}
               onStartWork={startWork}
             />
           ) : (
-            <WorkOrderBoard workOrders={workOrders} customers={customers} products={products} onOpen={(id) => setActiveWOId(id)} onNew={newWorkOrder} onImport={() => setImportOpen(true)} onPushThrough={pushWOThrough} onStatusChange={(id, status) => setWorkOrders(workOrders.map((w) => (w.id === id
+            <WorkOrderBoard workOrders={workOrders} customers={customers} products={products} goals={goals} onOpen={(id) => setActiveWOId(id)} onNew={newWorkOrder} onImport={() => setImportOpen(true)} onPushThrough={pushWOThrough} onStatusChange={(id, status) => setWorkOrders(workOrders.map((w) => (w.id === id
               ? { ...w, status, ...(status === "shipped" ? { shippedAt: w.shippedAt || new Date().toISOString() } : { shippedAt: "" }) }
               : w)))} />
           )
