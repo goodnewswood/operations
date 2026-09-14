@@ -1076,9 +1076,12 @@ function nextNumber(records, prefix) {
   const year = now.getFullYear();
   const dayOfYear = Math.floor((now - new Date(year, 0, 1)) / 86400000) + 1;
   const dayStr = String(dayOfYear).padStart(3, "0");
-  const re = new RegExp(`^${prefix}-${year}-${dayStr}(\\d+)$`);
+  // A number can carry text after it ("WO-2026-2571-550 Bds 186N"), and
+  // those still use up their sequence digit. Matching only bare numbers
+  // skipped them and handed the same number out twice.
+  const re = new RegExp(`^${prefix}-${year}-${dayStr}(\\d+)(?:-.*)?$`);
   const maxSeq = records.reduce((max, r) => {
-    const m = re.exec(r.number || "");
+    const m = re.exec((r.number || "").trim());
     return m ? Math.max(max, Number(m[1])) : max;
   }, 0);
   return `${prefix}-${year}-${dayStr}${maxSeq + 1}`;
