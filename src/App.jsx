@@ -8573,18 +8573,63 @@ export default function App() {
     } catch (e) { return null; }
   };
 
+  // One storage conversation per key at a time. A sync's read landing in
+  // the middle of a save for the same key can come back with the copy from
+  // just before the save, and putting that on screen quietly undoes the
+  // edit that was being saved.
+  const keyLocksRef = useRef({});
+  const withKeyLock = (key, fn) => {
+    const run = (keyLocksRef.current[key] || Promise.resolve()).then(fn);
+    keyLocksRef.current[key] = run.catch(() => {});
+    return run;
+  };
+
+  // Values that came straight from storage, so the save effect knows not
+  // to queue them right back up as if someone had edited them. Used once
+  // and cleared: an undo can later put the very same value back on screen,
+  // and that one does need saving.
+  const fromStorageRef = useRef({});
+
+  // Put a newer copy from storage on screen without losing anything typed,
+  // dragged or clicked while it was on its way. If nothing local is queued
+  // for this key, storage's copy simply wins. If something is, it gets
+  // merged on top of storage's copy and stays queued, now based on that
+  // copy, so the eventual save merges against the right starting point
+  // (see the note on writeKey).
+  const applyFromStorage = (key, theirs) => {
+    const c = collectionsRef.current.find((x) => x.key === key);
+    if (!c) return;
+    if (c.arr && !Array.isArray(theirs)) return;
+    const entry = pendingRef.current[key];
+    const seen = c.get();
+    let next = theirs;
+    if (entry) {
+      // Goals is one object, not a list; the local edit is the newer one.
+      next = c.arr ? mergeCollections(entry.base, entry.value, theirs) : entry.value;
+      if (next !== entry.value) pendingRef.current[key] = { value: next, base: theirs };
+    }
+    baselineRef.current[key] = theirs;
+    if (next === seen) return;
+    if (!entry) fromStorageRef.current[key] = theirs;
+    // A change can still be on its way to the screen when this runs (set,
+    // but not drawn yet). If what's there isn't what we looked at, fold
+    // that change in too rather than painting over it; it gets saved
+    // like any other edit, against storage's copy.
+    c.set((prev) => (prev === seen ? next : c.arr ? mergeCollections(seen, prev, next) : prev));
+  };
+
   // Pull everything down, replacing what's on screen. Safe to call any
-  // time: pending edits are flushed first so nothing in flight is lost.
+  // time: pending edits are flushed first, and anything edited while the
+  // pull is still coming in is merged in rather than overwritten.
   const syncNow = async ({ silent = false } = {}) => {
     if (!silent) setSyncState("saving");
     await flushSaves();
-    for (const c of collectionsRef.current) {
+    // All at once rather than one after another, so the stretch where the
+    // screen is being refreshed is a single round trip, not eleven.
+    await Promise.all(collectionsRef.current.map((c) => withKeyLock(c.key, async () => {
       const d = await readKey(c.key);
-      if (d == null) continue;
-      baselineRef.current[c.key] = d;
-      if (c.arr) { if (Array.isArray(d)) c.set(d); }
-      else c.set(d);
-    }
+      if (d != null) applyFromStorage(c.key, d);
+    })));
     setRemoteAhead(false);
     setLastSyncedAt(Date.now());
     if (!silent) { setSyncState("synced"); setTimeout(() => setSyncState("idle"), 1200); }
@@ -8595,7 +8640,8 @@ export default function App() {
   // sync would otherwise merge against the *post*-sync baseline, and every
   // row the sync pulled in would look like something we had deleted — and
   // get dropped. That silently ate five SKUs before it was caught.
-  const writeKey = async (key, value, base) => {
+  const writeKey = (key, entry) => withKeyLock(key, async () => {
+    const { value, base } = entry;
     let toWrite = value;
     if (Array.isArray(value)) {
       const remote = await readKey(key);
@@ -8608,9 +8654,23 @@ export default function App() {
       }
     }
     await window.storage.set(key, JSON.stringify(toWrite), true);
-    baselineRef.current[key] = toWrite;
+    // Only clear if nothing newer queued while this write was in
+    // flight — otherwise a keystroke mid-await gets silently dropped
+    // instead of waiting for its own turn.
+    if (pendingRef.current[key] === entry) delete pendingRef.current[key];
+    if (toWrite === value) {
+      baselineRef.current[key] = toWrite;
+    } else if (JSON.stringify(toWrite) !== JSON.stringify(value)) {
+      // The merge pulled in another session's rows. Get them on screen
+      // now: if the screen kept the unmerged list while the baseline
+      // held the merged one, those rows would look like something we'd
+      // deleted, and the next save would delete them for real.
+      applyFromStorage(key, toWrite);
+    } else {
+      baselineRef.current[key] = toWrite;
+    }
     return toWrite;
-  };
+  });
 
   // Write anything still waiting on its debounce, right now.
   const flushSaves = async () => {
@@ -8622,11 +8682,8 @@ export default function App() {
       const entry = pendingRef.current[key];
       if (!entry) continue; // already flushed by something else mid-loop
       try {
-        await writeKey(key, entry.value, entry.base);
-        // Only clear if nothing newer queued while this write was in
-        // flight — otherwise a keystroke mid-await gets silently dropped
-        // instead of waiting for its own turn.
-        if (pendingRef.current[key] === entry) delete pendingRef.current[key];
+        // writeKey only clears it if nothing newer was queued meanwhile.
+        await writeKey(key, entry);
       } catch (e) {
         // Leave it pending so the next save or flush retries it, and say so
         // out loud — a silent failure here is how a day's work disappears.
@@ -8657,6 +8714,12 @@ export default function App() {
   }, []);
 
   const saveKey = (key, value) => {
+    // Just pulled from storage (a sync, or a save that merged in another
+    // session's rows): storage already has it, and queuing it would only
+    // hand the next edit a stale copy to fight with.
+    const fromStorage = fromStorageRef.current[key];
+    delete fromStorageRef.current[key];
+    if (value === fromStorage) return;
     // Capture the baseline now, while it still matches the value.
     const entry = { value, base: pendingRef.current[key]?.base ?? baselineRef.current[key] };
     pendingRef.current[key] = entry;
@@ -8668,8 +8731,7 @@ export default function App() {
       if (!pendingRef.current[key]) return;
       setSyncState("saving");
       try {
-        await writeKey(key, entry.value, entry.base);
-        if (pendingRef.current[key] === entry) delete pendingRef.current[key];
+        await writeKey(key, entry);
       } catch (e) {
         console.error("Save failed for", key, e);
         setSaveError(e?.message || String(e));
