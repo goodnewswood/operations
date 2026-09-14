@@ -2356,10 +2356,17 @@ function LineMath({ product, qtySF, products }) {
   if (sf > 0) {
     if (sfPerPlank) totals.push(`${fmtConv(sf / sfPerPlank)} planks`);
     if (sfPerBoard) totals.push(`${fmtConv(sf / sfPerBoard)} boards`);
+    // Whole boxes, since nobody ships 1.67 of one, plus how full each gets:
+    // "2 boxes BOX8860 (36 planks per box, last box 24)".
     if (unitReaches(product, "sf", "box")) {
-      const boxes = convertQty(product, sf, "sf", "box");
+      const piece = sfPerPlank ? "plank" : "board";
+      const perBox = convertQty(product, 1, "box", piece);
+      const pieces = convertQty(product, sf, "sf", piece);
+      const whole = Math.max(1, Math.ceil(pieces / perBox - 1e-9));
+      const last = Math.round((pieces - (whole - 1) * perBox) * 10) / 10;
       const box = products?.find((x) => x.id === product.boxProductId);
-      totals.push(`${fmtConv(boxes)} boxes${box ? ` · ${box.sku}` : ""}`);
+      const fill = whole > 1 && last < perBox ? `, last box ${fmtConv(last)}` : whole === 1 ? `, this one holds ${fmtConv(last)}` : "";
+      totals.push(`${whole} box${whole === 1 ? "" : "es"}${box ? ` ${box.sku}` : ""} (${fmtConv(perBox)} ${unitLabel(piece)} per box${fill})`);
     }
   }
 
