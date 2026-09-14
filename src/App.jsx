@@ -2000,28 +2000,103 @@ function Dashboard({ workOrders, products, sortLog, units, onOpenWO, goTab, goal
   );
 }
 
-/* Kanban view of the shop floor: one column per pipeline stage, drag a
-   card between columns to move the job along. Same board the office side
-   sees, so both halves of the business describe a job the same way. */
-function WorkOrderKanban({ workOrders, products, goals, onOpen, onStatusChange }) {
+// The job's name as people say it. Orders from before titles existed often
+// had one typed onto the end of the number ("WO-2026-2512-Install 105SF"),
+// or typed in place of the number entirely ("320sf 7in brushed tng"), so
+// that text stands in until a real title is set. Without it those cards
+// all read as just the customer, three "Huasna Wood"s in a row.
+function woTitle(wo) {
+  const t = (wo.title || "").trim();
+  if (t) return t;
+  const n = (wo.number || "").trim();
+  const m = WO_NUMBER_BASE_RE.exec(n);
+  if (!m) return n;
+  return m[2] ? m[2].replace(/^[-\s]+/, "").trim() : "";
+}
+// For pickers: a real title first when there is one, then the number.
+const woPickLabel = (w) => `${(w.title || "").trim() ? `${w.title.trim()} · ` : ""}${w.number} · ${w.customerName || "No customer"}`;
+
+// Due out by the end of this week (Sunday), including anything overdue
+// that hasn't shipped. Uses the ship date, or ready-by when there's no
+// ship date yet.
+function woDueThisWeek(wo) {
+  if (wo.status === "shipped") return false;
+  const due = wo.shipDate || wo.readyByDate;
+  if (!due) return false;
+  const d = new Date();
+  d.setDate(d.getDate() + ((7 - d.getDay()) % 7));
+  const sunday = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return due <= sunday;
+}
+
+// Urgent star. Lights on its own for anything due out this week, in a
+// lighter gold; clicking stars it on purpose, in solid gold, and a star
+// set by hand stays lit whatever the dates say.
+function WoStar({ wo, onToggle, size = 16 }) {
+  const week = woDueThisWeek(wo);
+  const lit = !!wo.starred || week;
+  const tip = wo.starred ? "Starred as urgent. Click to unstar."
+    : week ? "Due out this week, so it's lit on its own. Click to star it as well."
+    : "Click to star as urgent";
+  return (
+    <button
+      type="button" draggable={false} title={tip}
+      onClick={(e) => { e.stopPropagation(); onToggle(wo.id); }}
+      className="shrink-0" style={{ lineHeight: 0, color: lit ? C.gold : C.kraftDark }}
+    >
+      <Star size={size} fill={wo.starred ? C.gold : week ? "#EAD7A4" : "none"} />
+    </button>
+  );
+}
+
+// Manual order: cards someone has placed keep their spot, and anything
+// never placed falls in after them by ready date.
+const byBoardRank = (a, b) => {
+  const A = Number.isFinite(a.rank) ? a.rank : Infinity;
+  const B = Number.isFinite(b.rank) ? b.rank : Infinity;
+  return A === B ? byReadyDate(a, b) : A - B;
+};
+
+/* Kanban view of the shop floor: one column per pipeline stage. Drag a
+   card to another column to move the job along, or up and down inside a
+   column to put jobs in the order they should run. Same board the office
+   side sees, so both halves of the business describe a job the same way.
+
+   Cards lead with the job title. The WO number stays on each card as a
+   hidden element (hovering shows it): it's a filing number, not what
+   anyone reads the board by. */
+function WorkOrderKanban({ workOrders, products, goals, onOpen, onMove, onToggleStar }) {
   const [draggedId, setDraggedId] = useState(null);
-  const [overCol, setOverCol] = useState(null);
+  // Where the dragged card would land: which column, and the card it
+  // would sit in front of (null means the bottom of that column).
+  const [drop, setDrop] = useState(null);
+  const finish = () => { setDraggedId(null); setDrop(null); };
+  const aim = (status, beforeId) =>
+    setDrop((d) => (d && d.status === status && d.beforeId === beforeId ? d : { status, beforeId }));
+
+  const commit = (status, beforeId) => {
+    if (!draggedId) return finish();
+    const ids = workOrders
+      .filter((w) => (w.status || "not_started") === status && w.id !== draggedId)
+      .map((w) => w.id);
+    const at = beforeId ? ids.indexOf(beforeId) : -1;
+    ids.splice(at < 0 ? ids.length : at, 0, draggedId);
+    onMove(draggedId, status, ids);
+    finish();
+  };
 
   return (
     <div className="flex gap-3 overflow-x-auto pb-2">
       {STATUS_FLOW.map((status) => {
         const col = workOrders.filter((w) => (w.status || "not_started") === status);
-        const isOver = overCol === status;
+        const others = col.filter((w) => w.id !== draggedId);
+        const isOver = drop?.status === status;
+        const color = STATUS_COLOR[status];
         return (
           <div
             key={status}
-            onDragOver={(e) => { e.preventDefault(); setOverCol(status); }}
-            onDragLeave={() => setOverCol((x) => (x === status ? null : x))}
-            onDrop={(e) => {
-              e.preventDefault();
-              if (draggedId) onStatusChange(draggedId, status);
-              setDraggedId(null); setOverCol(null);
-            }}
+            onDragOver={(e) => { e.preventDefault(); setDrop((d) => (d?.status === status ? d : { status, beforeId: null })); }}
+            onDrop={(e) => { e.preventDefault(); commit(status, drop?.status === status ? drop.beforeId : null); }}
             className="rounded-sm shrink-0"
             style={{
               width: 240, minHeight: 240,
@@ -2040,18 +2115,50 @@ function WorkOrderKanban({ workOrders, products, goals, onOpen, onStatusChange }
               {col.length === 0 && <div className="text-center py-4 text-xs" style={{ color: C.faint }}>—</div>}
               {col.map((w) => {
                 const late = w.readyByDate && w.readyByDate < today() && status !== "shipped";
+                const title = woTitle(w);
+                const urgent = !!w.starred || woDueThisWeek(w);
+                // The drop line, drawn as a shadow so it never shifts the
+                // cards under the pointer while dragging.
+                const lineAbove = isOver && draggedId && drop.beforeId === w.id && w.id !== draggedId;
+                const lineBelow = isOver && draggedId && drop.beforeId === null && others.length > 0 && w.id === others[others.length - 1].id;
                 return (
                   <div
                     key={w.id}
                     draggable
-                    onDragStart={() => setDraggedId(w.id)}
-                    onDragEnd={() => { setDraggedId(null); setOverCol(null); }}
+                    title={w.number}
+                    onDragStart={(e) => {
+                      e.dataTransfer.effectAllowed = "move";
+                      try { e.dataTransfer.setData("text/plain", w.id); } catch { /* some browsers refuse; the drag still works */ }
+                      setDraggedId(w.id);
+                    }}
+                    onDragOver={(e) => {
+                      e.preventDefault(); e.stopPropagation();
+                      if (w.id === draggedId) {
+                        const i = col.findIndex((x) => x.id === w.id);
+                        aim(status, col.slice(i + 1).find((x) => x.id !== draggedId)?.id ?? null);
+                        return;
+                      }
+                      const r = e.currentTarget.getBoundingClientRect();
+                      const lower = e.clientY > r.top + r.height / 2;
+                      const j = others.findIndex((x) => x.id === w.id);
+                      aim(status, lower ? (others[j + 1]?.id ?? null) : w.id);
+                    }}
+                    onDrop={(e) => { e.preventDefault(); e.stopPropagation(); commit(status, drop?.status === status ? drop.beforeId : w.id); }}
+                    onDragEnd={finish}
                     onClick={() => onOpen(w.id)}
                     className="rounded-sm px-2.5 py-2"
-                    style={{ background: C.paper, border: `1px solid ${C.kraft}`, cursor: "pointer", opacity: draggedId === w.id ? 0.4 : 1 }}
+                    style={{
+                      background: C.paper, border: `1px solid ${urgent ? C.gold : C.kraft}`, cursor: "grab",
+                      opacity: draggedId === w.id ? 0.4 : 1,
+                      boxShadow: lineAbove ? `0 -5px 0 -2px ${color}` : lineBelow ? `0 5px 0 -2px ${color}` : "none",
+                    }}
                   >
-                    <div style={{ fontFamily: MONO, fontWeight: 700, fontSize: 12 }}>{w.number}</div>
-                    <div className="mt-0.5" style={{ fontSize: 12, color: C.faint }}>{w.customerName || "No customer"}</div>
+                    <span className="sr-only">{w.number}</span>
+                    <div className="flex items-start justify-between gap-2">
+                      <div style={{ fontWeight: 800, fontSize: 13, lineHeight: 1.25 }}>{title || w.customerName || "Untitled job"}</div>
+                      <WoStar wo={w} onToggle={onToggleStar} size={15} />
+                    </div>
+                    {title && <div className="mt-0.5" style={{ fontSize: 12, color: C.faint }}>{w.customerName || "No customer"}</div>}
                     <div className="mt-1" style={{ fontFamily: MONO, fontSize: 11, fontWeight: late ? 800 : 400, color: late ? C.redwood : C.ink }}>
                       {late ? "\u26a0 " : ""}{w.readyByDate ? `ready ${w.readyByDate}` : "no ready date"}
                     </div>
@@ -2098,7 +2205,7 @@ const byReadyDate = (a, b) => {
   return A < B ? -1 : A > B ? 1 : 0;
 };
 
-function WorkOrderBoard({ workOrders, customers, products, goals, onOpen, onNew, onImport, onPushThrough, onStatusChange }) {
+function WorkOrderBoard({ workOrders, customers, products, goals, onOpen, onNew, onImport, onPushThrough, onMove, onToggleStar }) {
   const [filter, setFilter] = useState("active");
   // Board is what the floor actually reads — the pipeline, not a wall of
   // cards. The choice sticks so switching to Cards isn't undone on reload.
@@ -2106,15 +2213,20 @@ function WorkOrderBoard({ workOrders, customers, products, goals, onOpen, onNew,
     try { return localStorage.getItem("gnws-nav-woview") || "board"; } catch { return "board"; }
   });
   const setView = (v) => { _setView(v); try { localStorage.setItem("gnws-nav-woview", v); } catch { /* private browsing */ } };
-  const [sort, setSort] = useState("ready");
+  // Sort sticks like the view does. Dragging a card into place switches to
+  // Manual, since any other sort would snap it straight back out.
+  const [sort, _setSort] = useState(() => {
+    try { return localStorage.getItem("gnws-nav-wosort") || "ready"; } catch { return "ready"; }
+  });
+  const setSort = (s) => { _setSort(s); try { localStorage.setItem("gnws-nav-wosort", s); } catch { /* private browsing */ } };
 
-  const sorted = workOrders
+  const shown = workOrders
     .filter((w) => (filter === "active" ? w.status !== "shipped" : true))
     .slice()
     .sort(sort === "ready" ? byReadyDate
+      : sort === "manual" ? byBoardRank
       : sort === "number" ? (a, b) => String(b.number || "").localeCompare(String(a.number || ""))
       : (a, b) => String(b.date || "").localeCompare(String(a.date || "")));
-  const shown = sorted;
 
   return (
     <div>
@@ -2131,7 +2243,7 @@ function WorkOrderBoard({ workOrders, customers, products, goals, onOpen, onNew,
           </button>
         ))}
         <span className="text-xs ml-2" style={{ fontFamily: MONO, color: C.faint }}>sort</span>
-        {[["ready", "Ready by"], ["number", "Number"], ["date", "Created"]].map(([id, label]) => (
+        {[["ready", "Ready by"], ["manual", "Manual"], ["number", "Number"], ["date", "Created"]].map(([id, label]) => (
           <button
             key={id} onClick={() => setSort(id)}
             className="px-3 py-1.5 rounded-sm text-xs"
@@ -2154,7 +2266,10 @@ function WorkOrderBoard({ workOrders, customers, products, goals, onOpen, onNew,
       </div>
 
       {view === "board" && (
-        <WorkOrderKanban workOrders={shown} products={products} goals={goals} onOpen={onOpen} onStatusChange={onStatusChange} />
+        <WorkOrderKanban
+          workOrders={shown} products={products} goals={goals} onOpen={onOpen} onToggleStar={onToggleStar}
+          onMove={(id, status, ids) => { onMove(id, status, ids); setSort("manual"); }}
+        />
       )}
 
       {view === "cards" && (shown.length === 0 ? (
@@ -2171,14 +2286,20 @@ function WorkOrderBoard({ workOrders, customers, products, goals, onOpen, onNew,
               className="text-left rounded-sm p-4 hover:shadow-md transition-shadow"
               style={{ background: C.panel, border: `1px solid ${C.kraftDark}`, borderLeft: `4px solid ${STATUS_COLOR[w.status]}` }}
             >
-              <button onClick={() => onOpen(w.id)} className="text-left w-full">
-                <div className="flex justify-between items-start">
-                  <span style={{ fontFamily: MONO, fontWeight: 700, fontSize: 14 }}>{w.number}</span>
+              <div className="flex justify-between items-start gap-2">
+                <button onClick={() => onOpen(w.id)} className="text-left" style={{ fontWeight: 800, fontSize: 15, lineHeight: 1.25 }}>
+                  {woTitle(w) || w.customerName || "Untitled job"}
+                </button>
+                <div className="flex items-center gap-2 shrink-0">
+                  <WoStar wo={w} onToggle={onToggleStar} />
                   <span className="px-2 py-0.5 rounded-sm text-xs font-bold" style={{ background: STATUS_COLOR[w.status], color: "#fff", fontFamily: MONO }}>
                     {STATUS_LABEL[w.status] || w.status}
                   </span>
                 </div>
-                <div className="mt-1 text-sm" style={{ color: C.faint }}>{w.customerName || "No customer"}</div>
+              </div>
+              <button onClick={() => onOpen(w.id)} className="text-left w-full">
+                <div className="mt-0.5" style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>{w.number}</div>
+                {woTitle(w) && <div className="mt-1 text-sm" style={{ color: C.faint }}>{w.customerName || "No customer"}</div>}
                 {(() => {
                   const late = w.readyByDate && w.readyByDate < today() && w.status !== "shipped";
                   return (
@@ -2791,9 +2912,20 @@ function WorkOrderDetail({ wo, customers, products, goals, sortLog, onChange, on
       <div className="rounded-sm p-5 mb-4" style={{ background: C.ink, color: "#fff" }}>
         <div className="flex justify-between items-start flex-wrap gap-2">
           <div>
+            <div className="flex items-center gap-2">
+              <input
+                style={{ ...inputStyle, background: "#2a241d", color: "#fff", borderColor: "#4a423a", fontSize: 20, fontWeight: 800, padding: "2px 6px", width: 320, maxWidth: "100%" }}
+                value={wo.title || ""} onChange={(e) => update({ title: e.target.value })}
+                placeholder={woTitle(wo) || "Job title (shows on the board)"}
+                title="Job title, what the board shows"
+              />
+              <WoStar wo={wo} onToggle={() => update({ starred: !wo.starred })} size={20} />
+            </div>
             <input
-              style={{ ...inputStyle, background: "#2a241d", color: "#fff", borderColor: "#4a423a", fontFamily: MONO, fontSize: 22, fontWeight: 800, padding: "2px 6px", width: 220 }}
+              className="mt-1 block"
+              style={{ ...inputStyle, background: "#2a241d", color: C.kraftDark, borderColor: "#4a423a", fontFamily: MONO, fontSize: 13, fontWeight: 700, padding: "2px 6px", width: 320, maxWidth: "100%" }}
               value={wo.number} onChange={(e) => update({ number: e.target.value })}
+              title="Work order number"
             />
             {customer ? (
               <button onClick={() => update({ customerId: "" })} className="mt-1 text-left block" title="Click to change customer">
@@ -6177,7 +6309,7 @@ function EditLogModal({ entry, products, workOrders, team, onAddTeamMember, onPr
           <Field label="Which work order is this for?">
             <select style={{ ...inputStyle, marginTop: 8 }} value={form.workOrderId} onChange={(e) => set({ workOrderId: e.target.value })}>
               <option value="">— Not tied to a specific WO —</option>
-              {pickableWorkOrders.map((w) => <option key={w.id} value={w.id}>{w.number} · {w.customerName || "No customer"}</option>)}
+              {pickableWorkOrders.map((w) => <option key={w.id} value={w.id}>{woPickLabel(w)}</option>)}
             </select>
           </Field>
         </div>
@@ -6461,7 +6593,7 @@ function SortingTab({ products, onProductsChange, sortLog, onLogSort, onUpdateSo
         <Field label="Which work order is this for?">
           <select style={{ ...inputStyle, marginTop: 8 }} value={workOrderId} onChange={(e) => setWorkOrderId(e.target.value)}>
             <option value="">— Not tied to a specific WO —</option>
-            {openWorkOrders.map((w) => <option key={w.id} value={w.id}>{w.number} · {w.customerName || "No customer"}</option>)}
+            {openWorkOrders.map((w) => <option key={w.id} value={w.id}>{woPickLabel(w)}</option>)}
           </select>
         </Field>
 
@@ -6755,7 +6887,7 @@ function ProcessLogTab({ step, products, onProductsChange, sortLog, onLogSort, o
         <Field label="Which work order is this for?">
           <select style={{ ...inputStyle, marginTop: 8 }} value={workOrderId} onChange={(e) => setWorkOrderId(e.target.value)}>
             <option value="">— Not tied to a specific WO —</option>
-            {openWorkOrders.map((w) => <option key={w.id} value={w.id}>{w.number} · {w.customerName || "No customer"}</option>)}
+            {openWorkOrders.map((w) => <option key={w.id} value={w.id}>{woPickLabel(w)}</option>)}
           </select>
         </Field>
 
@@ -7017,7 +7149,7 @@ function ShipLogTab({ products, onProductsChange, sortLog, onLogSort, onDeleteSo
         <Field label="Which work order is this truck for?">
           <select style={{ ...inputStyle, marginTop: 8 }} value={workOrderId} onChange={(e) => setWorkOrderId(e.target.value)}>
             <option value="">— Not tied to a specific WO —</option>
-            {openWorkOrders.map((w) => <option key={w.id} value={w.id}>{w.number} · {w.customerName || "No customer"}</option>)}
+            {openWorkOrders.map((w) => <option key={w.id} value={w.id}>{woPickLabel(w)}</option>)}
           </select>
         </Field>
         {wo && (wo.lines || []).length > 0 && (
@@ -9012,9 +9144,18 @@ export default function App() {
               onStartWork={startWork}
             />
           ) : (
-            <WorkOrderBoard workOrders={workOrders} customers={customers} products={products} goals={goals} onOpen={(id) => setActiveWOId(id)} onNew={newWorkOrder} onImport={() => setImportOpen(true)} onPushThrough={pushWOThrough} onStatusChange={(id, status) => setWorkOrders(workOrders.map((w) => (w.id === id
-              ? { ...w, status, ...(status === "shipped" ? { shippedAt: w.shippedAt || new Date().toISOString() } : { shippedAt: "" }) }
-              : w)))} />
+            <WorkOrderBoard workOrders={workOrders} customers={customers} products={products} goals={goals} onOpen={(id) => setActiveWOId(id)} onNew={newWorkOrder} onImport={() => setImportOpen(true)} onPushThrough={pushWOThrough}
+              onMove={(id, status, orderedIds) => setWorkOrders(workOrders.map((w) => {
+                // Every card in the destination column gets its position,
+                // so the order holds on every device, not just this one.
+                const rank = orderedIds.indexOf(w.id);
+                const moving = w.id === id && (w.status || "not_started") !== status;
+                if (rank < 0 || (w.rank === rank && !moving)) return w;
+                const next = { ...w, rank };
+                if (moving) Object.assign(next, { status }, status === "shipped" ? { shippedAt: w.shippedAt || new Date().toISOString() } : { shippedAt: "" });
+                return next;
+              }))}
+              onToggleStar={(id) => setWorkOrders(workOrders.map((w) => (w.id === id ? { ...w, starred: !w.starred } : w)))} />
           )
         )}
         {tab === "orders" && ordersSubTab === "purchaseorders" && (
