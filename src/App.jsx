@@ -2162,6 +2162,7 @@ function WorkOrderKanban({ workOrders, products, goals, onOpen, onMove, onToggle
                       <WoStar wo={w} onToggle={onToggleStar} size={15} />
                     </div>
                     {title && <div className="mt-0.5" style={{ fontSize: 12, color: C.faint }}>{w.customerName || "No customer"}</div>}
+                    {isDropShip(w) && <DropShipTag wo={w} />}
                     <div className="mt-1" style={{ fontFamily: MONO, fontSize: 11, fontWeight: late ? 800 : 400, color: late ? C.redwood : C.ink }}>
                       {late ? "\u26a0 " : ""}{w.readyByDate ? `ready ${w.readyByDate}` : "no ready date"}
                     </div>
@@ -2303,6 +2304,7 @@ function WorkOrderBoard({ workOrders, customers, products, goals, onOpen, onNew,
               <button onClick={() => onOpen(w.id)} className="text-left w-full">
                 <div className="mt-0.5" style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>{w.number}</div>
                 {woTitle(w) && <div className="mt-1 text-sm" style={{ color: C.faint }}>{w.customerName || "No customer"}</div>}
+                {isDropShip(w) && <DropShipTag wo={w} />}
                 {(() => {
                   const late = w.readyByDate && w.readyByDate < today() && w.status !== "shipped";
                   return (
@@ -2871,6 +2873,7 @@ function WorkOrderDetail({ wo, customers, products, goals, sortLog, onChange, on
   const [bolOpen, setBolOpen] = useState(false);
   const [woPrintOpen, setWoPrintOpen] = useState(false);
   const [palletModalOpen, setPalletModalOpen] = useState(false);
+  const [slipOpen, setSlipOpen] = useState(false);
   const [printLabels, setPrintLabels] = useState(null);
   const [startWorkOpen, setStartWorkOpen] = useState(false);
 
@@ -2987,7 +2990,22 @@ function WorkOrderDetail({ wo, customers, products, goals, sortLog, onChange, on
           </span>
         </div>
 
-        {(customer?.address || customer?.city) ? (
+        {isDropShip(wo) ? (
+          // Where it's actually going, up top where the crew looks first.
+          // The distributor's own address would be the wrong one to use.
+          <div className="mt-3 pt-3 flex items-start gap-2" style={{ borderTop: "1px solid #4a423a" }}>
+            <Truck size={16} style={{ color: C.gold, marginTop: 2 }} />
+            <div style={{ fontSize: 14, lineHeight: 1.5 }}>
+              <div style={{ fontFamily: MONO, fontSize: 11, fontWeight: 800, letterSpacing: "0.06em", color: C.gold }}>
+                DROP SHIP TO{wo.customerPO ? `  ·  PO # ${wo.customerPO}` : ""}
+              </div>
+              {shipToLines(wo.shipTo).length
+                ? shipToLines(wo.shipTo).map((l, i) => <div key={i}>{l}</div>)
+                : <div style={{ color: C.warn }}>No ship-to address yet. Fill it in below.</div>}
+              <div style={{ fontSize: 12, color: C.kraftDark }}>Do not ship to {customer?.company || "the customer"}.</div>
+            </div>
+          </div>
+        ) : (customer?.address || customer?.city) ? (
           <div className="mt-3 pt-3 flex items-start gap-2" style={{ borderTop: "1px solid #4a423a" }}>
             <MapPin size={16} style={{ color: C.kraftDark, marginTop: 2 }} />
             <div style={{ fontSize: 14, lineHeight: 1.5 }}>
@@ -3033,6 +3051,8 @@ function WorkOrderDetail({ wo, customers, products, goals, sortLog, onChange, on
           <textarea style={{ ...inputStyle, minHeight: 70, marginTop: 8 }} value={wo.notes || ""} onChange={(e) => update({ notes: e.target.value })} placeholder="Anything the crew needs to know…" />
         </Field>
       </div>
+
+      <DropShipPanel record={wo} customer={customer} onChange={update} />
 
       <LaborPanel wo={wo} goals={goals} sortLog={sortLog} onClockChange={(clock) => update({ clock })} />
 
@@ -3186,9 +3206,11 @@ function WorkOrderDetail({ wo, customers, products, goals, sortLog, onChange, on
         <Btn kind="primary" onClick={() => setWoPrintOpen(true)}><Printer size={14} /> Print Work Order</Btn>
         <Btn kind="primary" onClick={() => setBolOpen(true)}><Printer size={14} /> Print Bill of Lading</Btn>
         <Btn kind="primary" onClick={() => setPalletModalOpen(true)}><Tag size={14} /> Print Pallet Labels</Btn>
+        {isDropShip(wo) && <Btn kind="primary" onClick={() => setSlipOpen(true)}><FileText size={14} /> Print Packing Slip</Btn>}
         <Btn onClick={onDelete}><Trash2 size={14} /> Delete work order</Btn>
       </div>
       {woPrintOpen && <WorkOrderPrintView wo={wo} customer={customer} products={products} onClose={() => setWoPrintOpen(false)} />}
+      {slipOpen && <PackingSlipPrintView wo={wo} customer={customer} products={products} onClose={() => setSlipOpen(false)} />}
       {bolOpen && <BOLModal wo={wo} customer={customer} products={products} onClose={() => setBolOpen(false)} />}
       {palletModalOpen && (
         <PalletLabelModal
@@ -4933,6 +4955,176 @@ const SHIPPER = {
 };
 const LBS_PER_SF = 1.5;
 
+/* ---------------- Drop ship ----------------
+   A distributor (Rockin Wood, say) orders from us as the manufacturer and
+   we ship straight to their customer. The order's customer stays the
+   distributor, since they're who we bill. What changes is where it goes
+   (shipTo), whose PO it answers to (customerPO), and whose name the end
+   customer sees: the distributor's, never ours. The end customer bought
+   from them, so the BOL, labels and packing slip all ship as them.
+   GNWS Office carries the same fields and helpers, since it edits the
+   same orders. */
+
+const EMPTY_SHIP_TO = { name: "", company: "", address: "", address2: "", city: "", state: "", zip: "", country: "", phone: "" };
+const isDropShip = (rec) => !!rec?.dropShip;
+
+// The address the way a label reads it. Country only when it isn't the
+// US, same as customer addresses everywhere else.
+function shipToLines(s) {
+  if (!s) return [];
+  const country = s.country && !/^(us|usa|united states)$/i.test(s.country.trim()) ? s.country : "";
+  // "City, ST 12345", the way it goes on a mailing label.
+  const cityLine = [s.city, [s.state, s.zip].filter(Boolean).join(" ")].filter(Boolean).join(", ");
+  return [s.name, s.company, s.address, s.address2, cityLine, country].filter(Boolean);
+}
+const shipToName = (s) => s?.company || s?.name || "";
+
+function DropShipPanel({ record, customer, onChange, disabled }) {
+  const on = isDropShip(record);
+  const shipTo = { ...EMPTY_SHIP_TO, ...(record.shipTo || {}) };
+  const setShipTo = (patch) => onChange({ shipTo: { ...shipTo, ...patch } });
+  const distributor = customer?.company || "the customer";
+  const noDistributorAddress = customer && !customer.address && !customer.city;
+  const input = (key, placeholder) => (
+    <input style={inputStyle} value={shipTo[key]} onChange={(e) => setShipTo({ [key]: e.target.value })} placeholder={placeholder} disabled={disabled} />
+  );
+  return (
+    <div className="rounded-sm p-4 mb-4" style={{ background: on ? "#FBF6EC" : C.panel, border: `1px solid ${on ? C.gold : C.kraftDark}` }}>
+      <label className="flex items-center gap-2 flex-wrap" style={{ fontWeight: 800, cursor: disabled ? "default" : "pointer" }}>
+        <input type="checkbox" checked={on} disabled={disabled} onChange={(e) => onChange({ dropShip: e.target.checked })} />
+        <Truck size={16} style={{ color: on ? C.gold : C.faint }} /> Drop ship
+        <span style={{ fontWeight: 400, fontSize: 12, color: C.faint }}>ships straight to {distributor}'s customer</span>
+      </label>
+      {on && (
+        <div className="mt-3">
+          <Field label="Customer PO #" w={240}>
+            <input style={inputStyle} value={record.customerPO || ""} onChange={(e) => onChange({ customerPO: e.target.value })} placeholder={`${distributor}'s PO number`} disabled={disabled} />
+          </Field>
+          <div className="mt-3 mb-1" style={{ fontFamily: MONO, fontSize: 11, fontWeight: 800, letterSpacing: "0.06em", color: C.gold }}>SHIP TO</div>
+          <div className="flex flex-wrap gap-3">
+            <Field label="Name" w={240}>{input("name", "Who it's going to")}</Field>
+            <Field label="Company (optional)" w={240}>{input("company", "")}</Field>
+          </div>
+          <Field label="Street address">{input("address", "")}</Field>
+          <Field label="Apt, suite, etc. (optional)">{input("address2", "")}</Field>
+          <div className="flex flex-wrap gap-3">
+            <Field label="City" w={200}>{input("city", "")}</Field>
+            <Field label="State" w={80}>{input("state", "")}</Field>
+            <Field label="ZIP" w={120}>{input("zip", "")}</Field>
+            <Field label="Country" w={140}>{input("country", "USA")}</Field>
+            <Field label="Phone" w={160}>{input("phone", "")}</Field>
+          </div>
+          <div className="mt-2 text-xs" style={{ color: C.faint, lineHeight: 1.5 }}>
+            Blind ship: the bill of lading, pallet labels and packing slip show {distributor} as the shipper, not us.
+            {noDistributorAddress && (
+              <span style={{ color: C.warn }}> {distributor} has no address on file, so the packing slip will show their name only. Add it to their contact to show it.</span>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The boxed ship-to that goes on printed paperwork. `note` is the line
+// under the address: a warning for the crew, or nothing for a customer.
+function DropShipPrintBlock({ rec, note, fontSize = 11 }) {
+  const lines = shipToLines(rec.shipTo);
+  return (
+    <div style={{ border: "2px solid #000", padding: "5px 8px", marginBottom: 8, fontSize, lineHeight: 1.35, breakInside: "avoid", pageBreakInside: "avoid" }}>
+      <div style={{ fontWeight: 900, letterSpacing: 0.5 }}>DROP SHIP TO{rec.customerPO ? `  ·  PO # ${rec.customerPO}` : ""}</div>
+      {lines.length ? lines.map((l, i) => <div key={i} style={i === 0 ? { fontWeight: 700 } : undefined}>{l}</div>) : <div>No ship-to address entered yet.</div>}
+      {rec.shipTo?.phone && <div>{rec.shipTo.phone}</div>}
+      {note && <div style={{ marginTop: 3, fontSize: fontSize - 1 }}>{note}</div>}
+    </div>
+  );
+}
+
+function DropShipTag({ wo }) {
+  const to = shipToName(wo.shipTo);
+  return (
+    <div className="mt-1 flex items-center gap-1" style={{ fontFamily: MONO, fontSize: 10.5, fontWeight: 800, color: C.gold }}>
+      <Truck size={11} /> DROP SHIP{to ? ` to ${to}` : ""}
+    </div>
+  );
+}
+
+/* ---------------- Blind packing slip ----------------
+   Goes in the box on a drop ship. The end customer bought from the
+   distributor, so this carries the distributor's name and PO number and
+   nothing about who made it: no logo, no shop address, no prices, and no
+   SKUs (those are our codes, not theirs). Crew line notes stay off too,
+   since they're written for the shop floor. */
+function PackingSlipPrintView({ wo, customer, products, onClose }) {
+  useBackLayer(true, onClose);
+  const sellerCity = [customer?.city, customer?.state, customer?.zip].filter(Boolean).join(", ");
+  // Boxes and other packing supplies are how it ships, not what they bought.
+  const items = (wo.lines || []).filter((l) => products.find((p) => p.id === l.productId)?.category !== "packing");
+  return (
+    <PrintPortal>
+    <div className="fixed inset-0 z-50 overflow-auto print-overlay" style={{ background: "rgba(34,29,25,0.6)" }}>
+      <style>{PRINT_CSS}</style>
+      <div className="max-w-3xl mx-auto my-8 print-shell">
+        <div className="flex justify-end gap-2 mb-3 no-print">
+          <Btn kind="dark" onClick={() => window.print()}><Printer size={13} /> Print</Btn>
+          <CloseBtn onClose={onClose} onDark />
+        </div>
+        <div className="print-sheet" style={{ background: "#fff", color: "#000", padding: "0.4in", fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif" }}>
+          <div className="flex items-start justify-between" style={{ borderBottom: "3px solid #000", paddingBottom: 10, marginBottom: 16 }}>
+            <div style={{ fontSize: 12, lineHeight: 1.45 }}>
+              <div style={{ fontSize: 18, fontWeight: 900 }}>{customer?.company || ""}</div>
+              {customer?.address && <div>{customer.address}</div>}
+              {sellerCity && <div>{sellerCity}</div>}
+              {customer?.phone && <div>{customer.phone}</div>}
+              {customer?.email && <div>{customer.email}</div>}
+            </div>
+            <div style={{ textAlign: "right", fontSize: 12, lineHeight: 1.45 }}>
+              <div style={{ fontSize: 24, fontWeight: 900 }}>PACKING SLIP</div>
+              {wo.customerPO && <div><strong>PO #:</strong> {wo.customerPO}</div>}
+              <div><strong>Date:</strong> {wo.shipDate || today()}</div>
+            </div>
+          </div>
+
+          <div className="mb-5" style={{ fontSize: 13, lineHeight: 1.45 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "#555" }}>SHIP TO</div>
+            {shipToLines(wo.shipTo).map((l, i) => <div key={i} style={i === 0 ? { fontWeight: 700 } : undefined}>{l}</div>)}
+            {wo.shipTo?.phone && <div>{wo.shipTo.phone}</div>}
+          </div>
+
+          <table className="w-full" style={{ borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr style={{ background: "#eee" }}>
+                <th style={{ border: "1px solid #999", padding: 8, textAlign: "left" }}>Item</th>
+                <th style={{ border: "1px solid #999", padding: 8, textAlign: "right", width: 160 }}>Quantity</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((l) => {
+                const p = products.find((pr) => pr.id === l.productId);
+                const unit = l.displayUnit || "sf";
+                return (
+                  <tr key={l.id}>
+                    <td style={{ border: "1px solid #999", padding: 8 }}>{p ? p.name : (l.desc || "Item")}</td>
+                    <td style={{ border: "1px solid #999", padding: 8, textAlign: "right" }}>{fmtConv(convertQty(p, l.qtySF, "sf", unit))} {unitLabel(unit)}</td>
+                  </tr>
+                );
+              })}
+              {!items.length && (
+                <tr><td colSpan={2} style={{ border: "1px solid #999", padding: 10, textAlign: "center", color: "#888" }}>No items</td></tr>
+              )}
+            </tbody>
+          </table>
+
+          <div className="mt-6" style={{ fontSize: 12 }}>
+            Questions about this order? Please contact {customer?.company || "the seller"}.
+          </div>
+        </div>
+      </div>
+    </div>
+    </PrintPortal>
+  );
+}
+
 /* ---------------- Printable Work Order (8.5x11) ----------------
    A paper traveler for the crew: each line shows only the process
    steps actually checked for that item (as blank boxes to mark off by
@@ -5031,6 +5223,10 @@ function WorkOrderPrintView({ wo, customer, products, onClose }) {
             {(customer?.city || customer?.state) && <div>{[customer?.city, customer?.state, customer?.zip].filter(Boolean).join(", ")}</div>}
           </div>
 
+          {isDropShip(wo) && (
+            <DropShipPrintBlock rec={wo} note={`Blind ship as ${customer?.company || "the customer"}. Do not ship to ${customer?.company || "the customer"}.`} />
+          )}
+
           {wo.notes && (
             <div style={{ marginBottom: 8, fontSize: 11 }}>
               <strong>Notes:</strong> {wo.notes}
@@ -5105,6 +5301,10 @@ function BOLModal({ wo, customer, products, onClose }) {
   const [date, setDate] = useState(today());
   const [carrier, setCarrier] = useState(wo.shipVia || "");
   const bolNumber = `BOL-${wo.number}`;
+  const drop = isDropShip(wo);
+  // Blind ship: the driver still picks up here, so the street address
+  // stays ours. Only the name changes, to the distributor's.
+  const shipFromName = drop ? (customer?.company || SHIPPER.name) : SHIPPER.name;
 
   return (
     <PrintPortal>
@@ -5128,22 +5328,32 @@ function BOLModal({ wo, customer, products, onClose }) {
             <div style={{ textAlign: "right", fontSize: 12 }}>
               <div><strong>BOL #:</strong> {bolNumber}</div>
               <div><strong>Date:</strong> {date}</div>
+              {drop && wo.customerPO && <div><strong>PO #:</strong> {wo.customerPO}</div>}
             </div>
           </div>
 
           <div className="grid grid-cols-2 gap-6 mb-6">
             <div>
               <div style={{ fontSize: 11, fontWeight: 700, color: "#555", marginBottom: 4 }}>SHIP FROM</div>
-              <div style={{ fontWeight: 700 }}>{SHIPPER.name}</div>
+              <div style={{ fontWeight: 700 }}>{shipFromName}</div>
               <div>{SHIPPER.address}</div>
               <div>{SHIPPER.cityStateZip}</div>
             </div>
             <div>
               <div style={{ fontSize: 11, fontWeight: 700, color: "#555", marginBottom: 4 }}>CONSIGNEE (SHIP TO)</div>
-              <div style={{ fontWeight: 700 }}>{customer?.company || "—"}</div>
-              {customer?.address && <div>{customer.address}</div>}
-              <div>{[customer?.city, customer?.state, customer?.zip].filter(Boolean).join(", ")}</div>
-              {customer?.country && customer.country !== "USA" ? <div>{customer.country}</div> : null}
+              {drop ? (
+                <>
+                  {shipToLines(wo.shipTo).map((l, i) => <div key={i} style={i === 0 ? { fontWeight: 700 } : undefined}>{l}</div>)}
+                  {wo.shipTo?.phone && <div>{wo.shipTo.phone}</div>}
+                </>
+              ) : (
+                <>
+                  <div style={{ fontWeight: 700 }}>{customer?.company || "—"}</div>
+                  {customer?.address && <div>{customer.address}</div>}
+                  <div>{[customer?.city, customer?.state, customer?.zip].filter(Boolean).join(", ")}</div>
+                  {customer?.country && customer.country !== "USA" ? <div>{customer.country}</div> : null}
+                </>
+              )}
             </div>
           </div>
 
@@ -5290,7 +5500,10 @@ function PalletLabelModal({ wo, customer, products, onClose, onGenerate }) {
     rows.forEach((r) => {
       const count = Math.max(0, Math.floor(Number(r.pallets) || 0));
       for (let i = 0; i < count; i++) {
-        labels.push({ key: uid(), customer: customer?.company || "—", size: r.size || "—", shipDate, seq: i + 1, seqTotal: count });
+        // A drop ship's pallet is addressed to the end customer, not to
+        // the distributor we bill.
+        const to = (isDropShip(wo) && shipToName(wo.shipTo)) || customer?.company || "—";
+        labels.push({ key: uid(), customer: to, size: r.size || "—", shipDate, seq: i + 1, seqTotal: count });
       }
     });
     onGenerate(labels);
