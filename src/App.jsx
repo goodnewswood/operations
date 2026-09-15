@@ -65,6 +65,7 @@ const KEY = {
   units: "gnws-shared-units-v1",
   goals: "gnws-shared-goals-v1",
   invLog: "gnws-shared-invlog-v1",
+  woHistory: "gnws-shared-wohistory-v1",
 };
 
 /* ---------------- Seed data ---------------- */
@@ -2867,7 +2868,246 @@ function WoTimers({ wo }) {
   );
 }
 
-function WorkOrderDetail({ wo, customers, products, goals, sortLog, onChange, onDelete, onBack, team, whoWorking, setWhoWorking, onAddTeamMember, onUpdateCustomerSpec, onStartWork }) {
+/* ---------------- Work order history ----------------
+   Who did what to a work order, and when, shown at the bottom of the
+   work order. There's no login, so "who" is the name this device was
+   set to in the header (DeviceUserPicker).
+
+   Entries live in their own collection, not on the work order: two
+   people editing the same order at once would otherwise overwrite each
+   other's entries along with the order, and a history that can lose
+   lines isn't one. Separate rows with their own ids merge cleanly.
+
+   Changes are found by comparing each order before and after a save,
+   not by hooking every button, so nothing that edits an order can slip
+   past. Typing lands as one line per stretch rather than one per
+   keystroke. Work logs aren't copied in: the panel reads them straight
+   from the production log. GNWS Office writes to the same history. */
+
+const DEVICE_USER_KEY = "gnws-device-user";
+const readDeviceUser = () => { try { return localStorage.getItem(DEVICE_USER_KEY) || ""; } catch { return ""; } };
+const writeDeviceUser = (name) => { try { localStorage.setItem(DEVICE_USER_KEY, name); } catch { /* private browsing: still set for this visit */ } };
+
+// How long a stretch of typing in one field stays one line.
+const HISTORY_FOLD_MS = 3 * 60 * 1000;
+
+const histText = (v) => {
+  const s = String(v ?? "").replace(/\s+/g, " ").trim();
+  return s.length > 120 ? `${s.slice(0, 119)}…` : s;
+};
+
+// What changed between two versions of one order, in words. `typing`
+// marks the fields people type into, which fold together (foldHistory).
+function describeWOChanges(a, b, { customers, products, statusLabel }) {
+  const out = [];
+  const same = (x, y) => JSON.stringify(x ?? "") === JSON.stringify(y ?? "");
+  const event = (field, label) => out.push({ field, label });
+  const change = (field, label, from, to, typing = false) => {
+    const f = histText(from), t = histText(to);
+    if (f !== t) out.push({ field, label, from: f, to: t, typing });
+  };
+  if (!a) { event("created", "Created the work order"); return out; }
+  if (!b) { event("deleted", "Deleted the work order"); return out; }
+  const customer = (id) => (id ? customers.find((c) => c.id === id)?.company || "unknown customer" : "");
+  const brand = (k) => BRANDS[k || DEFAULT_BRAND]?.label || k;
+  const item = (l) => products.find((p) => p.id === l?.productId)?.sku || String(l?.desc || "").trim() || "custom item";
+  const sf = (q) => (q === "" || q == null ? "" : `${fmtConv(q)} SF`);
+
+  change("status", "Status", statusLabel[a.status || "not_started"] || a.status, statusLabel[b.status || "not_started"] || b.status);
+  if (!!a.starred !== !!b.starred) event("starred", b.starred ? "Starred as urgent" : "Took the star off");
+  change("title", "Title", a.title, b.title, true);
+  change("number", "Number", a.number, b.number, true);
+  change("customer", "Customer", customer(a.customerId), customer(b.customerId));
+  change("brand", "Prints under", brand(a.brand), brand(b.brand));
+  change("date", "Order date", a.date, b.date, true);
+  change("readyByDate", "Ready by", a.readyByDate, b.readyByDate, true);
+  change("shipDate", "Ship date", a.shipDate, b.shipDate, true);
+  change("shipTime", "Ship time", a.shipTime, b.shipTime, true);
+  change("shipVia", "Ship via", a.shipVia, b.shipVia, true);
+  change("notes", "Notes", a.notes, b.notes, true);
+  if (!!a.dropShip !== !!b.dropShip) event("dropShip", b.dropShip ? "Turned drop ship on" : "Turned drop ship off");
+  change("shipTo", "Drop ship address", shipToLines(a.shipTo).join(", "), shipToLines(b.shipTo).join(", "), true);
+  change("customerPO", "Customer PO #", a.customerPO, b.customerPO, true);
+  if (!!a.archived !== !!b.archived) event("archived", b.archived ? "Archived" : "Took it out of the archive");
+  if (b.quoteId && !same(a.quoteId, b.quoteId)) event("quote", "Linked a quote");
+  if (b.salesOrderId && !same(a.salesOrderId, b.salesOrderId)) event("salesOrder", "Linked a sales order");
+
+  // The job clock stores when it started and how much is banked, so each
+  // of its buttons leaves its own fingerprint on those numbers.
+  const ca = a.clock || {}, cb = b.clock || {};
+  if (!same(ca, cb)) {
+    const crewA = Number(ca.crew) || 1, crewB = Number(cb.crew) || 1;
+    const banked = Number(cb.bankedManSec) || 0;
+    const hrs = `${(banked / 3600).toFixed(1)} man-hrs`;
+    if (crewA !== crewB) change("clockCrew", "Crew on the job clock", crewA, crewB);
+    else if (!ca.runningSince && cb.runningSince && banked === (Number(ca.bankedManSec) || 0)) event("clock", `Started the job clock (${crewB} on it)`);
+    else if (!cb.runningSince && banked === 0 && (ca.runningSince || Number(ca.bankedManSec) > 0)) event("clock", "Reset the job clock");
+    else if (ca.runningSince && !cb.runningSince) event("clock", `Paused the job clock at ${hrs}`);
+    else event("clock", `Set the job clock to ${hrs}`);
+  }
+
+  const before = new Map((a.lines || []).map((l) => [l.id, l]));
+  const afterIds = new Set((b.lines || []).map((l) => l.id));
+  (b.lines || []).forEach((l) => {
+    const p = before.get(l.id);
+    const name = item(l);
+    const key = `line:${l.id}`;
+    if (!p) { event(key, l.productId || l.desc ? `Added a line: ${name}` : "Added a line"); return; }
+    const picked = !same(p.productId, l.productId);
+    if (picked) change(`${key}:item`, "Line item", item(p), name);
+    if (!l.productId) change(`${key}:desc`, "Line description", p.desc, l.desc, true);
+    change(`${key}:qty`, `${name} quantity`, sf(p.qtySF), sf(l.qtySF), true);
+    if (!!p.done !== !!l.done) event(`${key}:done`, l.done ? `Checked off ${name}` : `Unchecked ${name}`);
+    change(`${key}:note`, `${name} note`, p.note, l.note, true);
+    change(`${key}:spec`, `${name} spec`, specLine(p.spec), specLine(l.spec), true);
+    const photos = (s) => (s?.photos || []).length;
+    if (photos(p.spec) !== photos(l.spec)) event(`${key}:photo`, photos(l.spec) > photos(p.spec) ? `Added a reference photo to ${name}` : `Removed a reference photo from ${name}`);
+    // Picking an item loads that item's usual steps. That's part of the
+    // pick, not a string of separate step changes.
+    if (!picked) PROCESS_STEPS.forEach((s) => {
+      if (!!p.steps?.[s.id] !== !!l.steps?.[s.id]) event(`${key}:step`, `${name}: ${l.steps?.[s.id] ? "added" : "removed"} the ${s.label} step`);
+    });
+  });
+  (a.lines || []).forEach((l) => { if (!afterIds.has(l.id)) event(`line:${l.id}`, `Removed a line: ${item(l)}`); });
+  return out;
+}
+
+function makeHistoryEntry(wo, c, by, via) {
+  const e = {
+    id: uid(), woId: wo.id, woNumber: wo.number || "", at: new Date().toISOString(), by: by || "",
+    field: c.field, label: via ? `${c.label} (${via})` : c.label,
+  };
+  if (c.from !== undefined) { e.from = c.from; e.to = c.to; }
+  if (c.typing && !via) e.typing = true;
+  return e;
+}
+
+// Every order that differs between two versions of the list. Unchanged
+// orders keep the same object, so they're skipped without a look.
+function diffWorkOrders(prevList, nextList, ctx, by, via) {
+  const before = new Map((prevList || []).map((w) => [w.id, w]));
+  const seen = new Set();
+  const entries = [];
+  (nextList || []).forEach((w) => {
+    seen.add(w.id);
+    const p = before.get(w.id);
+    if (p !== w) describeWOChanges(p, w, ctx).forEach((c) => entries.push(makeHistoryEntry(w, c, by, via)));
+  });
+  before.forEach((w, id) => {
+    if (!seen.has(id)) describeWOChanges(w, null, ctx).forEach((c) => entries.push(makeHistoryEntry(w, c, by, via)));
+  });
+  return entries;
+}
+
+// New lines go on top. Typing folds into that order's latest line when
+// it's the same field, by the same person, within a few minutes. If the
+// typing ends up back where it started, the line goes away, since nothing
+// changed after all.
+function foldHistory(list, entries) {
+  let next = list;
+  entries.forEach((e) => {
+    if (e.typing) {
+      let i = -1;
+      next.forEach((h, j) => { if (h.woId === e.woId && (i < 0 || h.at > next[i].at)) i = j; });
+      const last = next[i];
+      if (last && last.typing && last.field === e.field && last.by === e.by && Date.parse(e.at) - Date.parse(last.at) < HISTORY_FOLD_MS) {
+        const folded = { ...last, to: e.to, at: e.at, label: e.label };
+        next = folded.from === folded.to ? next.filter((_, j) => j !== i) : next.map((h, j) => (j === i ? folded : h));
+        return;
+      }
+    }
+    next = [e, ...next];
+  });
+  return next;
+}
+
+const historyText = (h) => (h.from !== undefined ? `${h.label}: ${h.from || "blank"} → ${h.to || "blank"}` : h.label);
+
+function workLogText(e) {
+  const step = PROCESS_STEPS.find((s) => s.id === (e.step || "sorting"))?.label || e.step;
+  const secs = Number(e.seconds) || 0;
+  const boards = Number(e.inboundBoards ?? e.rawBoards) || 0;
+  return [
+    `Logged work: ${step}`,
+    e.batchLabel && e.batchLabel !== step ? e.batchLabel : "",
+    secs ? `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m` : "",
+    boards ? `${num(boards)} boards in` : "",
+  ].filter(Boolean).join(" · ");
+}
+
+// Printing is something that happened to the order too. The browser
+// announces every print, Print button and Ctrl+P alike, with
+// "beforeprint", so this listens while one of the printouts is open.
+function usePrintLog(label, onLog) {
+  const logRef = useRef(onLog);
+  logRef.current = onLog;
+  useEffect(() => {
+    if (!label) return;
+    const h = () => logRef.current?.(label);
+    window.addEventListener("beforeprint", h);
+    return () => window.removeEventListener("beforeprint", h);
+  }, [label]);
+}
+
+// Who's using this device. There's no login, so the history can only say
+// who did something if the device knows. Pick once; it's remembered here.
+function DeviceUserPicker({ team, value, onChange }) {
+  const names = [...new Set([...(team || []), ...(value ? [value] : [])])];
+  return (
+    <label className="flex items-center gap-1" style={{ color: value ? "rgba(255,255,255,0.65)" : C.gold }} title="Who's using this device. Shows in work order history.">
+      <Users size={14} />
+      <select
+        value={value} onChange={(e) => onChange(e.target.value)}
+        style={{ background: "transparent", color: value ? "#fff" : C.gold, border: `1px solid ${value ? "#4a423a" : C.gold}`, borderRadius: 2, padding: "2px 4px", fontFamily: MONO, fontSize: 12, maxWidth: 130 }}
+      >
+        <option value="" style={{ color: C.ink }}>Who are you?</option>
+        {names.map((n) => <option key={n} value={n} style={{ color: C.ink }}>{n}</option>)}
+      </select>
+    </label>
+  );
+}
+
+function WorkOrderHistory({ wo, history, sortLog }) {
+  const [showAll, setShowAll] = useState(false);
+  const rows = [
+    ...(history || []).filter((h) => h.woId === wo.id).map((h) => ({ key: h.id, at: h.at, by: h.by, text: historyText(h) })),
+    ...(sortLog || []).filter((e) => e.workOrderId === wo.id).map((e) => ({
+      key: `log-${e.id}`, at: e.startedAt || `${e.date}T12:00:00`, dateOnly: !e.startedAt,
+      by: e.by || (e.crew || []).join(" + "), text: workLogText(e), work: true,
+    })),
+  ].sort((x, y) => new Date(y.at) - new Date(x.at));
+  const when = (r) => {
+    const d = new Date(r.at);
+    if (Number.isNaN(d.getTime())) return r.at || "";
+    return r.dateOnly
+      ? d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+      : d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  };
+  const shown = showAll ? rows : rows.slice(0, 40);
+  return (
+    <div className="rounded-sm overflow-hidden mb-8" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
+      <div className="px-4 py-3 flex items-center justify-between" style={{ borderBottom: `1px solid ${C.kraftDark}` }}>
+        <span className="flex items-center gap-1.5" style={{ fontWeight: 800 }}><Clock size={15} /> History</span>
+        <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>{rows.length} {rows.length === 1 ? "entry" : "entries"}</span>
+      </div>
+      {rows.length === 0 ? (
+        <div className="px-4 py-6 text-center text-sm" style={{ color: C.faint }}>Nothing recorded yet. Everything done to this order from now on shows up here.</div>
+      ) : shown.map((r) => (
+        <div key={r.key} className="px-4 py-2 flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-sm" style={{ borderBottom: `1px solid ${C.kraft}` }}>
+          <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint, width: 120, flexShrink: 0 }}>{when(r)}</span>
+          <span style={{ fontWeight: 700, minWidth: 70 }}>{r.by || <span style={{ color: C.faint, fontWeight: 400 }}>no name set</span>}</span>
+          <span className="basis-full sm:basis-0 sm:flex-1 min-w-0" style={{ color: r.work ? C.moss : C.ink, overflowWrap: "anywhere" }}>{r.text}</span>
+        </div>
+      ))}
+      {!showAll && rows.length > shown.length && (
+        <div className="p-3"><Btn onClick={() => setShowAll(true)}>Show all {rows.length}</Btn></div>
+      )}
+      <div className="px-4 py-2 text-xs" style={{ color: C.faint }}>Changes are recorded from Sep 15, 2026 on. Work logs go back further.</div>
+    </div>
+  );
+}
+
+function WorkOrderDetail({ wo, customers, products, goals, sortLog, history, onLog, onChange, onDelete, onBack, team, whoWorking, setWhoWorking, onAddTeamMember, onUpdateCustomerSpec, onStartWork }) {
   const customer = customers.find((c) => c.id === wo.customerId);
   const update = (patch) => onChange({ ...wo, ...patch });
   const [bolOpen, setBolOpen] = useState(false);
@@ -2876,6 +3116,15 @@ function WorkOrderDetail({ wo, customers, products, goals, sortLog, onChange, on
   const [slipOpen, setSlipOpen] = useState(false);
   const [printLabels, setPrintLabels] = useState(null);
   const [startWorkOpen, setStartWorkOpen] = useState(false);
+  const labelCount = printLabels?.length || 0;
+  const labelsText = `${labelCount} pallet label${labelCount === 1 ? "" : "s"}`;
+  usePrintLog(
+    woPrintOpen ? "Printed the work order"
+      : bolOpen ? "Printed the bill of lading"
+      : slipOpen ? "Printed the packing slip"
+      : labelCount ? `Printed ${labelsText}` : "",
+    onLog,
+  );
 
   const updateLine = (lineId, patch) => {
     const lines = wo.lines.map((l) => (l.id === lineId ? { ...l, ...patch } : l));
@@ -3209,6 +3458,7 @@ function WorkOrderDetail({ wo, customers, products, goals, sortLog, onChange, on
         {isDropShip(wo) && <Btn kind="primary" onClick={() => setSlipOpen(true)}><FileText size={14} /> Print Packing Slip</Btn>}
         <Btn onClick={onDelete}><Trash2 size={14} /> Delete work order</Btn>
       </div>
+      <WorkOrderHistory wo={wo} history={history} sortLog={sortLog} />
       {woPrintOpen && <WorkOrderPrintView wo={wo} customer={customer} products={products} onClose={() => setWoPrintOpen(false)} />}
       {slipOpen && <PackingSlipPrintView wo={wo} customer={customer} products={products} onClose={() => setSlipOpen(false)} />}
       {bolOpen && <BOLModal wo={wo} customer={customer} products={products} onClose={() => setBolOpen(false)} />}
@@ -3220,7 +3470,7 @@ function WorkOrderDetail({ wo, customers, products, goals, sortLog, onChange, on
         />
       )}
       {printLabels && printLabels.length > 0 && (
-        <FinishedLabelPrintView labels={printLabels} onClose={() => setPrintLabels(null)} />
+        <FinishedLabelPrintView labels={printLabels} onClose={() => setPrintLabels(null)} onSavePdf={() => onLog?.(`Saved ${labelsText} as a PDF`)} />
       )}
       {startWorkOpen && (
         <StartWorkModal
@@ -5537,7 +5787,7 @@ function PalletLabelModal({ wo, customer, products, onClose, onGenerate }) {
   );
 }
 
-function FinishedLabelPrintView({ labels, onClose }) {
+function FinishedLabelPrintView({ labels, onClose, onSavePdf }) {
   useBackLayer(true, onClose);
   return (
     <PrintPortal>
@@ -5546,7 +5796,7 @@ function FinishedLabelPrintView({ labels, onClose }) {
       <div className="max-w-md mx-auto my-8 print-shell">
         <div className="flex justify-end gap-2 mb-3 no-print">
           <Btn kind="dark" onClick={() => window.print()}><Printer size={13} /> Print all {labels.length} labels</Btn>
-          <Btn kind="primary" onClick={() => finishedLabelsPdf(labels).save(`pallet-labels-${today()}.pdf`)}>
+          <Btn kind="primary" onClick={() => { onSavePdf?.(); finishedLabelsPdf(labels).save(`pallet-labels-${today()}.pdf`); }}>
             <FileText size={13} /> Save as 4x1 PDF
           </Btn>
           <CloseBtn onClose={onClose} onDark />
@@ -8589,10 +8839,13 @@ export default function App() {
     try { fn(); } finally { skipHistoryRef.current = false; }
   };
 
-  const applySnapshot = (snap) => {
+  const applySnapshot = (snap, via) => {
     skipHistoryRef.current = true;
     _setCustomers(snap.customers);
     _setProducts(snap.products);
+    // An undo changes orders too, and says so in their history.
+    logWorkOrderChanges(workOrdersRef.current, snap.workOrders, via);
+    workOrdersRef.current = snap.workOrders;
     _setWorkOrders(snap.workOrders);
     _setSortLog(snap.sortLog);
     _setTeam(snap.team);
@@ -8610,7 +8863,7 @@ export default function App() {
     futureRef.current.push(latestRef.current);
     if (futureRef.current.length > HISTORY_LIMIT) futureRef.current.shift();
     lastPushRef.current = 0; // next edit after an undo always gets its own checkpoint
-    applySnapshot(prev);
+    applySnapshot(prev, "undo");
     refreshHistoryCounts();
   };
   const redo = () => {
@@ -8619,7 +8872,7 @@ export default function App() {
     historyRef.current.push(latestRef.current);
     if (historyRef.current.length > HISTORY_LIMIT) historyRef.current.shift();
     lastPushRef.current = 0;
-    applySnapshot(next);
+    applySnapshot(next, "redo");
     refreshHistoryCounts();
   };
 
@@ -8674,7 +8927,15 @@ export default function App() {
       setProducts(next);
     }
   };
-  const setWorkOrders = (v) => { pushHistory(); _setWorkOrders(v); };
+  // Every change to an order is compared with what it was a moment ago
+  // and written to that order's history (see diffWorkOrders).
+  const setWorkOrders = (v) => {
+    pushHistory();
+    const next = typeof v === "function" ? v(workOrdersRef.current) : v;
+    logWorkOrderChanges(workOrdersRef.current, next);
+    workOrdersRef.current = next;
+    _setWorkOrders(next);
+  };
   const setSortLog = (v) => { pushHistory(); _setSortLog(v); };
   const setTeam = (v) => { pushHistory(); _setTeam(v); };
   const setSuppliers = (v) => { pushHistory(); _setSuppliers(v); };
@@ -8682,6 +8943,35 @@ export default function App() {
   const setUnits = (v) => { pushHistory(); _setUnits(v); };
   const setShifts = (v) => { pushHistory(); _setShifts(v); };
   const setInvLog = (v) => { pushHistory(); _setInvLog(v); };
+
+  // Work order history (see describeWOChanges). Its own collection, and
+  // deliberately not part of undo snapshots: undoing a change is itself
+  // something that happened, and gets its own line.
+  const [woHistory, _setWoHistory] = useState([]);
+  const woHistoryRef = useRef(woHistory);
+  woHistoryRef.current = woHistory;
+  const [deviceUser, _setDeviceUser] = useState(readDeviceUser);
+  const setDeviceUser = (name) => { writeDeviceUser(name); _setDeviceUser(name); };
+  const deviceUserRef = useRef(deviceUser);
+  deviceUserRef.current = deviceUser;
+  // The list as of the last change, so two changes before the screen
+  // redraws still each compare against the right "before".
+  const workOrdersRef = useRef(workOrders);
+  workOrdersRef.current = workOrders;
+  const addWOHistory = (entries) => {
+    if (!entries.length) return;
+    const next = foldHistory(woHistoryRef.current, entries);
+    woHistoryRef.current = next;
+    _setWoHistory(next);
+  };
+  const logWorkOrderChanges = (prev, next, via) =>
+    addWOHistory(diffWorkOrders(prev, next, { customers, products, statusLabel: STATUS_LABEL }, deviceUserRef.current, via));
+  // Things that happen to an order without changing it: printing, starting work.
+  const logWOEvent = (woId, label) => {
+    const wo = workOrdersRef.current.find((w) => w.id === woId);
+    if (wo) addWOHistory([makeHistoryEntry(wo, { field: "event", label }, deviceUserRef.current)]);
+  };
+
   const [whoWorking, setWhoWorking] = useState("");
   const [activeWOId, setActiveWOId] = useState(null);
   const [activeProductId, setActiveProductId] = useState(null);
@@ -8733,6 +9023,10 @@ export default function App() {
   const startWork = (jobs) => {
     if (!jobs.length) return;
     const [first, ...rest] = jobs;
+    if (first.workOrderId) {
+      const steps = jobs.map((j) => PROCESS_STEPS.find((s) => s.id === j.step)?.label || j.step).join(", ");
+      logWOEvent(first.workOrderId, `Started working: ${steps} (${first.crew.join(" + ")})`);
+    }
     seedDraftFor(first);
     setWhoWorking(first.crew[0] || "");
     setJumpToWorkStep({ step: first.step, nonce: Math.random() });
@@ -8775,6 +9069,7 @@ export default function App() {
     { key: KEY.units, set: _setUnits, get: () => units, arr: true },
     { key: KEY.timeLog, set: _setShifts, get: () => shifts, arr: true },
     { key: KEY.invLog, set: _setInvLog, get: () => invLog, arr: true },
+    { key: KEY.woHistory, set: _setWoHistory, get: () => woHistory, arr: true },
     { key: KEY.goals, set: (d) => setGoals(d && !Array.isArray(d) ? d : { boardsPerHour: 100 }), get: () => goals, arr: false },
   ];
   const collectionsRef = useRef(COLLECTIONS);
@@ -9015,6 +9310,7 @@ export default function App() {
   useEffect(() => { if (loaded) saveKey(KEY.units, units); }, [units, loaded]);
   useEffect(() => { if (loaded) saveKey(KEY.timeLog, shifts); }, [shifts, loaded]);
   useEffect(() => { if (loaded) saveKey(KEY.invLog, invLog); }, [invLog, loaded]);
+  useEffect(() => { if (loaded) saveKey(KEY.woHistory, woHistory); }, [woHistory, loaded]);
   useEffect(() => { if (loaded) saveKey(KEY.goals, goals); }, [goals, loaded]);
 
   const addTeamMember = (name) => { if (!team.includes(name)) setTeam([...team, name]); };
@@ -9080,6 +9376,9 @@ export default function App() {
   };
 
   const deleteSortEntry = (entry) => {
+    // The work log line leaves the order's history with the entry, so
+    // the deletion itself is what stays on record.
+    if (entry.workOrderId) logWOEvent(entry.workOrderId, `Deleted a work log: ${workLogText(entry)}`);
     runGrouped(() => {
       // A ship load is a tally across many SKUs at once, so it puts back
       // each line's own stock quantity. This has to come first: ship
@@ -9286,6 +9585,7 @@ export default function App() {
             <span style={{ fontWeight: 900, letterSpacing: "0.08em", fontSize: 16 }}>GNWS OPS</span>
           </div>
           <div className="flex items-center gap-2 relative">
+            <DeviceUserPicker team={team} value={deviceUser} onChange={setDeviceUser} />
             <SyncBar
               state={syncState} remoteAhead={remoteAhead} lastSyncedAt={lastSyncedAt}
               onSave={flushSaves} onSync={() => syncNow()}
@@ -9423,6 +9723,7 @@ export default function App() {
           activeWO ? (
             <WorkOrderDetail
               wo={activeWO} customers={customers} products={products} goals={goals} sortLog={sortLog}
+              history={woHistory} onLog={(label) => logWOEvent(activeWO.id, label)}
               onChange={updateWO} onDelete={() => deleteWO(activeWO.id)} onBack={() => setActiveWOId(null)}
               team={team} whoWorking={whoWorking} setWhoWorking={setWhoWorking} onAddTeamMember={addTeamMember}
               onUpdateCustomerSpec={(customerId, patch) => setCustomers(customers.map((c) => (c.id === customerId ? { ...c, spec: { ...c.spec, ...patch } } : c)))}
@@ -9430,7 +9731,13 @@ export default function App() {
             />
           ) : (
             <WorkOrderBoard workOrders={workOrders} customers={customers} products={products} goals={goals} onOpen={(id) => setActiveWOId(id)} onNew={newWorkOrder} onImport={() => setImportOpen(true)} onPushThrough={pushWOThrough}
-              onMove={(id, status, orderedIds) => setWorkOrders(workOrders.map((w) => {
+              onMove={(id, status, orderedIds) => {
+                // A move between columns shows up as a status change on
+                // its own. A drag within one only reorders the cards, which
+                // leaves no mark on the order worth describing, so say it.
+                const card = workOrders.find((w) => w.id === id);
+                if (card && (card.status || "not_started") === status && orderedIds.indexOf(id) !== card.rank) logWOEvent(id, "Moved on the board");
+                setWorkOrders(workOrders.map((w) => {
                 // Every card in the destination column gets its position,
                 // so the order holds on every device, not just this one.
                 const rank = orderedIds.indexOf(w.id);
@@ -9439,7 +9746,8 @@ export default function App() {
                 const next = { ...w, rank };
                 if (moving) Object.assign(next, { status }, status === "shipped" ? { shippedAt: w.shippedAt || new Date().toISOString() } : { shippedAt: "" });
                 return next;
-              }))}
+              }));
+              }}
               onToggleStar={(id) => setWorkOrders(workOrders.map((w) => (w.id === id ? { ...w, starred: !w.starred } : w)))} />
           )
         )}
