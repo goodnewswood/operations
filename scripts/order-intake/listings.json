@@ -1,0 +1,22 @@
+{
+  "_about": "Which catalog item each online store listing sells, and what one item on an order is. Matched by the store's SKU (listingSku) or the exact listing title (plus variant, if given). unit is the unit one item is counted in (box, sf, board, plank) and perItem is how many of that unit one item is. A listing not in here still gets entered, as a described line with a warning, until Ero says what it is.",
+  "shopify": [
+    {
+      "listingSku": "S3S-545-NAT",
+      "title": "Barnwood Mix Reclaimed Redwood Wall Planks",
+      "sku": "S3S-545-NAT",
+      "unit": "box",
+      "perItem": 1,
+      "why": "Sold per box at $6.95/ft², which is $139 for the 20 SF box in the catalog."
+    }
+  ],
+  "etsy": [
+    {
+      "title": "Reclaimed Wood Planks - Weathered Gray Barn Wood - Rustic Wall Decor - DIY Project Material",
+      "sku": "TRM-848-NAT",
+      "unit": "box",
+      "perItem": 1,
+      "why": "How Ero entered Etsy orders 4145102181 (WO-2026-2261) and 4134397453 (WO-2026-004): one item is one box of 10 boards."
+    }
+  ]
+}
