@@ -52,6 +52,11 @@ const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
 // only ever reads wo.quoteId (set by GNWS Office), never writes it.
 const OFFICE_URL = "https://gnws-office.vercel.app";
 
+// Where a "Reorder" purchase request from the dashboard gets sent. It opens
+// a pre-filled email in whatever mail app the device has, so nothing here
+// needs an account or an API key to keep working.
+const REORDER_EMAIL = "erogorski@gmail.com";
+
 /* ---------------- Shared storage keys ---------------- */
 const KEY = {
   customers: "gnws-shared-customers-v1",
@@ -1794,12 +1799,20 @@ function WhoSelect({ team, current, onChange, onAddMember, onDark = false, big =
   );
 }
 
-function Dashboard({ workOrders, products, sortLog, units, onOpenWO, goTab, goals, onGoalsChange, onClearShort }) {
-  const short = products.filter((p) => Number(p.shortBy) > 0);
-  const active = workOrders.filter((w) => w.status !== "shipped");
+function Dashboard({ workOrders, products, sortLog, onOpenWO, goTab, whoWorking }) {
   const byStatus = STATUS_FLOW.reduce((acc, s) => ({ ...acc, [s]: workOrders.filter((w) => w.status === s).length }), {});
   const todaysSorts = sortLog.filter((s) => s.date === today());
-  const unclaimedUnits = (units || []).filter((u) => Number(u.boardsRemaining) > 0);
+  const [reorderKind, setReorderKind] = useState(null); // "wood" | "nonwood" | null
+
+  // Monday-start, so "this week" resets the same day the shop week does.
+  const weekBegin = weekStart(today());
+  const inThisWeek = (d) => !!d && d >= weekBegin && d <= today();
+
+  // Shipped is a one-way door (a work order never leaves "shipped"), so a
+  // plain count of it is really a lifetime total. shippedAt is the real
+  // timestamp; orders older than that field fall back to their planned
+  // ship date.
+  const shippedThisWeek = workOrders.filter((w) => w.status === "shipped" && inThisWeek(w.shippedAt ? localDay(w.shippedAt) : (w.shipDate || null))).length;
 
   // The one thing that actually stops a work order: a line that needs
   // more of a product than is on hand, where the raw stock behind it
@@ -1826,19 +1839,16 @@ function Dashboard({ workOrders, products, sortLog, units, onOpenWO, goTab, goal
       })
       .filter(Boolean));
 
-  // Throughput over the trailing 30 days — total boards sorted divided by
-  // total logged hours. Only counts entries with an actual timer value;
-  // entries logged with no time attached don't skew the rate.
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - 30);
-  const cutoffStr = cutoff.toISOString().slice(0, 10);
-  const recentTimed = sortLog.filter((s) => s.date >= cutoffStr && Number(s.seconds) > 0);
-  const totalBoards30 = recentTimed.reduce((sum, s) => sum + (Number(s.rawBoards) || 0), 0);
-  const totalSeconds30 = recentTimed.reduce((sum, s) => sum + (Number(s.seconds) || 0), 0);
-  const boardsPerHour = totalSeconds30 > 0 ? totalBoards30 / (totalSeconds30 / 3600) : 0;
-  const goal = Number(goals?.boardsPerHour) || 0;
-  const aboveGoal = totalSeconds30 > 0 && goal > 0 && boardsPerHour >= goal;
-  const belowGoal = totalSeconds30 > 0 && goal > 0 && boardsPerHour < goal;
+  // Work logs recorded this week (any process step), by whoever logged
+  // them — a quick scoreboard, most logs first.
+  const logsByPerson = {};
+  sortLog.filter((s) => inThisWeek(s.date)).forEach((s) => {
+    const name = String(s.by || "").trim() || "Unattributed";
+    logsByPerson[name] = (logsByPerson[name] || 0) + 1;
+  });
+  const leaderboard = Object.entries(logsByPerson)
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count);
 
   return (
     <div>
@@ -1870,135 +1880,152 @@ function Dashboard({ workOrders, products, sortLog, units, onOpenWO, goTab, goal
           </div>
         </div>
       )}
-      {short.length > 0 && (
-        /* Sorting has run these SKUs past what the last count said was there.
-           The work log is the true record, so the stock sat at zero and the
-           shortfall is shown here until somebody walks the racks. */
-        <div className="rounded-sm p-4 mb-5" style={{ background: "#fff", border: `1px solid ${C.redwood}`, borderLeft: `4px solid ${C.redwood}` }}>
-          <div className="flex items-start gap-2">
-            <AlertTriangle size={16} style={{ color: C.redwood, flexShrink: 0, marginTop: 1 }} />
-            <div style={{ flex: 1 }}>
-              <div style={{ fontWeight: 800, color: C.redwood }}>
-                {short.length} SKU{short.length === 1 ? "" : "s"} sorted past what the count said
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5 mb-5">
+        {STATUS_FLOW.map((s) => {
+          const shipped = s === "shipped";
+          return (
+            <button
+              key={s}
+              onClick={() => goTab("orders")}
+              className="rounded-sm p-4 text-left hover:shadow-md transition-shadow"
+              style={{ background: C.panel, border: `1px solid ${C.kraftDark}`, borderLeft: `4px solid ${STATUS_COLOR[s]}` }}
+            >
+              <div style={{ fontFamily: MONO, fontSize: 10, color: C.faint, letterSpacing: "0.08em" }}>
+                {shipped ? "SHIPPED THIS WEEK" : STATUS_LABEL[s].toUpperCase()}
               </div>
-              <div className="text-sm mt-1" style={{ color: C.faint }}>
-                Held at zero. The work logs are right, so the count was short. Recount these racks.
-              </div>
-              <div className="mt-2 space-y-1">
-                {short.map((p) => (
-                  <div key={p.id} className="flex items-center justify-between gap-2 text-sm" style={{ fontFamily: MONO }}>
-                    <span><strong>{p.sku}</strong> short by {num(p.shortBy)}{p.shortAt ? ` · ${p.shortAt}` : ""}</span>
-                    {onClearShort && (
-                      <button
-                        onClick={() => onClearShort(p)}
-                        className="px-2 py-1 rounded-sm text-xs"
-                        style={{ fontFamily: MONO, color: C.ink, border: `1px solid ${C.kraftDark}` }}
-                      >
-                        Counted it
-                      </button>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-      <div className="rounded-sm p-4 mb-5" style={{ background: C.panel, border: `1px solid ${C.kraftDark}`, borderLeft: `4px solid ${aboveGoal ? C.moss : belowGoal ? C.redwood : C.gold}` }}>
-        <div className="flex items-center justify-between">
-          <div style={{ fontFamily: MONO, fontSize: 10, color: C.faint, letterSpacing: "0.08em" }}>SORTING THROUGHPUT · LAST 30 DAYS</div>
-          <div className="flex items-center gap-1 text-xs" style={{ color: C.faint, fontFamily: MONO }}>
-            GOAL
-            <input
-              type="number" value={goals?.boardsPerHour ?? ""} placeholder="—"
-              onChange={(e) => onGoalsChange({ ...goals, boardsPerHour: e.target.value })}
-              style={{ width: 55, border: `1px solid ${C.kraftDark}`, borderRadius: 3, padding: "2px 4px", textAlign: "right", fontFamily: MONO }}
-            />
-            bd/hr
-          </div>
-        </div>
-        {totalSeconds30 === 0 ? (
-          <div className="text-sm mt-1" style={{ color: C.faint }}>No timed sorting batches logged in the last 30 days yet.</div>
-        ) : (
-          <div className="flex items-baseline gap-2 mt-1">
-            <span style={{ fontSize: 28, fontWeight: 900, color: aboveGoal ? C.moss : belowGoal ? C.redwood : C.ink }}>{num(boardsPerHour, 1)}</span>
-            <span style={{ fontSize: 13, color: C.faint }}>boards / man-hour (actual)</span>
-            <span style={{ fontSize: 12, color: C.faint, marginLeft: 8 }}>({num(totalBoards30)} boards over {num(hoursDecimal(totalSeconds30), 1)}h logged)</span>
-          </div>
-        )}
+              <div style={{ fontSize: 28, fontWeight: 900 }}>{shipped ? shippedThisWeek : byStatus[s]}</div>
+            </button>
+          );
+        })}
       </div>
 
       <div className="rounded-sm p-4 mb-5" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
-        <div className="flex items-center justify-between mb-3">
-          <div style={{ fontWeight: 800, fontSize: 15 }}>Open Work Orders</div>
-          <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>{active.length} open</span>
-        </div>
-        {active.length === 0 ? (
-          <div className="text-sm text-center py-6" style={{ color: C.faint }}>Nothing active right now.</div>
+        <div style={{ fontFamily: MONO, fontSize: 10, color: C.faint, letterSpacing: "0.08em", marginBottom: 8 }}>RECORDED WORK LOGS · THIS WEEK</div>
+        {leaderboard.length === 0 ? (
+          <div className="text-sm" style={{ color: C.faint }}>Nothing logged yet this week.</div>
         ) : (
-          <div className="grid gap-2 sm:grid-cols-2">
-            {active.map((w) => (
-              <button
-                key={w.id} onClick={() => onOpenWO(w.id)}
-                className="text-left flex items-center justify-between px-3 py-2 rounded-sm hover:opacity-80"
-                style={{ background: C.paper, border: `1px solid ${C.kraft}` }}
+          <div className="space-y-1">
+            {leaderboard.map((row, i) => (
+              <div
+                key={row.name} className="flex items-center gap-3 px-2 py-1.5 rounded-sm"
+                style={{ background: i === 0 ? C.paper : "transparent" }}
               >
-                <div>
-                  <div style={{ fontFamily: MONO, fontWeight: 700, fontSize: 13 }}>{w.number}</div>
-                  <div style={{ fontSize: 12, color: C.faint }}>{w.customerName || "No customer"}</div>
-                </div>
-                <span
-                  className="px-2 py-0.5 rounded-sm text-xs font-bold"
-                  style={{ background: STATUS_COLOR[w.status], color: "#fff", fontFamily: MONO }}
-                >
-                  {STATUS_LABEL[w.status]}
-                </span>
-              </button>
+                <span style={{ fontFamily: MONO, fontWeight: 900, fontSize: 14, color: C.faint, width: 20 }}>{i + 1}</span>
+                <span style={{ fontWeight: 700, flex: 1 }}>{row.name}</span>
+                <span style={{ fontFamily: MONO, fontWeight: 800, color: C.ink }}>{row.count}</span>
+              </div>
             ))}
           </div>
         )}
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5 mb-5">
-        {STATUS_FLOW.map((s) => (
-          <button
-            key={s}
-            onClick={() => goTab("orders")}
-            className="rounded-sm p-4 text-left hover:shadow-md transition-shadow"
-            style={{ background: C.panel, border: `1px solid ${C.kraftDark}`, borderLeft: `4px solid ${STATUS_COLOR[s]}` }}
-          >
-            <div style={{ fontFamily: MONO, fontSize: 10, color: C.faint, letterSpacing: "0.08em" }}>{STATUS_LABEL[s].toUpperCase()}</div>
-            <div style={{ fontSize: 28, fontWeight: 900 }}>{byStatus[s]}</div>
-          </button>
-        ))}
+      <div className="rounded-sm p-4 mb-5" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
+        <div style={{ fontFamily: MONO, fontSize: 10, color: C.faint, letterSpacing: "0.08em", marginBottom: 8 }}>REORDER</div>
+        <div className="text-sm mb-3" style={{ color: C.faint }}>Out of something? Send a purchase request straight to Ero.</div>
+        <div className="grid gap-2 sm:grid-cols-2">
+          <Btn big onClick={() => setReorderKind("wood")}><Boxes size={16} /> Wood</Btn>
+          <Btn big onClick={() => setReorderKind("nonwood")}><Package size={16} /> Non-wood (supplies)</Btn>
+        </div>
       </div>
 
-      <div className="rounded-sm p-4" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
-        <div className="flex items-center justify-between mb-1">
-          <span style={{ fontFamily: MONO, fontSize: 10, color: C.faint, letterSpacing: "0.08em" }}>RECEIVED UNITS AWAITING SORT</span>
-          <button onClick={() => goTab("work")} style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>View →</button>
-        </div>
-        {unclaimedUnits.length === 0 ? (
-          <div className="text-sm" style={{ color: C.faint }}>Nothing waiting.</div>
-        ) : (
-          <div className="text-sm">{unclaimedUnits.length} unit{unclaimedUnits.length === 1 ? "" : "s"} on hand</div>
-        )}
+      {reorderKind && (
+        <PurchaseRequestModal kind={reorderKind} whoWorking={whoWorking} onClose={() => setReorderKind(null)} />
+      )}
 
-        <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${C.kraft}` }}>
-          <div style={{ fontFamily: MONO, fontSize: 10, color: C.faint, letterSpacing: "0.08em", marginBottom: 6 }}>TODAY'S SORTING</div>
-          {todaysSorts.length === 0 ? (
-            <div className="text-sm" style={{ color: C.faint }}>No sorting logged today.</div>
-          ) : (
-            <div className="space-y-1">
-              {todaysSorts.map((s) => (
-                <div key={s.id} className="text-sm flex justify-between">
-                  <span>{s.batchLabel} · {s.by}</span>
-                  <span style={{ fontFamily: MONO, color: C.faint }}>{num(s.rawBoards)} bd → sorted</span>
-                </div>
-              ))}
-            </div>
-          )}
+      <div className="rounded-sm p-4" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
+        <div style={{ fontFamily: MONO, fontSize: 10, color: C.faint, letterSpacing: "0.08em", marginBottom: 6 }}>TODAY'S SORTING</div>
+        {todaysSorts.length === 0 ? (
+          <div className="text-sm" style={{ color: C.faint }}>No sorting logged today.</div>
+        ) : (
+          <div className="space-y-1">
+            {todaysSorts.map((s) => (
+              <div key={s.id} className="text-sm flex justify-between">
+                <span>{s.batchLabel} · {s.by}</span>
+                <span style={{ fontFamily: MONO, color: C.faint }}>{num(s.rawBoards)} bd → sorted</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// A quick "we're out of X" note, emailed to Ero. Opens the device's own
+// mail app with the request pre-filled — no account or API key to keep
+// working, at the cost of needing a mail app actually set up on it.
+function PurchaseRequestModal({ kind, whoWorking, onClose }) {
+  const [what, setWhat] = useState("");
+  const [amount, setAmount] = useState("");
+  const [note, setNote] = useState("");
+  const [sent, setSent] = useState(false);
+  const kindLabel = kind === "wood" ? "Wood" : "Non-wood supplies";
+
+  const send = () => {
+    const subject = `Purchase request: ${kindLabel}${what ? ` — ${what}` : ""}`;
+    const lines = [
+      `What: ${what}`,
+      amount ? `How much: ${amount}` : "",
+      note ? `Note: ${note}` : "",
+      `Requested by: ${whoWorking || "Not set on the dashboard"}`,
+      `Sent from the GNWS Ops dashboard, ${new Date().toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" })}.`,
+    ].filter(Boolean);
+    window.location.href = `mailto:${REORDER_EMAIL}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(lines.join("\n"))}`;
+    setSent(true);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 overflow-auto p-4" style={{ background: "rgba(34,29,25,0.6)" }}>
+      <div className="rounded-sm p-5 w-full max-w-md mx-auto my-8" style={{ background: C.panel }}>
+        <div className="flex items-center justify-between mb-4">
+          <div style={{ fontWeight: 800, fontSize: 16 }}>Reorder: {kindLabel}</div>
+          <CloseBtn onClose={onClose} />
         </div>
+
+        {sent ? (
+          <>
+            <div className="text-sm" style={{ color: C.ink }}>
+              Your mail app should have opened with this request ready to go — just hit send there.
+            </div>
+            <div className="mt-4">
+              <Btn kind="primary" big onClick={onClose}>Done</Btn>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="space-y-3">
+              <Field label="What do you need" required>
+                <input
+                  autoFocus type="text" style={inputStyle} value={what}
+                  onChange={(e) => setWhat(e.target.value)}
+                  placeholder={kind === "wood" ? "e.g. 6\" x 48\" End Trim, Natural" : "e.g. 16-gauge finish nails"}
+                />
+              </Field>
+              <Field label="How much">
+                <input
+                  type="text" style={inputStyle} value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
+                  placeholder="e.g. 2 boxes, or however you'd say it"
+                />
+              </Field>
+              <Field label="Note">
+                <input
+                  type="text" style={inputStyle} value={note}
+                  onChange={(e) => setNote(e.target.value)}
+                  placeholder="Anything else Ero should know"
+                />
+              </Field>
+              <div className="text-xs" style={{ color: C.faint, fontFamily: MONO }}>
+                Requested by: {whoWorking || "not set — pick who's working from the menu first"}
+              </div>
+            </div>
+            <div className="mt-4">
+              <Btn kind="primary" big disabled={!what.trim()} onClick={send}>
+                <Mail size={16} /> Send request
+              </Btn>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -9700,10 +9727,7 @@ export default function App() {
 
       <main className="max-w-6xl mx-auto px-4 py-5 pb-24 sm:pb-5">
         {tab === "dashboard" && (
-          <Dashboard workOrders={workOrders} products={products} sortLog={sortLog} units={units} onOpenWO={(id) => { setActiveWOId(id); goTab("orders"); setOrdersSubTab("workorders"); }} goTab={goTab} goals={goals} onGoalsChange={setGoals}
-            onClearShort={(p) => setProductsLogged(
-              products.map((x) => (x.id === p.id ? { ...x, shortBy: 0, shortAt: "" } : x)),
-              { reason: "count", note: `Recounted after running ${num(p.shortBy)} short`, by: whoWorking })} />
+          <Dashboard workOrders={workOrders} products={products} sortLog={sortLog} units={units} onOpenWO={(id) => { setActiveWOId(id); goTab("orders"); setOrdersSubTab("workorders"); }} goTab={goTab} whoWorking={whoWorking} />
         )}
 
         {tab === "orders" && !(ordersSubTab === "workorders" && activeWO) && (
