@@ -1970,7 +1970,15 @@ function PurchaseRequestModal({ kind, whoWorking, onClose }) {
       `Requested by: ${whoWorking || "Not set on the dashboard"}`,
       `Sent from the GNWS Ops dashboard, ${new Date().toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" })}.`,
     ].filter(Boolean);
-    window.location.href = `mailto:${REORDER_EMAIL}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(lines.join("\n"))}`;
+    // A plain window.location.href navigates the app itself to the mailto
+    // link, which some browsers (and this app installed as a PWA) resolve
+    // by loading a web mail client right over the app instead of handing
+    // off to it. A clicked link with a non-http scheme is treated as a
+    // hand-off instead, so the app stays put.
+    const url = `mailto:${REORDER_EMAIL}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(lines.join("\n"))}`;
+    const a = document.createElement("a");
+    a.href = url;
+    a.click();
     setSent(true);
   };
 
