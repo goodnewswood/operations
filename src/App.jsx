@@ -71,7 +71,42 @@ const KEY = {
   goals: "gnws-shared-goals-v1",
   invLog: "gnws-shared-invlog-v1",
   woHistory: "gnws-shared-wohistory-v1",
+  // GNWS Office owns these. Ops loads them only so a work order edit can
+  // carry its dates and customer up to them (see carryWorkOrderUp).
+  quotes: "gnws-shared-quotes-v1",
+  salesOrders: "gnws-shared-salesorders-v1",
 };
+
+/* The details a work order has to agree with its sales order and quote on.
+   GNWS Office carries edits to these down from a quote or sales order; a
+   work order edit here carries them back up, so the office never invoices
+   or reprints a quote off a date the floor already moved. Money, lines and
+   notes never travel: this app holds no prices, and each record's notes
+   are written for a different reader. Same list as in Office. */
+const SHARED_ORDER_FIELDS = ["customerId", "brand", "readyByDate", "shipDate", "shipVia", "dropShip", "shipTo", "customerPO"];
+
+// The shared details one work order edit changed, or null if none did.
+function upstreamPatch(before, after) {
+  const patch = {};
+  for (const k of SHARED_ORDER_FIELDS) {
+    if (after && k in after && JSON.stringify(before?.[k] ?? "") !== JSON.stringify(after[k] ?? "")) patch[k] = after[k];
+  }
+  return Object.keys(patch).length ? patch : null;
+}
+
+// Carries a work order edit up to its sales order and quote, but only when
+// it's that sales order's one work order. Where a sales order feeds several
+// (one per drop ship destination), each shipment can have its own date and
+// address, and changing one mustn't rewrite the sales order they share.
+function carryWorkOrderUp(before, after, { workOrders, salesOrders, setSalesOrders, setQuotes }) {
+  const patch = upstreamPatch(before, after);
+  if (!patch) return;
+  const so = after.salesOrderId ? salesOrders.find((s) => s.id === after.salesOrderId) : null;
+  if (so && workOrders.filter((w) => w.id === so.workOrderId || w.salesOrderId === so.id).length > 1) return;
+  if (so) setSalesOrders((list) => list.map((s) => (s.id === so.id ? { ...s, ...patch } : s)));
+  const quoteId = after.quoteId || so?.quoteId;
+  if (quoteId) setQuotes((list) => list.map((q) => (q.id === quoteId ? { ...q, ...patch } : q)));
+}
 
 /* ---------------- Seed data ---------------- */
 
@@ -8831,6 +8866,10 @@ export default function App() {
   const [shifts, _setShifts] = useState([]);
   const [invLog, _setInvLog] = useState([]);
   const [goals, setGoals] = useState({ boardsPerHour: 100 });
+  // Office's records, loaded only so work order edits can carry up to them.
+  // Kept out of undo: undoing a work order edit here doesn't reach into Office.
+  const [quotes, setQuotes] = useState([]);
+  const [salesOrders, setSalesOrders] = useState([]);
 
   // --- Undo/redo history --------------------------------------------
   // Every meaningful action touches one or more of the 8 arrays above.
@@ -9105,6 +9144,8 @@ export default function App() {
     { key: KEY.timeLog, set: _setShifts, get: () => shifts, arr: true },
     { key: KEY.invLog, set: _setInvLog, get: () => invLog, arr: true },
     { key: KEY.woHistory, set: _setWoHistory, get: () => woHistory, arr: true },
+    { key: KEY.quotes, set: setQuotes, get: () => quotes, arr: true },
+    { key: KEY.salesOrders, set: setSalesOrders, get: () => salesOrders, arr: true },
     { key: KEY.goals, set: (d) => setGoals(d && !Array.isArray(d) ? d : { boardsPerHour: 100 }), get: () => goals, arr: false },
   ];
   const collectionsRef = useRef(COLLECTIONS);
@@ -9346,6 +9387,8 @@ export default function App() {
   useEffect(() => { if (loaded) saveKey(KEY.timeLog, shifts); }, [shifts, loaded]);
   useEffect(() => { if (loaded) saveKey(KEY.invLog, invLog); }, [invLog, loaded]);
   useEffect(() => { if (loaded) saveKey(KEY.woHistory, woHistory); }, [woHistory, loaded]);
+  useEffect(() => { if (loaded) saveKey(KEY.quotes, quotes); }, [quotes, loaded]);
+  useEffect(() => { if (loaded) saveKey(KEY.salesOrders, salesOrders); }, [salesOrders, loaded]);
   useEffect(() => { if (loaded) saveKey(KEY.goals, goals); }, [goals, loaded]);
 
   const addTeamMember = (name) => { if (!team.includes(name)) setTeam([...team, name]); };
@@ -9474,7 +9517,9 @@ export default function App() {
 
   const updateWO = (w) => {
     const cust = customers.find((c) => c.id === w.customerId);
+    const before = workOrders.find((x) => x.id === w.id);
     setWorkOrders(workOrders.map((x) => (x.id === w.id ? { ...w, customerName: cust?.company || "" } : x)));
+    carryWorkOrderUp(before, w, { workOrders, salesOrders, setSalesOrders, setQuotes });
   };
   const deleteWO = (id) => {
     setWorkOrders(workOrders.filter((w) => w.id !== id));
