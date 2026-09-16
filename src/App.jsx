@@ -1134,7 +1134,8 @@ const WO_NUMBER_BASE_RE = /^([A-Z]+-\d{4}-\d+)(-.*)?$/;
 // 187N" for one product, a summed total for several. Empty until at
 // least one line has both a product and a quantity.
 function productSuffix(lines, products) {
-  const valid = (lines || []).filter((l) => (Number(l.qtySF) || 0) > 0);
+  // Square feet of product only: an installation line isn't SF of anything.
+  const valid = (lines || []).filter((l) => (Number(l.qtySF) || 0) > 0 && !isService(products.find((p) => p.id === l.productId)));
   if (!valid.length) return "";
   const skuOf = (l) => (products.find((p) => p.id === l.productId)?.sku || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 14);
   if (valid.length === 1) {
@@ -1237,8 +1238,12 @@ function stepRate(sortLog, step) {
   return { boards, seconds, rate, target: rate * TARGET_MULTIPLIER, samples: rows.length };
 }
 
+// Services (installation, delivery) are sold, not stocked: no count, no
+// square feet, no place on the floor. Like packaging they sell in their
+// own unit: "ea" for a flat charge, or "sf" to price by the square foot.
+const isService = (p) => p?.category === "service";
 const canonicalUnitFor = (p) =>
-  p.category === "paint" ? "gal" : p.category === "packing" ? (p.unitLabel || "ea") : (p.kind === "sf" ? "sf" : "board");
+  p.category === "paint" ? "gal" : (p.category === "packing" || isService(p)) ? (p.unitLabel || "ea") : (p.kind === "sf" ? "sf" : "board");
 const hasSF = (p) => canonicalUnitFor(p) === "sf" || Object.keys(buildUnitGraph(p)).includes("sf");
 // A product names its raw source one of two ways: a finished SF good
 // points at it directly (sourceBoardSku), while a sorted-but-unmilled
@@ -1338,7 +1343,7 @@ function convertQty(product, qty, fromUnit, toUnit) {
 function unitsFor(product) {
   if (!product) return ["sf", "board", "plank"];
   if (product.category === "paint") return ["gal", "qt", "sf"];
-  if (product.category === "packing") return [product.unitLabel || "ea"];
+  if (product.category === "packing" || isService(product)) return [product.unitLabel || "ea"];
   const units = new Set(["board", "plank", "sf"]);
   const graph = buildUnitGraph(product);
   Object.keys(graph).forEach((u) => units.add(u));
@@ -2263,6 +2268,7 @@ function woLineSummary(wo, products, max = 3) {
     const p = products?.find((x) => x.id === l.productId);
     const label = p?.sku || (l.desc || "").trim() || "—";
     const qty = Number(l.qtySF) || 0;
+    if (isService(p)) return qty ? `${label} × ${fmtConv(qty)}` : label;
     return qty ? `${label} ${fmtConv(qty)} SF` : label;
   });
   const head = parts.slice(0, max).join(" · ");
@@ -3400,7 +3406,7 @@ function WorkOrderDetail({ wo, customers, products, goals, sortLog, history, onL
                   value={line.productId}
                   onChange={(e) => {
                     const newProduct = products.find((pr) => pr.id === e.target.value);
-                    updateLine(line.id, { productId: e.target.value, displayUnit: "sf", steps: newProduct?.steps ? { ...newProduct.steps } : defaultSteps() });
+                    updateLine(line.id, { productId: e.target.value, displayUnit: isService(newProduct) ? canonicalUnitFor(newProduct) : "sf", steps: newProduct?.steps ? { ...newProduct.steps } : defaultSteps() });
                   }}
                 >
                   <option value="">Custom / describe below…</option>
@@ -4034,10 +4040,19 @@ function InventoryDetail({ product, products, invLog, onChange, onBack, onDelete
             <option value="milled">Milled wood (planks, boxes)</option>
             <option value="paint">Paint</option>
             <option value="packing">Packaging</option>
+            <option value="service">Service (not stocked)</option>
           </select>
         </Field>
 
-        {category === "packing" ? (
+        {category === "service" ? (
+          <Field label="Sold per">
+            <input style={{ ...inputStyle, width: 120 }} value={p.unitLabel || ""} placeholder="ea" onChange={(e) => update({ unitLabel: e.target.value })} />
+            <div className="text-xs mt-1" style={{ color: C.faint }}>
+              Sold, not stocked: no on-hand count, and it stays off count sheets and the floor pickers.
+              "ea" for a flat charge, or "sf" to price it by the square foot.
+            </div>
+          </Field>
+        ) : category === "packing" ? (
           <Field label="On hand">
             <div className="flex items-center gap-1">
               <input type="number" style={{ ...inputStyle, textAlign: "right", fontFamily: MONO }} value={p.onHand ?? ""} onChange={(e) => update({ onHand: e.target.value })} />
@@ -4335,7 +4350,7 @@ function InventoryCountSheet({ products, group, onClose }) {
   const [cat, setCat] = useState(group || "all");
 
   const rows = products
-    .filter((p) => !p.archived)
+    .filter((p) => !p.archived && !isService(p))
     .filter((p) => (cat === "all" ? true : (p.category || "wood") === cat))
     .slice()
     .sort(bySkuFavoritesFirst);
@@ -4486,7 +4501,7 @@ function InventoryCountEntry({ products, group, onCommit, onClose }) {
   const [entries, setEntries] = useState({});
 
   const rows = products
-    .filter((p) => !p.archived)
+    .filter((p) => !p.archived && !isService(p))
     .filter((p) => (cat === "all" ? true : (p.category || "wood") === cat))
     .slice()
     .sort(bySkuFavoritesFirst);
@@ -4658,7 +4673,7 @@ function InventoryTab({ products, onChange, invLog, activeId, setActiveId }) {
     );
   }
 
-  const sfEquivalent = (p) => (p.category === "packing" ? 0 : convertQty(p, p.onHand, canonicalUnitFor(p), "sf"));
+  const sfEquivalent = (p) => (p.category === "packing" || isService(p) ? 0 : convertQty(p, p.onHand, canonicalUnitFor(p), "sf"));
   const needsReorder = (p) => Number(p.reorderPoint) > 0 && (Number(p.onHand) || 0) <= Number(p.reorderPoint);
   const filtered = products
     .filter((p) => (group === "all" ? true : (p.category || "wood") === group))
@@ -4692,7 +4707,9 @@ function InventoryTab({ products, onChange, invLog, activeId, setActiveId }) {
       // Editable straight from the list — two boxes, each with its own unit,
       // so you can count in whatever the pallet is actually stacked in.
       id: "onHand", label: "On hand",
-      render: (p) => (p.category === "packing" ? (
+      render: (p) => (isService(p) ? (
+        <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>not stocked</span>
+      ) : p.category === "packing" ? (
         <span className="flex items-center gap-1">
           <input
             type="number"
@@ -4734,7 +4751,7 @@ function InventoryTab({ products, onChange, invLog, activeId, setActiveId }) {
     },
     {
       id: "sf", label: "≈ SF",
-      render: (p) => (p.category === "packing" ? "—" : <span style={{ fontFamily: MONO, fontSize: 12, color: C.faint }}>{num(sfEquivalent(p), 0)}</span>),
+      render: (p) => (p.category === "packing" || isService(p) ? "—" :<span style={{ fontFamily: MONO, fontSize: 12, color: C.faint }}>{num(sfEquivalent(p), 0)}</span>),
       sortValue: (p) => sfEquivalent(p),
     },
     {
@@ -4765,7 +4782,7 @@ function InventoryTab({ products, onChange, invLog, activeId, setActiveId }) {
         </div>
       </div>
       <div className="flex flex-wrap items-center gap-2 mb-3">
-        {[["all", "All"], ["wood", "Wood"], ["milled", "Milled"], ["paint", "Paint"], ["packing", "Packaging"]].map(([id, label]) => (
+        {[["all", "All"], ["wood", "Wood"], ["milled", "Milled"], ["paint", "Paint"], ["packing", "Packaging"], ["service", "Services"]].map(([id, label]) => (
           <button
             key={id} onClick={() => setGroup(id)}
             className="px-3 py-1.5 rounded-sm text-xs"
@@ -5478,7 +5495,7 @@ function lineConversions(product, qtySF) {
   if (!product) return [{ unit: "sf", qty: Number(qtySF) || 0 }];
   const units = product.category === "paint"
     ? ["sf", "gal", "qt"]
-    : product.category === "packing"
+    : product.category === "packing" || isService(product)
     ? [product.unitLabel || "ea"]
     : (() => {
         const graph = buildUnitGraph(product);
@@ -6674,7 +6691,9 @@ function SkuPicker({ products, value, onChange, onCreate, placeholder = "— Sel
   const [creating, setCreating] = useState(false);
   const [newSku, setNewSku] = useState("");
 
-  const sorted = products.slice().sort(bySkuFavoritesFirst);
+  // Nobody sorts, rips or loads a truck with an installation, so services
+  // stay out of every stock picker on the floor.
+  const sorted = products.filter((p) => !isService(p)).slice().sort(bySkuFavoritesFirst);
 
   const create = () => {
     const sku = newSku.trim();
@@ -7609,7 +7628,7 @@ function ShipLogTab({ products, onProductsChange, sortLog, onLogSort, onDeleteSo
     const next = [...rows];
     (wo.lines || []).forEach((l) => {
       const p = productOf(l.productId);
-      if (!p || next.some((r) => r.productId === p.id)) return;
+      if (!p || isService(p) || next.some((r) => r.productId === p.id)) return;
       next.push({ productId: p.id, unit: preferredUnit(p), count: 0 });
     });
     setRows(next);
