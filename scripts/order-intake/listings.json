@@ -8,6 +8,14 @@
       "unit": "box",
       "perItem": 1,
       "why": "Sold per box at $6.95/ft², which is $139 for the 20 SF box in the catalog."
+    },
+    {
+      "listingSku": "SHP-748-NAT",
+      "title": "Raw 'Barnwood' Board",
+      "sku": "TRM-848-NAT",
+      "unit": "box",
+      "perItem": 1,
+      "why": "The Shopify listing's SKU field (SHP-748-NAT, 7\" Shiplap Natural) is wrong; the real item is the 8\" x 48\" End Trim, Natural (TRM-848-NAT), same as the matching Etsy listing. Sold per box of 10 boards, per Ero 2026-09-16."
     }
   ],
   "etsy": [
