@@ -3655,11 +3655,24 @@ function ImportInvoiceModal({ customers, onClose, onImported }) {
     setBusy(true);
     setError("");
     try {
-      const response = await fetch("/api/parse-invoice", {
+      // Import spends the shop's AI credits, so the server wants an access
+      // code. It can't live in the app (everything in the app is public),
+      // so this device asks for it once and remembers it after it works.
+      const CODE_KEY = "gnws-import-access-code";
+      let saved = "";
+      try { saved = localStorage.getItem(CODE_KEY) || ""; } catch { /* private browsing */ }
+      const send = (code) => fetch("/api/parse-invoice", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-gnws-access-code": code },
         body: JSON.stringify(body),
       });
+      let response = await send(saved);
+      if (response.status === 401) {
+        const entered = (window.prompt("Import needs the access code. Ask Ero for it.") || "").trim();
+        if (!entered) throw new Error("no access code entered");
+        response = await send(entered);
+        if (response.ok) { try { localStorage.setItem(CODE_KEY, entered); } catch { /* ask again next time */ } }
+      }
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Server couldn't read that");
       const textBlock = (data.content || []).find((b) => b.type === "text");

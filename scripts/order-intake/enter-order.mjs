@@ -15,11 +15,17 @@
    saves, so a new order also survives any tab that was already open.
 
    Exit codes: 0 entered, 2 already in the app, 3 held for Ero to look at,
-   1 error. Nothing is written on 2, 3, or a dry run. */
+   1 error. Nothing is written on 2, 3, or a dry run.
+
+   The same code also runs inside GNWS Ops's Shopify webhook
+   (api/shopify-order.js), through the exported enterOrder(). That's why
+   the checks for an order already being in the app matter as much as
+   they do: the webhook and the scheduled checks will both see most
+   Shopify orders, and whichever arrives second must write nothing. */
 
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // Dates and order numbers run on the shop's clock, same as the apps.
 process.env.TZ = "America/Los_Angeles";
@@ -121,9 +127,19 @@ function loadEnv() {
   return env;
 }
 
+// On Ero's Mac these come from the repo's .env files; on Vercel (the
+// webhook) from the project's environment variables. A service-role key,
+// when one is set, wins over the public key, so this keeps working once
+// the kv table stops accepting writes from the public key.
 const env = loadEnv();
-const SB_URL = env.VITE_SUPABASE_URL;
-const SB_KEY = env.VITE_SUPABASE_ANON_KEY;
+const SB_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || env.VITE_SUPABASE_URL;
+const SB_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || env.VITE_SUPABASE_ANON_KEY;
+
+// Which catalog item each store listing sells. Read fresh for every order,
+// so an edit to listings.json applies to the next order without a restart.
+export function loadListings() {
+  return JSON.parse(fs.readFileSync(path.join(HERE, "listings.json"), "utf8"));
+}
 const HEADERS = { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}`, "Content-Type": "application/json" };
 
 async function readRow(key) {
@@ -224,22 +240,16 @@ function shipToText(s) {
   return [s.name, s.company, s.address, s.address2, cityLine, country].filter((x) => String(x || "").trim()).join(", ");
 }
 
+// Every outcome comes back as one object; the command line prints it (see
+// main), and the webhook turns it into its HTTP response.
 function finish(code, status, lines, extra = {}) {
-  for (const line of lines) console.log(line);
-  console.log(`RESULT ${JSON.stringify({ status, ...extra })}`);
-  process.exitCode = code;
+  return { code, status, lines, ...extra };
 }
 
 /* ---------------- Main ---------------- */
 
-async function main() {
-  const args = process.argv.slice(2);
-  const dryRun = args.includes("--dry-run");
-  const file = args.find((a) => !a.startsWith("--"));
-  if (!file) throw new Error("usage: node scripts/order-intake/enter-order.mjs <order.json> [--dry-run]");
-  if (!SB_URL || !SB_KEY) throw new Error(`no Supabase settings in ${path.join(REPO, ".env")}`);
-
-  const order = JSON.parse(fs.readFileSync(file, "utf8"));
+export async function enterOrder(order, { dryRun = false } = {}) {
+  if (!SB_URL || !SB_KEY) throw new Error(`no Supabase settings (environment variables, or ${path.join(REPO, ".env")})`);
   const channel = norm(order.channel);
   const ch = CHANNELS[channel];
   if (!ch) throw new Error(`channel must be "shopify" or "etsy", got ${JSON.stringify(order.channel)}`);
@@ -314,7 +324,7 @@ async function main() {
   if (newCustomer) customer = newCustomer;
 
   // Which catalog item each line is, and how many square feet.
-  const listings = JSON.parse(fs.readFileSync(path.join(HERE, "listings.json"), "utf8"));
+  const listings = loadListings();
   const liveProducts = products.filter((p) => p && !p.archived);
   const productBySku = (sku) => (sku ? liveProducts.find((p) => norm(p.sku) === norm(sku)) || null : null);
   const listingFor = (l) => (listings[channel] || []).find((e) =>
@@ -520,8 +530,23 @@ async function main() {
   ], { order: orderLabel, salesOrder: so.number, workOrder: wo.number, title: wo.title, warnings, newCustomer: newCustomer?.company || null });
 }
 
-main().catch((e) => {
-  console.error(`ERROR: ${e.message}`);
-  console.log(`RESULT ${JSON.stringify({ status: "error", message: e.message })}`);
-  process.exitCode = 1;
-});
+// Command line: same output as always (the scheduled checks read the
+// RESULT line), only when this file is run directly, not imported.
+async function main() {
+  const args = process.argv.slice(2);
+  const dryRun = args.includes("--dry-run");
+  const file = args.find((a) => !a.startsWith("--"));
+  if (!file) throw new Error("usage: node scripts/order-intake/enter-order.mjs <order.json> [--dry-run]");
+  const { code, lines, ...result } = await enterOrder(JSON.parse(fs.readFileSync(file, "utf8")), { dryRun });
+  for (const line of lines) console.log(line);
+  console.log(`RESULT ${JSON.stringify(result)}`);
+  process.exitCode = code;
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  main().catch((e) => {
+    console.error(`ERROR: ${e.message}`);
+    console.log(`RESULT ${JSON.stringify({ status: "error", message: e.message })}`);
+    process.exitCode = 1;
+  });
+}

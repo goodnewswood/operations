@@ -32,6 +32,8 @@ Don't enter, but do report:
 
 It's fine to hand the script an order that's already in the app. It answers "already in" and writes nothing, so don't try to work out which orders are new yourself.
 
+Shopify orders can also arrive the moment they're placed, through the webhook at `/api/shopify-order` (`api/shopify-order.js`), which runs this same script's code. So for Shopify, "already in" is the normal answer and not a problem. Etsy orders still only come in through these checks.
+
 ## Step 2: Write the order file
 
 One JSON file per order, in your scratchpad directory (or `$TMPDIR`), named like `shopify-71035.json`.

@@ -3,9 +3,34 @@
 // The Anthropic API key stays here, server-side, in an environment
 // variable — it's never sent to the browser.
 
+import crypto from "node:crypto";
+
+// Every call spends the Anthropic key, and this URL is public, so a call
+// has to carry the import access code. The code can't be built into the
+// app: the app has no login and everything in it is readable by anyone.
+// Instead each device is asked for it once (Ops prompts the first time an
+// import is refused) and sends it in a header. Hashing both sides first
+// gives timingSafeEqual equal-length inputs, so the comparison takes the
+// same time whatever was sent.
+function accessCodeOk(given) {
+  const expected = process.env.PARSE_INVOICE_ACCESS_CODE;
+  if (!expected || typeof given !== "string" || !given) return false;
+  const hash = (s) => crypto.createHash("sha256").update(s, "utf8").digest();
+  return crypto.timingSafeEqual(hash(given), hash(expected));
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
+  }
+
+  // Closed unless a code is configured: no code set means nobody gets in,
+  // never that everybody does.
+  if (!process.env.PARSE_INVOICE_ACCESS_CODE) {
+    return res.status(503).json({ error: "Import isn't switched on: no access code is set on the server", code: "access_code_not_set" });
+  }
+  if (!accessCodeOk(req.headers["x-gnws-access-code"])) {
+    return res.status(401).json({ error: "Import access code is missing or wrong", code: "access_code" });
   }
 
   const apiKey = process.env.ANTHROPIC_API_KEY;

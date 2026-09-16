@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/shopify-order.js": {
+      "includeFiles": "scripts/order-intake/listings.json"
+    }
+  }
+}
