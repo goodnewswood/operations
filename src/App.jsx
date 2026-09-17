@@ -2306,7 +2306,10 @@ function WorkOrderBoard({ workOrders, customers, products, goals, onOpen, onNew,
   });
   const setSort = (s) => { _setSort(s); try { localStorage.setItem("gnws-nav-wosort", s); } catch { /* private browsing */ } };
 
+  const archivedCount = workOrders.filter((w) => w.archived).length;
   const shown = workOrders
+    // Archived orders are off the board unless you go looking for them.
+    .filter((w) => (filter === "archived" ? !!w.archived : !w.archived))
     .filter((w) => (filter === "active" ? w.status !== "shipped" : true))
     .slice()
     .sort(sort === "ready" ? byReadyDate
@@ -2319,7 +2322,7 @@ function WorkOrderBoard({ workOrders, customers, products, goals, onOpen, onNew,
       <div className="flex flex-wrap items-center gap-2 mb-4">
         <Btn kind="primary" onClick={onNew}><Plus size={14} /> New work order</Btn>
         <Btn onClick={onImport}><FileText size={14} /> Paste / import order</Btn>
-        {[["active", "Active"], ["all", "All"]].map(([id, label]) => (
+        {[["active", "Active"], ["all", "All"], ["archived", `Archived${archivedCount ? ` (${archivedCount})` : ""}`]].map(([id, label]) => (
           <button
             key={id} onClick={() => setFilter(id)}
             className="px-3 py-1.5 rounded-sm text-xs"
@@ -3448,6 +3451,17 @@ function WorkOrderDetail({ wo, customers, products, goals, sortLog, history, onL
       <div className="flex items-center justify-between mb-4">
         <Btn onClick={onBack}><ChevronLeft size={14} /> All work orders</Btn>
       </div>
+
+      {wo.archived && (
+        <div className="rounded-sm p-3 mb-4 flex items-center justify-between gap-3 flex-wrap" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
+          <span className="text-sm flex items-center gap-1.5">
+            <Archive size={14} style={{ color: C.faint }} /> Archived, so it's off the board.
+          </span>
+          {/* Put back by hand stays put: keepOnBoard stops the weekly
+              sweep from taking it off again. */}
+          <Btn onClick={() => update({ archived: false, keepOnBoard: true })}><RotateCcw size={13} /> Put back on the board</Btn>
+        </div>
+      )}
 
       <CustomerUpdatesPanel updates={updates} customers={customers} products={products} sender={sender} onHandled={onCustomerUpdate} />
 
@@ -9958,6 +9972,39 @@ export default function App() {
   const pushWOThrough = (id) => {
     setWorkOrders(workOrders.map((w) => (w.id === id ? { ...w, status: "shipped", shippedAt: w.shippedAt || new Date().toISOString() } : w)));
   };
+
+  /* A shipped order stays on the board for a week, so the crew can still
+     see what just went out and reopen it if something comes back. After
+     that it takes itself off. Orders put back by hand carry keepOnBoard
+     and are left alone. Orders from before we stamped a real ship time
+     count from their planned ship date instead, so they age off too
+     rather than sitting on the board for good. */
+  const AUTO_ARCHIVE_DAYS = 7;
+  useEffect(() => {
+    if (!loaded) return;
+    const shippedOn = (w) => {
+      const stamped = Date.parse(w.shippedAt || "");
+      if (Number.isFinite(stamped)) return stamped;
+      const planned = Date.parse(w.shipDate ? `${w.shipDate}T12:00:00` : "");
+      return Number.isFinite(planned) ? planned : NaN;
+    };
+    const sweep = () => {
+      const cutoff = Date.now() - AUTO_ARCHIVE_DAYS * 86400000;
+      const due = workOrdersRef.current.filter((w) =>
+        w.status === "shipped" && !w.archived && !w.keepOnBoard && shippedOn(w) < cutoff);
+      if (!due.length) return;
+      const ids = new Set(due.map((w) => w.id));
+      const next = workOrdersRef.current.map((w) => (ids.has(w.id) ? { ...w, archived: true } : w));
+      workOrdersRef.current = next;
+      _setWorkOrders(next);
+      addWOHistory(due.map((w) => makeHistoryEntry(w, {
+        field: "archived", label: `Archived automatically, a week after it shipped`,
+      }, "")));
+    };
+    sweep();
+    const t = setInterval(sweep, 60 * 60 * 1000);
+    return () => clearInterval(t);
+  }, [loaded, workOrders]);
 
   /* Anyone on the floor can put themselves on a job for today. The name
      comes from the header picker, or from whoever is logging work. */
