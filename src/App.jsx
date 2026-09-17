@@ -1839,7 +1839,7 @@ function WhoSelect({ team, current, onChange, onAddMember, onDark = false, big =
   );
 }
 
-function Dashboard({ workOrders, products, sortLog, onOpenWO, goTab, whoWorking }) {
+function Dashboard({ workOrders, products, sortLog, onOpenWO, goTab, whoWorking, customerUpdates, customers, sender, onCustomerUpdate }) {
   const byStatus = STATUS_FLOW.reduce((acc, s) => ({ ...acc, [s]: workOrders.filter((w) => w.status === s).length }), {});
   const todaysSorts = sortLog.filter((s) => s.date === today());
   const [reorderKind, setReorderKind] = useState(null); // "wood" | "nonwood" | null
@@ -1892,6 +1892,10 @@ function Dashboard({ workOrders, products, sortLog, onOpenWO, goTab, whoWorking 
 
   return (
     <div>
+      <CustomerUpdatesPanel
+        updates={customerUpdates} customers={customers || []} products={products}
+        sender={sender} onHandled={onCustomerUpdate} onOpenWO={onOpenWO}
+      />
       {woShortages.length > 0 && (
         <div className="rounded-sm p-5 mb-5" style={{ background: C.redwood, border: `2px solid ${C.redwoodDark}` }}>
           <div className="flex items-center gap-2">
@@ -3183,7 +3187,204 @@ function WorkOrderHistory({ wo, history, sortLog }) {
   );
 }
 
-function WorkOrderDetail({ wo, customers, products, goals, sortLog, history, onLog, onChange, onDelete, onBack, team, whoWorking, setWhoWorking, onAddTeamMember, onUpdateCustomerSpec, onStartWork }) {
+/* ---------------- Customer updates ----------------
+   When an order is packed, ships, or a date the customer was already
+   given moves, the customer should hear about it. Nothing is sent on its
+   own: the order shows up under "Customer updates to send", and Email
+   customer opens a ready-written email in the mail app to read and send.
+   Emailing or skipping is written to the order's history, and that's
+   also what takes it off the list.
+
+   It's all worked out from the work order history, so there's no second
+   record to keep in step. An update is waiting when the order reached
+   that moment after the last time that update was handled, and it's
+   still true now: an order dragged back out of Packed isn't waiting on a
+   "packed" email any more. History starts Sep 15, 2026, so nothing from
+   before then turns up. GNWS Office has the same code. */
+
+const UPDATE_DATE_FIELDS = { readyByDate: "ready date", shipDate: "ship date" };
+
+function pendingCustomerUpdates(workOrders, history, statusLabel) {
+  const byWo = {};
+  (history || []).forEach((h) => { (byWo[h.woId] = byWo[h.woId] || []).push(h); });
+  const out = [];
+  (workOrders || []).forEach((wo) => {
+    if (wo.archived) return;
+    const entries = (byWo[wo.id] || []).slice().sort((a, b) => String(a.at).localeCompare(String(b.at)));
+    const handledAt = (kind) => entries.reduce((t, h) => (h.field === "customerUpdate" && h.update === kind && h.at > t ? h.at : t), "");
+    ["packed", "shipped"].forEach((kind) => {
+      if ((wo.status || "not_started") !== kind) return;
+      const reached = entries.filter((h) => h.field === "status" && h.to === statusLabel[kind]).pop();
+      if (reached && reached.at > handledAt(kind)) out.push({ key: `${wo.id}:${kind}`, wo, kind, since: reached.at });
+    });
+    // A new date on an order that's already gone isn't news to anyone.
+    if (wo.status === "shipped") return;
+    // Both dates usually move together, and that's one piece of news, not
+    // two, so every date that moved on an order goes out as one update.
+    const done = handledAt("date");
+    const dates = Object.keys(UPDATE_DATE_FIELDS).map((field) => {
+      // Only a date that was already set counts. Setting one for the
+      // first time isn't a change the customer was told about.
+      const changes = entries.filter((h) => h.field === field && h.from && h.at > done);
+      if (!changes.length) return null;
+      const from = changes[0].from;
+      const to = histText(wo[field]);
+      return to && to !== from ? { field, from, to, at: changes[changes.length - 1].at } : null;
+    }).filter(Boolean);
+    if (dates.length) out.push({ key: `${wo.id}:date`, wo, kind: "date", dates, since: dates.map((d) => d.at).sort().pop() });
+  });
+  return out.sort((a, b) => String(b.since).localeCompare(String(a.since)));
+}
+
+const updCap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+const updDate = (d, opts) => {
+  const x = new Date(`${d}T12:00:00`);
+  return Number.isNaN(x.getTime()) ? d : x.toLocaleDateString("en-US", opts);
+};
+const updLongDate = (d) => updDate(d, { weekday: "long", month: "long", day: "numeric" });
+const updShortDate = (d) => updDate(d, { month: "short", day: "numeric" });
+
+// "#2026-2582" for our own orders. Orders that came in from Shopify or
+// Etsy use that store's number instead, since it's what's on the buyer's
+// receipt.
+function updOrderRef(wo) {
+  if (wo.sourceRef && wo.customerPO) return `#${String(wo.customerPO).replace(/^.*#/, "")}`;
+  const m = /^[A-Z]+-(\d{4}-\d+)/.exec(wo.number || "");
+  return m ? `#${m[1]}` : wo.number || "";
+}
+
+// Who the email goes to. Online orders sit under a catch-all customer
+// ("Shopify Customer"), so the real buyer is whoever order intake wrote
+// into the notes; everyone else is their customer record.
+function updRecipient(wo, customer) {
+  const notes = wo.sourceRef ? String(wo.notes || "") : "";
+  const buyerEmail = /\bEmail\s+([^\s@]+@[^\s@]+\.[A-Za-z]{2,})/.exec(notes)?.[1] || "";
+  const buyerName = /\bby ([^.\n]+)\.\s*$/.exec(notes.split("\n")[0] || "")?.[1] || "";
+  const name = buyerName || customer?.contact || "";
+  return { email: buyerEmail || customer?.email || "", first: name.trim().split(/\s+/)[0] || "" };
+}
+
+// "ready date and ship date have moved from A to B" when they moved
+// together, each one named separately when they didn't.
+function updDatesText(dates, fmt, full) {
+  const moved = (plural) => (full ? (plural ? "have moved" : "has moved") : "moved");
+  const same = dates.every((d) => d.from === dates[0].from && d.to === dates[0].to);
+  if (same) return `${dates.map((d) => UPDATE_DATE_FIELDS[d.field]).join(" and ")} ${moved(dates.length > 1)} from ${fmt(dates[0].from)} to ${fmt(dates[0].to)}`;
+  return dates.map((d) => `${UPDATE_DATE_FIELDS[d.field]} ${moved(false)} from ${fmt(d.from)} to ${fmt(d.to)}`).join(", and the ");
+}
+
+function updWhat(u) {
+  if (u.kind === "packed") return "packed and ready";
+  if (u.kind === "shipped") return "shipped";
+  return updDatesText(u.dates, updShortDate, false);
+}
+
+function customerUpdateEmail(u, { customer, products, brandKey, sender }) {
+  const wo = u.wo;
+  const brand = BRANDS[brandKey] || BRANDS.ethica;
+  const { first } = updRecipient(wo, customer);
+  const ref = updOrderRef(wo);
+  // A drop ship's customer is the distributor, so name their PO and who
+  // it's for. The end customer never gets these.
+  const po = isDropShip(wo) && wo.customerPO && !wo.sourceRef ? ` (your PO # ${wo.customerPO})` : "";
+  const forWhom = isDropShip(wo) && shipToName(wo.shipTo) ? ` for ${shipToName(wo.shipTo)}` : "";
+  const order = `order ${ref}${po}${forWhom}`;
+  const items = (wo.lines || [])
+    .map((l) => ({ l, p: products.find((x) => x.id === l.productId) }))
+    .filter(({ p }) => p?.category !== "packing")
+    .map(({ l, p }) => {
+      const unit = l.displayUnit || "sf";
+      return `  ${fmtConv(convertQty(p, l.qtySF, "sf", unit))} ${unitLabel(unit)}, ${p ? p.name : (l.desc || "custom item")}`;
+    });
+
+  let subject, news;
+  if (u.kind === "packed") {
+    subject = `Your order ${ref} is packed and ready`;
+    news = `Your ${order} is packed and ready to ship.${wo.shipDate ? ` We're planning to ship it on ${updLongDate(wo.shipDate)}.` : ""}`;
+  } else if (u.kind === "shipped") {
+    const day = wo.shippedAt ? new Date(wo.shippedAt).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" }) : "";
+    subject = `Your order ${ref} has shipped`;
+    news = `Your ${order} shipped${day ? ` on ${day}` : ""}.${wo.shipVia ? ` It's on its way by ${wo.shipVia}.` : ""}`;
+  } else {
+    subject = `An update on your order ${ref}`;
+    news = `A quick update on your ${order}: the ${updDatesText(u.dates, updLongDate, true)}.`;
+  }
+  const signature = !sender || /^ero\b/i.test(sender) ? ["Ero Gorski", brand.name, "630-484-3242"] : [sender, brand.name];
+  const body = [
+    `Hi ${first || "there"},`, "", news, "",
+    ...(items.length ? ["On this order:", ...items, ""] : []),
+    "If you have any questions, just reply to this email.", "",
+    "Thanks,", ...signature,
+  ].join("\n");
+  return { subject, body };
+}
+
+function CustomerUpdateItem({ u, customer, products, sender, onHandled, onOpenWO }) {
+  const [brandKey, setBrandKey] = useState("ethica");
+  const { email } = updRecipient(u.wo, customer);
+  const who = customer?.company || u.wo.customerName || "No customer";
+  const title = u.wo.title || u.wo.number;
+  const send = () => {
+    const { subject, body } = customerUpdateEmail(u, { customer, products, brandKey, sender });
+    onHandled(u, "sent", brandKey);
+    window.location.href = `mailto:${email}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  };
+  return (
+    <div className="px-4 py-3 flex flex-wrap items-center gap-x-3 gap-y-2" style={{ borderBottom: `1px solid ${C.kraft}` }}>
+      <div className="flex-1" style={{ minWidth: 200 }}>
+        <div style={{ fontWeight: 700 }}>
+          {onOpenWO ? <button onClick={() => onOpenWO(u.wo.id)} className="text-left hover:underline">{title}</button> : title}
+        </div>
+        <div className="text-sm" style={{ color: C.faint }}>
+          {who} · <span style={{ color: C.ink, fontWeight: 700 }}>{updCap(updWhat(u))}</span>
+        </div>
+        {email
+          ? <div className="text-xs" style={{ fontFamily: MONO, color: C.faint }}>to {email}</div>
+          : <div className="text-xs" style={{ color: C.warn }}>No email on file, so the email opens without an address.</div>}
+        {isDropShip(u.wo) && <div className="text-xs" style={{ color: C.faint }}>Drop ship: this goes to {who}, never to their customer.</div>}
+      </div>
+      <select value={brandKey} onChange={(e) => setBrandKey(e.target.value)} style={{ ...inputStyle, width: "auto" }} title="Which company the email is written as">
+        <option value="ethica">As Ethica Wood</option>
+        <option value="gnws">As Good News Wood</option>
+      </select>
+      <Btn kind="primary" onClick={send}><Mail size={13} /> Email customer</Btn>
+      <Btn onClick={() => onHandled(u, "skipped")}>Skip</Btn>
+    </div>
+  );
+}
+
+function CustomerUpdatesPanel({ updates, customers, products, sender, onHandled, onOpenWO }) {
+  if (!updates?.length) return null;
+  return (
+    <div className="rounded-sm overflow-hidden mb-4" style={{ background: C.panel, border: `1px solid ${C.gold}`, borderLeft: `4px solid ${C.gold}` }}>
+      <div className="px-4 py-3 flex items-center gap-2" style={{ borderBottom: `1px solid ${C.kraft}`, fontWeight: 800 }}>
+        <Mail size={16} style={{ color: C.gold }} /> Customer updates to send
+        <span style={{ fontFamily: MONO, fontSize: 12, color: C.faint }}>{updates.length}</span>
+      </div>
+      {updates.map((u) => (
+        <CustomerUpdateItem
+          key={u.key} u={u} customer={customers.find((c) => c.id === u.wo.customerId)}
+          products={products} sender={sender} onHandled={onHandled} onOpenWO={onOpenWO}
+        />
+      ))}
+    </div>
+  );
+}
+
+function CustomerUpdatesBadge({ count, onClick }) {
+  if (!count) return null;
+  return (
+    <button
+      onClick={onClick} title={`${count} customer update${count === 1 ? "" : "s"} waiting to be sent`}
+      className="flex items-center gap-1 px-2 py-1 rounded-sm hover:opacity-85"
+      style={{ background: C.gold, color: "#fff", fontFamily: MONO, fontSize: 12, fontWeight: 800 }}
+    >
+      <Mail size={13} /> {count}
+    </button>
+  );
+}
+
+function WorkOrderDetail({ wo, customers, products, goals, sortLog, history, onLog, updates, sender, onCustomerUpdate, onChange, onDelete, onBack, team, whoWorking, setWhoWorking, onAddTeamMember, onUpdateCustomerSpec, onStartWork }) {
   const customer = customers.find((c) => c.id === wo.customerId);
   const update = (patch) => onChange({ ...wo, ...patch });
   const [bolOpen, setBolOpen] = useState(false);
@@ -3246,6 +3447,8 @@ function WorkOrderDetail({ wo, customers, products, goals, sortLog, history, onL
       <div className="flex items-center justify-between mb-4">
         <Btn onClick={onBack}><ChevronLeft size={14} /> All work orders</Btn>
       </div>
+
+      <CustomerUpdatesPanel updates={updates} customers={customers} products={products} sender={sender} onHandled={onCustomerUpdate} />
 
       <div className="rounded-sm p-5 mb-4" style={{ background: C.ink, color: "#fff" }}>
         <div className="flex justify-between items-start flex-wrap gap-2">
@@ -9078,6 +9281,15 @@ export default function App() {
     if (wo) addWOHistory([makeHistoryEntry(wo, { field: "event", label }, deviceUserRef.current)]);
   };
 
+  // Customer updates waiting to be sent (see pendingCustomerUpdates).
+  const customerUpdates = useMemo(() => pendingCustomerUpdates(workOrders, woHistory, STATUS_LABEL), [workOrders, woHistory]);
+  const handleCustomerUpdate = (u, how, brandKey) => {
+    const label = how === "sent"
+      ? `Opened an email to the customer: ${updWhat(u)} (as ${BRANDS[brandKey]?.label || BRANDS.ethica.label})`
+      : `Skipped the customer update: ${updWhat(u)}`;
+    addWOHistory([{ ...makeHistoryEntry(u.wo, { field: "customerUpdate", label }, deviceUserRef.current), update: u.kind }]);
+  };
+
   const [whoWorking, setWhoWorking] = useState("");
   const [activeWOId, setActiveWOId] = useState(null);
   const [activeProductId, setActiveProductId] = useState(null);
@@ -9697,6 +9909,7 @@ export default function App() {
             <span style={{ fontWeight: 900, letterSpacing: "0.08em", fontSize: 16 }}>GNWS OPS</span>
           </div>
           <div className="flex items-center gap-2 relative">
+            <CustomerUpdatesBadge count={customerUpdates.length} onClick={() => goTab("dashboard")} />
             <DeviceUserPicker team={team} value={deviceUser} onChange={setDeviceUser} />
             <SyncBar
               state={syncState} remoteAhead={remoteAhead} lastSyncedAt={lastSyncedAt}
@@ -9812,7 +10025,8 @@ export default function App() {
 
       <main className="max-w-6xl mx-auto px-4 py-5 pb-24 sm:pb-5">
         {tab === "dashboard" && (
-          <Dashboard workOrders={workOrders} products={products} sortLog={sortLog} units={units} onOpenWO={(id) => { setActiveWOId(id); goTab("orders"); setOrdersSubTab("workorders"); }} goTab={goTab} whoWorking={whoWorking} />
+          <Dashboard workOrders={workOrders} products={products} sortLog={sortLog} units={units}
+            customerUpdates={customerUpdates} customers={customers} sender={deviceUser} onCustomerUpdate={handleCustomerUpdate} onOpenWO={(id) => { setActiveWOId(id); goTab("orders"); setOrdersSubTab("workorders"); }} goTab={goTab} whoWorking={whoWorking} />
         )}
 
         {tab === "orders" && !(ordersSubTab === "workorders" && activeWO) && (
@@ -9833,6 +10047,7 @@ export default function App() {
             <WorkOrderDetail
               wo={activeWO} customers={customers} products={products} goals={goals} sortLog={sortLog}
               history={woHistory} onLog={(label) => logWOEvent(activeWO.id, label)}
+              updates={customerUpdates.filter((u) => u.wo.id === activeWO.id)} sender={deviceUser} onCustomerUpdate={handleCustomerUpdate}
               onChange={updateWO} onDelete={() => deleteWO(activeWO.id)} onBack={() => setActiveWOId(null)}
               team={team} whoWorking={whoWorking} setWhoWorking={setWhoWorking} onAddTeamMember={addTeamMember}
               onUpdateCustomerSpec={(customerId, patch) => setCustomers(customers.map((c) => (c.id === customerId ? { ...c, spec: { ...c.spec, ...patch } } : c)))}
