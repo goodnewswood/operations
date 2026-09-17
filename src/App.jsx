@@ -71,6 +71,7 @@ const KEY = {
   goals: "gnws-shared-goals-v1",
   invLog: "gnws-shared-invlog-v1",
   woHistory: "gnws-shared-wohistory-v1",
+  schedule: "gnws-shared-schedule-v1",
   // GNWS Office owns these. Ops loads them only so a work order edit can
   // carry its dates and customer up to them (see carryWorkOrderUp).
   quotes: "gnws-shared-quotes-v1",
@@ -3384,7 +3385,7 @@ function CustomerUpdatesBadge({ count, onClick }) {
   );
 }
 
-function WorkOrderDetail({ wo, customers, products, goals, sortLog, history, onLog, updates, sender, onCustomerUpdate, onChange, onDelete, onBack, team, whoWorking, setWhoWorking, onAddTeamMember, onUpdateCustomerSpec, onStartWork }) {
+function WorkOrderDetail({ wo, customers, products, goals, sortLog, history, onLog, updates, sender, onCustomerUpdate, onScheduleMe, onChange, onDelete, onBack, team, whoWorking, setWhoWorking, onAddTeamMember, onUpdateCustomerSpec, onStartWork }) {
   const customer = customers.find((c) => c.id === wo.customerId);
   const update = (patch) => onChange({ ...wo, ...patch });
   const [bolOpen, setBolOpen] = useState(false);
@@ -3735,6 +3736,7 @@ function WorkOrderDetail({ wo, customers, products, goals, sortLog, history, onL
         <Btn kind="primary" onClick={() => setBolOpen(true)}><Printer size={14} /> Print Bill of Lading</Btn>
         <Btn kind="primary" onClick={() => setPalletModalOpen(true)}><Tag size={14} /> Print Pallet Labels</Btn>
         {isDropShip(wo) && <Btn kind="primary" onClick={() => setSlipOpen(true)}><FileText size={14} /> Print Packing Slip</Btn>}
+        {onScheduleMe && <Btn onClick={() => onScheduleMe(wo.id)}><CalendarDays size={14} /> Put me on this job</Btn>}
         <Btn onClick={onDelete}><Trash2 size={14} /> Delete work order</Btn>
       </div>
       <WorkOrderHistory wo={wo} history={history} sortLog={sortLog} />
@@ -8164,6 +8166,185 @@ function useNow(active) {
   return now;
 }
 
+/* ---------------- Schedule ----------------
+   Who is working which day, and on what. One row per person per day per
+   job, so a day split between two orders is two rows and the hours still
+   add up.
+
+   These are planned hours. What actually happened is the time clock (the
+   Time tab) and the work logs. No money here on purpose: pay rates and
+   job cost live in GNWS Office, which keeps wages off the shop floor. */
+
+const SHIFT_HOURS = 8;
+const NO_JOB = "shop";
+
+const scheduleFor = (schedule, day, person) => (schedule || []).filter((r) => r.date === day && r.person === person);
+const scheduleHours = (rows) => rows.reduce((sum, r) => sum + (Number(r.hours) || 0), 0);
+const fmtHours = (h) => String(Math.round((Number(h) || 0) * 10) / 10);
+
+function ScheduleEditor({ row, team, workOrders, onSave, onDelete, onClose }) {
+  useBackLayer(true, onClose);
+  const [draft, setDraft] = useState(row);
+  const set = (patch) => setDraft({ ...draft, ...patch });
+  // Finished orders aren't worth scheduling against, but one already on
+  // this row stays in the list so editing it doesn't silently move it.
+  const jobs = (workOrders || []).filter((w) => !w.archived && (ACTIVE_WO_STATUSES.includes(w.status) || w.id === draft.workOrderId));
+  return (
+    <div className="fixed inset-0 z-50 overflow-auto p-4" style={{ background: "rgba(34,29,25,0.6)" }}>
+      <div className="rounded-sm p-5 w-full max-w-md mx-auto my-8" style={{ background: C.panel }}>
+        <div className="flex items-center justify-between mb-4">
+          <div style={{ fontWeight: 800, fontSize: 16 }}>{row.id ? "Edit this day" : "Add to the schedule"}</div>
+          <CloseBtn onClose={onClose} />
+        </div>
+        <div className="flex flex-wrap gap-3">
+          <Field label="Who" w={180}>
+            <select style={inputStyle} value={draft.person} onChange={(e) => set({ person: e.target.value })}>
+              <option value="">Pick someone</option>
+              {(team || []).map((t) => <option key={t} value={t}>{t}</option>)}
+              {draft.person && !(team || []).includes(draft.person) && <option value={draft.person}>{draft.person}</option>}
+            </select>
+          </Field>
+          <Field label="Day" w={170}><input type="date" style={inputStyle} value={draft.date} onChange={(e) => set({ date: e.target.value })} /></Field>
+          <Field label="Hours" w={90}><input type="number" step="0.5" min="0" style={inputStyle} value={draft.hours} onChange={(e) => set({ hours: e.target.value })} /></Field>
+        </div>
+        <Field label="Job">
+          <select style={inputStyle} value={draft.workOrderId || NO_JOB} onChange={(e) => set({ workOrderId: e.target.value })}>
+            <option value={NO_JOB}>Shop work, no order</option>
+            {jobs.map((w) => <option key={w.id} value={w.id}>{w.number} · {woTitle(w) || w.customerName || "Untitled job"}</option>)}
+          </select>
+        </Field>
+        <Field label="Note"><input style={inputStyle} value={draft.note || ""} onChange={(e) => set({ note: e.target.value })} placeholder="Anything worth saying about the day" /></Field>
+        <div className="mt-4 flex gap-2 flex-wrap">
+          <Btn kind="primary" big disabled={!draft.person || !draft.date} onClick={() => onSave(draft)}><Check size={16} /> Save</Btn>
+          {row.id && <Btn onClick={() => onDelete(row.id)}><Trash2 size={14} /> Take off the schedule</Btn>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ScheduleTab({ schedule, onChange, team, workOrders, me, onOpenWO }) {
+  const [anchor, setAnchor] = useState(today());
+  const [editing, setEditing] = useState(null);
+  const days = Array.from({ length: 7 }, (_, i) => addDays(weekStart(anchor), i));
+  const weekRows = (schedule || []).filter((r) => days.includes(r.date));
+  const jobName = (id) => {
+    if (!id || id === NO_JOB) return "Shop";
+    const w = (workOrders || []).find((x) => x.id === id);
+    return w ? (woTitle(w) || w.customerName || w.number) : "Order since removed";
+  };
+  // Everyone on the roster, plus anyone scheduled this week who isn't on it.
+  const people = [...new Set([...(team || []), ...weekRows.map((r) => r.person)])].filter(Boolean);
+  const save = (row) => {
+    const clean = { ...row, hours: Number(row.hours) || 0, workOrderId: row.workOrderId || NO_JOB };
+    onChange(row.id
+      ? (schedule || []).map((r) => (r.id === row.id ? clean : r))
+      : [{ ...clean, id: uid(), at: new Date().toISOString() }, ...(schedule || [])]);
+    setEditing(null);
+  };
+  const remove = (id) => { onChange((schedule || []).filter((r) => r.id !== id)); setEditing(null); };
+  const blank = (person, date) => ({ id: "", person: person || me || "", date, hours: SHIFT_HOURS, workOrderId: NO_JOB, note: "" });
+
+  const byJob = {};
+  weekRows.forEach((r) => { const k = r.workOrderId || NO_JOB; byJob[k] = (byJob[k] || 0) + (Number(r.hours) || 0); });
+  const jobRows = Object.entries(byJob).sort((a, b) => b[1] - a[1]);
+
+  const hcell = { padding: "6px 8px", fontFamily: MONO, fontSize: 11, color: C.faint, fontWeight: 700, borderBottom: `1px solid ${C.kraftDark}`, textAlign: "center", whiteSpace: "nowrap" };
+  const cell = { padding: "5px 6px", borderBottom: `1px solid ${C.kraft}`, fontSize: 12, textAlign: "center" };
+
+  return (
+    <div className="max-w-6xl mx-auto">
+      <div className="flex items-center justify-between flex-wrap gap-2 mb-4">
+        <div>
+          <div style={{ fontWeight: 800, fontSize: 18 }}>Schedule</div>
+          <div style={{ fontFamily: MONO, fontSize: 12, color: C.faint }}>
+            Week of {dayLabel(days[0])} · {fmtHours(scheduleHours(weekRows))} hours planned
+          </div>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <Btn onClick={() => setAnchor(addDays(anchor, -7))}><ChevronLeft size={14} /> Previous</Btn>
+          <Btn onClick={() => setAnchor(today())}>This week</Btn>
+          <Btn onClick={() => setAnchor(addDays(anchor, 7))}>Next <ChevronLeft size={14} style={{ transform: "rotate(180deg)" }} /></Btn>
+          <Btn kind="primary" onClick={() => setEditing(blank(me, today()))}><Plus size={14} /> Add</Btn>
+        </div>
+      </div>
+
+      <div className="overflow-x-auto rounded-sm mb-4" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
+        <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 780 }}>
+          <thead>
+            <tr>
+              <th style={{ ...hcell, textAlign: "left", minWidth: 110 }}>Crew</th>
+              {days.map((d) => (
+                <th key={d} style={{ ...hcell, background: d === today() ? "#FBF6EC" : "transparent" }}>
+                  {dayLabel(d)}
+                  <div style={{ fontWeight: 400 }}>{fmtHours(scheduleHours(weekRows.filter((r) => r.date === d)))} h</div>
+                </th>
+              ))}
+              <th style={hcell}>Week</th>
+            </tr>
+          </thead>
+          <tbody>
+            {people.length === 0 && (
+              <tr><td colSpan={9} style={{ ...cell, padding: 20, color: C.faint }}>Nobody on the roster yet. Add crew under Settings.</td></tr>
+            )}
+            {people.map((p) => (
+              <tr key={p}>
+                <td style={{ ...cell, textAlign: "left", fontWeight: 700 }}>{p}</td>
+                {days.map((d) => (
+                  <td key={d} style={{ ...cell, verticalAlign: "top", background: d === today() ? "#FBF6EC" : "transparent" }}>
+                    {scheduleFor(schedule, d, p).map((r) => (
+                      <button
+                        key={r.id} onClick={() => setEditing(r)} title={r.note || jobName(r.workOrderId)}
+                        className="block w-full text-left rounded-sm px-1.5 py-1 mb-1 hover:opacity-85"
+                        style={{
+                          background: r.workOrderId && r.workOrderId !== NO_JOB ? C.ink : C.kraft,
+                          color: r.workOrderId && r.workOrderId !== NO_JOB ? "#fff" : C.ink,
+                          fontSize: 11, lineHeight: 1.35,
+                        }}
+                      >
+                        <div style={{ fontWeight: 800, fontFamily: MONO }}>{fmtHours(r.hours)} h</div>
+                        <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{jobName(r.workOrderId)}</div>
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => setEditing(blank(p, d))} title={`Put ${p} on a job for ${dayLabel(d)}`}
+                      className="w-full rounded-sm hover:opacity-70"
+                      style={{ border: `1px dashed ${C.kraftDark}`, color: C.faint, fontSize: 11, padding: "1px 0" }}
+                    >
+                      +
+                    </button>
+                  </td>
+                ))}
+                <td style={{ ...cell, fontWeight: 800, fontFamily: MONO }}>{fmtHours(scheduleHours(weekRows.filter((r) => r.person === p)))}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="rounded-sm overflow-hidden" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
+        <div className="px-4 py-3" style={{ borderBottom: `1px solid ${C.kraftDark}`, fontWeight: 800 }}>This week by job</div>
+        {jobRows.length === 0 && <div className="px-4 py-6 text-center text-sm" style={{ color: C.faint }}>Nothing scheduled this week yet.</div>}
+        {jobRows.map(([id, hours]) => (
+          <div key={id} className="px-4 py-2 flex items-center justify-between" style={{ borderBottom: `1px solid ${C.kraft}` }}>
+            {id !== NO_JOB && onOpenWO
+              ? <button onClick={() => onOpenWO(id)} className="text-left hover:underline" style={{ fontWeight: 700 }}>{jobName(id)}</button>
+              : <span style={{ fontWeight: 700 }}>{jobName(id)}</span>}
+            <span style={{ fontFamily: MONO, fontWeight: 800 }}>{fmtHours(hours)} h</span>
+          </div>
+        ))}
+      </div>
+
+      {editing && (
+        <ScheduleEditor
+          row={editing} team={team} workOrders={workOrders}
+          onSave={save} onDelete={remove} onClose={() => setEditing(null)}
+        />
+      )}
+    </div>
+  );
+}
+
 function TimeClockTab({ shifts, onChange, team, whoWorking, setWhoWorking, onAddTeamMember, runGrouped }) {
   const [view, setView] = useState("clock");
   const [day, setDay] = useState(today());
@@ -9099,6 +9280,7 @@ export default function App() {
   const [purchaseOrders, _setPurchaseOrders] = useState([]);
   const [units, _setUnits] = useState([]);
   const [shifts, _setShifts] = useState([]);
+  const [schedule, _setSchedule] = useState([]);
   const [invLog, _setInvLog] = useState([]);
   const [goals, setGoals] = useState({ boardsPerHour: 100 });
   // Office's records, loaded only so work order edits can carry up to them.
@@ -9126,7 +9308,7 @@ export default function App() {
   const [historyCounts, setHistoryCounts] = useState({ undo: 0, redo: 0 });
 
   useEffect(() => {
-    latestRef.current = { customers, products, workOrders, sortLog, team, suppliers, purchaseOrders, units, shifts, invLog };
+    latestRef.current = { customers, products, workOrders, sortLog, team, suppliers, purchaseOrders, units, shifts, invLog, schedule };
   });
 
   const refreshHistoryCounts = () => setHistoryCounts({ undo: historyRef.current.length, redo: futureRef.current.length });
@@ -9163,6 +9345,7 @@ export default function App() {
     _setUnits(snap.units);
     _setShifts(snap.shifts || []);
     _setInvLog(snap.invLog || []);
+    _setSchedule(snap.schedule || []);
     skipHistoryRef.current = false;
   };
 
@@ -9252,6 +9435,7 @@ export default function App() {
   const setUnits = (v) => { pushHistory(); _setUnits(v); };
   const setShifts = (v) => { pushHistory(); _setShifts(v); };
   const setInvLog = (v) => { pushHistory(); _setInvLog(v); };
+  const setSchedule = (v) => { pushHistory(); _setSchedule(v); };
 
   // Work order history (see describeWOChanges). Its own collection, and
   // deliberately not part of undo snapshots: undoing a change is itself
@@ -9388,6 +9572,7 @@ export default function App() {
     { key: KEY.timeLog, set: _setShifts, get: () => shifts, arr: true },
     { key: KEY.invLog, set: _setInvLog, get: () => invLog, arr: true },
     { key: KEY.woHistory, set: _setWoHistory, get: () => woHistory, arr: true },
+    { key: KEY.schedule, set: _setSchedule, get: () => schedule, arr: true },
     { key: KEY.quotes, set: setQuotes, get: () => quotes, arr: true },
     { key: KEY.salesOrders, set: setSalesOrders, get: () => salesOrders, arr: true },
     { key: KEY.goals, set: (d) => setGoals(d && !Array.isArray(d) ? d : { boardsPerHour: 100 }), get: () => goals, arr: false },
@@ -9631,6 +9816,7 @@ export default function App() {
   useEffect(() => { if (loaded) saveKey(KEY.timeLog, shifts); }, [shifts, loaded]);
   useEffect(() => { if (loaded) saveKey(KEY.invLog, invLog); }, [invLog, loaded]);
   useEffect(() => { if (loaded) saveKey(KEY.woHistory, woHistory); }, [woHistory, loaded]);
+  useEffect(() => { if (loaded) saveKey(KEY.schedule, schedule); }, [schedule, loaded]);
   useEffect(() => { if (loaded) saveKey(KEY.quotes, quotes); }, [quotes, loaded]);
   useEffect(() => { if (loaded) saveKey(KEY.salesOrders, salesOrders); }, [salesOrders, loaded]);
   useEffect(() => { if (loaded) saveKey(KEY.goals, goals); }, [goals, loaded]);
@@ -9773,6 +9959,15 @@ export default function App() {
     setWorkOrders(workOrders.map((w) => (w.id === id ? { ...w, status: "shipped", shippedAt: w.shippedAt || new Date().toISOString() } : w)));
   };
 
+  /* Anyone on the floor can put themselves on a job for today. The name
+     comes from the header picker, or from whoever is logging work. */
+  const scheduleMe = (woId) => {
+    const person = deviceUser || whoWorking;
+    if (!person) { window.alert("Pick your name at the top of the screen first, then try again."); return; }
+    setSchedule([{ id: uid(), person, date: today(), workOrderId: woId, hours: SHIFT_HOURS, note: "", at: new Date().toISOString() }, ...schedule]);
+    logWOEvent(woId, `${person} put themselves on the schedule for today`);
+  };
+
   const activeWO = workOrders.find((w) => w.id === activeWOId) || null;
 
   // Back out of an open work order or the invoice importer before anything else.
@@ -9783,7 +9978,7 @@ export default function App() {
      rather than a fixed home screen. Repeats collapse — bouncing between
      two tabs shouldn't build a stack you have to unwind press by press. */
   const tabStackRef = useRef([tab]);
-  const TAB_IDS = ["dashboard", "work", "orders", "inventory", "contacts", "time", "reports"];
+  const TAB_IDS = ["dashboard", "work", "orders", "inventory", "contacts", "schedule", "time", "reports"];
   const goTab = (next) => {
     if (!next || next === tab || !TAB_IDS.includes(next)) return;
     const stack = tabStackRef.current;
@@ -9856,6 +10051,7 @@ export default function App() {
     { id: "orders", label: "Orders", short: "Orders", icon: ClipboardList },
     { id: "inventory", label: "Inventory", short: "Stock", icon: Boxes },
     { id: "contacts", label: "Contacts", short: "People", icon: Users },
+    { id: "schedule", label: "Schedule", short: "Sched", icon: CalendarDays },
     { id: "time", label: "Time", short: "Time", icon: Clock },
     { id: "reports", label: "Reports", short: "Rates", icon: Timer },
   ];
@@ -10048,6 +10244,7 @@ export default function App() {
               wo={activeWO} customers={customers} products={products} goals={goals} sortLog={sortLog}
               history={woHistory} onLog={(label) => logWOEvent(activeWO.id, label)}
               updates={customerUpdates.filter((u) => u.wo.id === activeWO.id)} sender={deviceUser} onCustomerUpdate={handleCustomerUpdate}
+              onScheduleMe={scheduleMe}
               onChange={updateWO} onDelete={() => deleteWO(activeWO.id)} onBack={() => setActiveWOId(null)}
               team={team} whoWorking={whoWorking} setWhoWorking={setWhoWorking} onAddTeamMember={addTeamMember}
               onUpdateCustomerSpec={(customerId, patch) => setCustomers(customers.map((c) => (c.id === customerId ? { ...c, spec: { ...c.spec, ...patch } } : c)))}
@@ -10149,6 +10346,13 @@ export default function App() {
           </div>
         )}
 
+        {tab === "schedule" && (
+          <ScheduleTab
+            schedule={schedule} onChange={setSchedule} team={team} workOrders={workOrders}
+            me={deviceUser || whoWorking}
+            onOpenWO={(id) => { setActiveWOId(id); goTab("orders"); setOrdersSubTab("workorders"); }}
+          />
+        )}
         {tab === "time" && (
           <TimeClockTab
             shifts={shifts} onChange={setShifts} team={team}
