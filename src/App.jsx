@@ -3138,11 +3138,11 @@ function usePrintLog(label, onLog) {
 function DeviceUserPicker({ team, value, onChange }) {
   const names = [...new Set([...(team || []), ...(value ? [value] : [])])];
   return (
-    <label className="flex items-center gap-1" style={{ color: value ? "rgba(255,255,255,0.65)" : C.gold }} title="Who's using this device. Shows in work order history.">
-      <Users size={14} />
+    <label className="flex items-center gap-1 min-w-0" style={{ color: value ? "rgba(255,255,255,0.65)" : C.gold }} title="Who's using this device. Shows in work order history.">
+      <Users size={14} className="shrink-0" />
       <select
         value={value} onChange={(e) => onChange(e.target.value)}
-        style={{ background: "transparent", color: value ? "#fff" : C.gold, border: `1px solid ${value ? "#4a423a" : C.gold}`, borderRadius: 2, padding: "2px 4px", fontFamily: MONO, fontSize: 12, maxWidth: 130 }}
+        style={{ background: "transparent", color: value ? "#fff" : C.gold, border: `1px solid ${value ? "#4a423a" : C.gold}`, borderRadius: 2, padding: "2px 4px", fontFamily: MONO, fontSize: 12, maxWidth: 120, minWidth: 0 }}
       >
         <option value="" style={{ color: C.ink }}>Who are you?</option>
         {names.map((n) => <option key={n} value={n} style={{ color: C.ink }}>{n}</option>)}
@@ -9245,7 +9245,9 @@ function SyncBar({ state, remoteAhead, lastSyncedAt, onSave, onSync, compact, sa
           title={failed ? `Save failed: ${saveError || "unknown error"}` : ago != null ? `Last synced ${ago}s ago` : ""}
         >
           <span style={{ width: 7, height: 7, borderRadius: 99, background: dot, display: "inline-block" }} />
-          {label}
+          {/* On a phone the dot carries the state and the words are what
+              push this row off the screen, so they wait for a wider one. */}
+          <span className="hidden sm:inline">{label}</span>
         </span>
       )}
       <button
@@ -10151,7 +10153,10 @@ export default function App() {
           <div className="flex items-baseline gap-3">
             <span style={{ fontWeight: 900, letterSpacing: "0.08em", fontSize: 16 }}>GNWS OPS</span>
           </div>
-          <div className="flex items-center gap-2 relative">
+          {/* Wraps and shrinks rather than running off the side: on a
+              phone these controls are wider than the screen, and the
+              overflow turned into a screen of white you could scroll into. */}
+          <div className="flex flex-wrap items-center justify-end gap-2 relative min-w-0">
             <CustomerUpdatesBadge count={customerUpdates.length} onClick={() => goTab("dashboard")} />
             <DeviceUserPicker team={team} value={deviceUser} onChange={setDeviceUser} />
             <SyncBar
