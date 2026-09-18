@@ -46,7 +46,11 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Missing PDF data or pasted text" });
   }
 
-  const prompt = `Extract structured data from this wholesale reclaimed-wood order, invoice, or quote${text ? " (pasted as plain text, possibly from an email)" : ""}. Respond with ONLY valid JSON, no markdown fences, no preamble, exactly this shape:
+  // Orders say "ship Sept 30" and leave the year off. Without today's
+  // date the model picks one from its own training and the work order
+  // lands with a ship date years in the past.
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const prompt = `Today is ${todayISO}. Extract structured data from this wholesale reclaimed-wood order, invoice, or quote${text ? " (pasted as plain text, possibly from an email)" : ""}. A date with no year means the next time that date comes around on or after today. Respond with ONLY valid JSON, no markdown fences, no preamble, exactly this shape:
 {
   "customerName": string,
   "contactName": string,
