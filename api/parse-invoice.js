@@ -41,10 +41,16 @@ export default async function handler(req, res) {
   // Either a PDF (base64) or plain pasted text (an emailed order, a note
   // typed straight from a phone call) — same extraction either way, just
   // a different content block for Claude to read it from.
-  const { base64, text } = req.body || {};
+  // catalog is the shop's own SKU list, sent by the app. Without it every
+  // line came back as free text and landed on "Custom / describe below",
+  // so the crew had to pick the item by hand on every import.
+  const { base64, text, catalog } = req.body || {};
   if (!base64 && !text) {
     return res.status(400).json({ error: "Missing PDF data or pasted text" });
   }
+  const catalogLines = Array.isArray(catalog)
+    ? catalog.filter((c) => c && c.sku).slice(0, 400).map((c) => `${c.sku} = ${c.name || ""}`).join("\n")
+    : "";
 
   // Orders say "ship Sept 30" and leave the year off. Without today's
   // date the model picks one from its own training and the work order
@@ -55,10 +61,18 @@ export default async function handler(req, res) {
   "customerName": string,
   "contactName": string,
   "shipDate": string,
+  "customerPO": string,
+  "dropShip": boolean,
+  "shipTo": { "name": string, "company": string, "address": string, "address2": string, "city": string, "state": string, "zip": string, "country": string, "phone": string },
   "notes": string,
-  "lines": [ { "description": string, "quantity": number, "unit": string } ]
+  "lines": [ { "sku": string, "description": string, "quantity": number, "unit": string } ]
 }
-"unit" should be "sf", "board", "plank", or "ea" — guess "sf" if it's unclear, since most line items here are priced per square foot. Use "" or [] for anything not present on the document. Do not include any dollar amounts anywhere in your output.`;
+"customerName" is who is buying (who gets billed). Set "dropShip" true and fill "shipTo" only when the order ships somewhere other than the buyer: a separate ship-to name or address, a jobsite, or an end customer the buyer is reselling to. Otherwise "dropShip" is false and "shipTo" fields are all "". "customerPO" is the buyer's own order or PO number for this job, if the document shows one.
+"unit" should be "sf", "board", "plank", "box", or "ea" — guess "sf" if it's unclear, since most line items here are priced per square foot.${catalogLines ? `
+"sku" must be copied exactly from this list of the shop's items, picking the one the line is describing. Match on size, profile and finish (for example "5 inch tongue and groove natural" is TNG-548-NAT, "1x8x5 redwood unsorted" is 185RAW). Use "" only when nothing on the list is a reasonable match:
+${catalogLines}` : `
+Leave "sku" as "".`}
+Use "" or [] for anything not present on the document. Do not include any dollar amounts anywhere in your output.`;
 
   try {
     const response = await fetch("https://api.anthropic.com/v1/messages", {

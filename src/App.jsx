@@ -1148,6 +1148,73 @@ function productSuffix(lines, products) {
   const skus = [...new Set(valid.map(skuOf).filter(Boolean))];
   return skus.length === 1 ? `${totalSF}SF-${skus[0]}` : `${totalSF}SF`;
 }
+
+// Finds the catalog item an imported line is talking about. The SKU the
+// reader picked off our own list is trusted first; the rest is a fallback
+// for older imports and for text the reader wasn't sure about, scoring
+// how much of a product's SKU and name shows up in the description.
+function matchProductForImport({ sku, description }, products) {
+  const clean = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const wanted = clean(sku);
+  if (wanted) {
+    const exact = (products || []).find((p) => clean(p.sku) === wanted);
+    if (exact) return exact;
+  }
+  const desc = clean(description);
+  if (!desc) return null;
+  const words = new Set(desc.split(" ").filter((w) => w.length > 1));
+  let best = null, bestAt = [0, 0, 0];
+  for (const p of products || []) {
+    if (!p.sku || /^ZZ/i.test(p.sku) || p.sku === "NEW-SKU") continue;
+    // Single characters are dropped: a SKU that reads as loose digits
+    // ("S3S 1/2 X 7 X 4") otherwise scores a hit on every number buried
+    // inside an unrelated size like 2x10x12.
+    const skuWords = clean(p.sku).split(" ").filter((w) => w.length > 1);
+    const nameWords = clean(p.name).split(" ").filter((w) => w.length > 1);
+    if (!skuWords.length && !nameWords.length) continue;
+    // A SKU appearing in the text is worth more than a stray shared word
+    // like "redwood", which nearly every item here has in its name.
+    const skuHits = skuWords.filter((w) => desc.includes(w)).length * 2;
+    const nameHits = nameWords.filter((w) => words.has(w)).length;
+    const share = (skuHits + nameHits) / (skuWords.length * 2 + nameWords.length);
+    // Most words matched wins, before how big a share of the item's name
+    // they were. Otherwise a short catch-all like REDWOOD CUSTOM beats the
+    // exact size, since matching one word out of two scores well.
+    const at = [skuHits + nameHits, nameHits, share];
+    if (at[0] > bestAt[0] || (at[0] === bestAt[0] && (at[1] > bestAt[1] || (at[1] === bestAt[1] && at[2] > bestAt[2])))) {
+      bestAt = at; best = p;
+    }
+  }
+  // Half the item's words have to show up before we put words in the
+  // crew's mouth. Below that, a person picks the item.
+  return bestAt[2] >= 0.5 ? best : null;
+}
+
+// The board is read by title, so orders that come in on their own get the
+// same shorthand the crew types by hand: whose it is, how much, what.
+const surnameOf = (name) => {
+  const parts = String(name || "").trim().replace(/[,.]/g, " ").split(/\s+/)
+    .filter((w) => w && !/^(inc|llc|ltd|co|corp|company|the)$/i.test(w));
+  return parts.length ? parts[parts.length - 1] : "";
+};
+// Enough of the item's name to recognise it, without the finish and sort
+// details that follow the first comma ("1x8x5 Redwood, Painted, Sorted").
+const basicItemName = (product, desc) => {
+  const raw = product ? product.name : String(desc || "");
+  return raw.split(",")[0].trim().slice(0, 40);
+};
+function importedWOTitle({ who, lines, products }) {
+  const surname = surnameOf(who);
+  const first = (lines || []).find((l) => (Number(l.qtySF) || 0) > 0) || (lines || [])[0];
+  if (!first) return surname;
+  const product = (products || []).find((p) => p.id === first.productId);
+  const unit = first.displayUnit || "sf";
+  const qty = convertQty(product, first.qtySF, "sf", unit);
+  const rounded = Math.round(qty * 100) / 100;
+  const more = (lines || []).length > 1 ? ` +${lines.length - 1} more` : "";
+  return [surname, `${rounded} ${unitLabel(unit)}`, `${basicItemName(product, first.desc)}${more}`]
+    .filter(Boolean).join(" · ");
+}
 // Resolves which raw product a sort-log entry refers to. Prefers the
 // stable rawProductId (immune to renaming the SKU later); falls back to
 // the legacy rawSku text match only for entries logged before this field
@@ -3860,7 +3927,7 @@ function SettingsModal({ team, onAddTeamMember, onRemoveTeamMember, goals, onGoa
   );
 }
 
-function ImportInvoiceModal({ customers, onClose, onImported }) {
+function ImportInvoiceModal({ customers, products, onClose, onImported }) {
   const [mode, setMode] = useState("paste");
   const [pasted, setPasted] = useState("");
   const [busy, setBusy] = useState(false);
@@ -3880,10 +3947,16 @@ function ImportInvoiceModal({ customers, onClose, onImported }) {
       const CODE_KEY = "gnws-import-access-code";
       let saved = "";
       try { saved = localStorage.getItem(CODE_KEY) || ""; } catch { /* private browsing */ }
+      // The SKU list goes along with the order text so lines come back
+      // pointing at real items instead of loose descriptions the crew has
+      // to match by hand. Test SKUs and the placeholder aren't offered.
+      const catalog = (products || [])
+        .filter((p) => p.sku && !/^ZZ/i.test(p.sku) && p.sku !== "NEW-SKU")
+        .map((p) => ({ sku: p.sku, name: p.name }));
       const send = (code) => fetch("/api/parse-invoice", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-gnws-access-code": code },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ ...body, catalog }),
       });
       let response = await send(saved);
       if (response.status === 401) {
@@ -10069,20 +10142,39 @@ export default function App() {
 
   const handleImported = ({ parsed, matchedCustomerId, fileName }) => {
     const cust = customers.find((c) => c.id === matchedCustomerId);
-    const lines = (parsed.lines || []).map((l) => ({
-      id: uid(), productId: "", desc: l.description || "",
-      qtySF: (!l.unit || l.unit === "sf") ? (Number(l.quantity) || 0) : 0,
-      displayUnit: "sf", done: false,
-      note: l.unit && l.unit !== "sf" ? `${l.quantity} ${l.unit} on the invoice — double check against SF` : "",
-    }));
+    const lines = (parsed.lines || []).map((l) => {
+      const product = matchProductForImport(l, products);
+      // Quantities are held in the canonical unit and shown in whatever
+      // unit the order was written in, same as typing a line by hand.
+      const unit = product ? (unitsFor(product).includes(l.unit) ? l.unit : canonicalUnitFor(product)) : "sf";
+      const qty = Number(l.quantity) || 0;
+      return {
+        id: uid(), productId: product?.id || "", desc: product ? "" : (l.description || ""),
+        qtySF: product ? convertQty(product, qty, unit, "sf") : (!l.unit || l.unit === "sf" ? qty : 0),
+        displayUnit: unit, done: false,
+        steps: product?.steps ? { ...product.steps } : defaultSteps(),
+        note: !product && l.unit && l.unit !== "sf" ? `${l.quantity} ${l.unit} on the invoice, double check against SF` : "",
+      };
+    });
     const unmatchedFlag = !matchedCustomerId && parsed.customerName
       ? `⚠ No matching customer found for "${parsed.customerName}" — assign one above.`
       : "";
     const baseNumber = nextNumber(workOrders, "WO");
     const suffix = productSuffix(lines, products);
+    // A drop ship order is only a drop ship if it actually says where it's
+    // going. A true/false with nothing behind it would just put an empty
+    // address block on the packing slip.
+    const shipTo = { ...EMPTY_SHIP_TO, ...(parsed.shipTo || {}) };
+    const dropShip = !!parsed.dropShip && Object.values(shipTo).some((v) => String(v || "").trim());
+    // On a drop ship the board should say whose house it's going to, not
+    // the distributor who placed it.
+    const titleWho = (dropShip && (shipTo.name || shipTo.company)) || cust?.company || parsed.customerName || "";
     const w = {
       id: uid(), number: suffix ? `${baseNumber}-${suffix}` : baseNumber,
+      title: importedWOTitle({ who: titleWho, lines, products }),
       customerId: matchedCustomerId || "", customerName: cust?.company || parsed.customerName || "",
+      customerPO: parsed.customerPO || "",
+      dropShip, shipTo,
       status: "not_started", date: today(), createdAt: new Date().toISOString(),
       lines, readyByDate: "", shipDate: parsed.shipDate || "", shipVia: "",
       notes: [parsed.notes, fileName ? `Imported from invoice: ${fileName}` : "Imported from pasted order text", unmatchedFlag].filter(Boolean).join("\n"),
@@ -10342,7 +10434,7 @@ export default function App() {
           </div>
         )}
         {importOpen && (
-          <ImportInvoiceModal customers={customers} onClose={() => setImportOpen(false)} onImported={handleImported} />
+          <ImportInvoiceModal customers={customers} products={products} onClose={() => setImportOpen(false)} onImported={handleImported} />
         )}
         {settingsOpen && (
           <SettingsModal
