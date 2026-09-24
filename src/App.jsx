@@ -4004,6 +4004,19 @@ function SettingsModal({ team, onAddTeamMember, onRemoveTeamMember, goals, onGoa
           <p className="text-xs mb-2" style={{ color: C.faint }}>Your tab arrangement is personal to this browser. Reset it back to default here.</p>
           <Btn onClick={onResetTabOrder}><RefreshCw size={13} /> Reset to default order</Btn>
         </div>
+
+        {/* Which copy of the app this device is actually running. A phone can
+            sit on an old one for days, which makes "is that fixed yet"
+            impossible to answer by looking. */}
+        <div className="mt-5 pt-3" style={{ borderTop: `1px solid ${C.kraft}` }}>
+          <div style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>
+            App version: {typeof __BUILD_STAMP__ === "string" ? __BUILD_STAMP__ : "dev"} UTC
+          </div>
+          <div className="text-xs mt-1" style={{ color: C.faint }}>
+            If this is older than a change you're waiting on, this device is still on an old copy.
+            Close the app completely and open it again.
+          </div>
+        </div>
       </div>
     </div>
   );
