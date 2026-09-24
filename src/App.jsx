@@ -10424,9 +10424,12 @@ export default function App() {
             borderTop: `1px solid #4a423a`,
             paddingBottom: "env(safe-area-inset-bottom)",
             // Tabs get added over time. The bar shares out whatever width
-            // the screen has rather than growing past it.
+            // the screen has rather than growing past it, and if they ever
+            // stop fitting it scrolls, so a tab can't become unreachable.
             maxWidth: "100%",
-            overflow: "hidden",
+            overflowX: "auto",
+            overflowY: "hidden",
+            scrollbarWidth: "none",
           }}
         >
           {orderedTabs.map((t) => (
