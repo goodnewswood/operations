@@ -1,1 +1,15 @@
 @import "tailwindcss";
+
+/* The page itself never scrolls sideways. Wide things (the board's
+   columns, the wide tables) scroll inside their own box, so when one of
+   them grows, or a bar along the edge stretches, it can't drag the whole
+   window off the side of a phone screen. `clip` rather than `hidden`, so
+   it doesn't turn the page into a scroll box of its own. */
+html {
+  overflow-x: clip;
+}
+@supports not (overflow: clip) {
+  html {
+    overflow-x: hidden;
+  }
+}

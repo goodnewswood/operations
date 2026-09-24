@@ -2221,23 +2221,107 @@ function WorkOrderKanban({ workOrders, products, goals, onOpen, onMove, onToggle
   // Where the dragged card would land: which column, and the card it
   // would sit in front of (null means the bottom of that column).
   const [drop, setDrop] = useState(null);
-  const finish = () => { setDraggedId(null); setDrop(null); };
-  const aim = (status, beforeId) =>
+
+  /* Dragging runs on pointer events, not HTML5 drag and drop. Phones never
+     fire drag events, so on a phone the board simply could not be
+     reordered at all. A finger drags from the grip on the card, the one
+     spot that doesn't scroll the page instead; a mouse can still pick a
+     card up anywhere on it. Refs, not state, because a drag has to read
+     its own position inside listeners that were attached when it started. */
+  const stripRef = useRef(null);
+  const dragRef = useRef(null);
+  const dropRef = useRef(null);
+  const clickBlocked = useRef(false);
+
+  const finish = () => { dragRef.current = null; dropRef.current = null; setDraggedId(null); setDrop(null); };
+  const aim = (status, beforeId) => {
+    dropRef.current = { status, beforeId };
     setDrop((d) => (d && d.status === status && d.beforeId === beforeId ? d : { status, beforeId }));
+  };
 
   const commit = (status, beforeId) => {
-    if (!draggedId) return finish();
+    const dragged = dragRef.current?.id || draggedId;
+    if (!dragged) return finish();
     const ids = workOrders
-      .filter((w) => (w.status || "not_started") === status && w.id !== draggedId)
+      .filter((w) => (w.status || "not_started") === status && w.id !== dragged)
       .map((w) => w.id);
     const at = beforeId ? ids.indexOf(beforeId) : -1;
-    ids.splice(at < 0 ? ids.length : at, 0, draggedId);
-    onMove(draggedId, status, ids);
+    ids.splice(at < 0 ? ids.length : at, 0, dragged);
+    onMove(dragged, status, ids);
     finish();
   };
 
+  // What's under the finger: a card (in front of it or after it, by which
+  // half) or the empty part of a column.
+  const aimAt = (x, y) => {
+    const dragged = dragRef.current?.id;
+    const under = document.elementFromPoint(x, y);
+    const card = under?.closest?.("[data-wo-card]");
+    if (card && card.dataset.woCard !== dragged) {
+      const status = card.dataset.woStatus;
+      const ids = workOrders
+        .filter((w) => (w.status || "not_started") === status && w.id !== dragged)
+        .map((w) => w.id);
+      const r = card.getBoundingClientRect();
+      const i = ids.indexOf(card.dataset.woCard);
+      aim(status, y > r.top + r.height / 2 ? (ids[i + 1] ?? null) : card.dataset.woCard);
+      return;
+    }
+    const colEl = under?.closest?.("[data-wo-col]");
+    if (colEl) aim(colEl.dataset.woCol, null);
+  };
+
+  // Hold a card near the edge and the columns come to you, so a job can
+  // change stage without letting go of it.
+  const edgeScroll = (x) => {
+    const s = stripRef.current;
+    if (!s) return;
+    const r = s.getBoundingClientRect();
+    if (x > r.right - 56) s.scrollLeft += 16;
+    else if (x < r.left + 56) s.scrollLeft -= 16;
+  };
+
+  const unlisten = () => {
+    window.removeEventListener("pointermove", onPointerMove);
+    window.removeEventListener("pointerup", onPointerUp);
+    window.removeEventListener("pointercancel", onPointerCancel);
+  };
+  function onPointerMove(e) {
+    const d = dragRef.current;
+    if (!d) return;
+    // A mouse press only becomes a drag once it moves, so a plain click
+    // still opens the job.
+    if (!d.armed) {
+      if (Math.abs(e.clientX - d.x) + Math.abs(e.clientY - d.y) < 6) return;
+      d.armed = true;
+      setDraggedId(d.id);
+    }
+    e.preventDefault();
+    aimAt(e.clientX, e.clientY);
+    edgeScroll(e.clientX);
+  }
+  function onPointerUp() {
+    const d = dragRef.current;
+    const target = dropRef.current;
+    unlisten();
+    if (d?.armed && target) { clickBlocked.current = true; commit(target.status, target.beforeId); }
+    else finish();
+  }
+  function onPointerCancel() { unlisten(); finish(); }
+
+  const startDrag = (e, w, fromGrip) => {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    if (e.pointerType !== "mouse" && !fromGrip) return;
+    if (!fromGrip && e.target?.closest?.("button")) return;
+    dragRef.current = { id: w.id, x: e.clientX, y: e.clientY, armed: fromGrip && e.pointerType !== "mouse" };
+    if (dragRef.current.armed) setDraggedId(w.id);
+    window.addEventListener("pointermove", onPointerMove, { passive: false });
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerCancel);
+  };
+
   return (
-    <div className="flex gap-3 overflow-x-auto pb-2">
+    <div ref={stripRef} className="flex gap-3 overflow-x-auto pb-2">
       {STATUS_FLOW.map((status) => {
         const col = workOrders.filter((w) => (w.status || "not_started") === status);
         const others = col.filter((w) => w.id !== draggedId);
@@ -2246,8 +2330,7 @@ function WorkOrderKanban({ workOrders, products, goals, onOpen, onMove, onToggle
         return (
           <div
             key={status}
-            onDragOver={(e) => { e.preventDefault(); setDrop((d) => (d?.status === status ? d : { status, beforeId: null })); }}
-            onDrop={(e) => { e.preventDefault(); commit(status, drop?.status === status ? drop.beforeId : null); }}
+            data-wo-col={status}
             className="rounded-sm shrink-0"
             style={{
               width: 240, minHeight: 240,
@@ -2275,28 +2358,15 @@ function WorkOrderKanban({ workOrders, products, goals, onOpen, onMove, onToggle
                 return (
                   <div
                     key={w.id}
-                    draggable
+                    data-wo-card={w.id}
+                    data-wo-status={status}
                     title={w.number}
-                    onDragStart={(e) => {
-                      e.dataTransfer.effectAllowed = "move";
-                      try { e.dataTransfer.setData("text/plain", w.id); } catch { /* some browsers refuse; the drag still works */ }
-                      setDraggedId(w.id);
+                    onPointerDown={(e) => startDrag(e, w, false)}
+                    onClick={() => {
+                      // The click that ends a drag shouldn't also open the job.
+                      if (clickBlocked.current) { clickBlocked.current = false; return; }
+                      onOpen(w.id);
                     }}
-                    onDragOver={(e) => {
-                      e.preventDefault(); e.stopPropagation();
-                      if (w.id === draggedId) {
-                        const i = col.findIndex((x) => x.id === w.id);
-                        aim(status, col.slice(i + 1).find((x) => x.id !== draggedId)?.id ?? null);
-                        return;
-                      }
-                      const r = e.currentTarget.getBoundingClientRect();
-                      const lower = e.clientY > r.top + r.height / 2;
-                      const j = others.findIndex((x) => x.id === w.id);
-                      aim(status, lower ? (others[j + 1]?.id ?? null) : w.id);
-                    }}
-                    onDrop={(e) => { e.preventDefault(); e.stopPropagation(); commit(status, drop?.status === status ? drop.beforeId : w.id); }}
-                    onDragEnd={finish}
-                    onClick={() => onOpen(w.id)}
                     className="rounded-sm px-2.5 py-2"
                     style={{
                       background: C.paper, border: `1px solid ${urgent ? C.gold : C.kraft}`, cursor: "grab",
@@ -2307,7 +2377,19 @@ function WorkOrderKanban({ workOrders, products, goals, onOpen, onMove, onToggle
                     <span className="sr-only">{w.number}</span>
                     <div className="flex items-start justify-between gap-2">
                       <div style={{ fontWeight: 800, fontSize: 13, lineHeight: 1.25 }}>{title || w.customerName || "Untitled job"}</div>
-                      <WoStar wo={w} onToggle={onToggleStar} size={15} />
+                      <div className="flex items-center gap-1 shrink-0">
+                        <WoStar wo={w} onToggle={onToggleStar} size={15} />
+                        {/* touchAction none: on a phone this is the one part of
+                            the card a finger drags instead of scrolling. */}
+                        <button
+                          type="button" aria-label="Drag to move this job" title="Drag to move this job"
+                          onPointerDown={(e) => { e.stopPropagation(); startDrag(e, w, true); }}
+                          onClick={(e) => e.stopPropagation()}
+                          style={{ touchAction: "none", cursor: "grab", color: C.kraftDark, lineHeight: 0, padding: "2px 0 2px 2px" }}
+                        >
+                          <GripVertical size={16} />
+                        </button>
+                      </div>
                     </div>
                     {title && <div className="mt-0.5" style={{ fontSize: 12, color: C.faint }}>{w.customerName || "No customer"}</div>}
                     {isDropShip(w) && <DropShipTag wo={w} />}
@@ -10341,6 +10423,10 @@ export default function App() {
             background: C.ink,
             borderTop: `1px solid #4a423a`,
             paddingBottom: "env(safe-area-inset-bottom)",
+            // Tabs get added over time. The bar shares out whatever width
+            // the screen has rather than growing past it.
+            maxWidth: "100%",
+            overflow: "hidden",
           }}
         >
           {orderedTabs.map((t) => (
