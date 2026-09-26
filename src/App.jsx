@@ -3738,6 +3738,10 @@ function ShippingPanel({ wo, customer, onChange }) {
   const to = shippoShipTo(wo, customer);
   const toLine = [to.company || to.name, to.street1, [to.city, to.state].filter(Boolean).join(", "), to.zip].filter(Boolean).join(", ");
   const addressReady = to.street1 && to.city && to.zip;
+  // What the label is filed under in Shippo, per the fulfillment SOP:
+  // order or PO # / WO # / customer, so a shipment can be found later
+  // when someone calls about it.
+  const shipReference = [wo.customerPO, wo.number, to.company || to.name || customer?.company].filter(Boolean).join(" / ");
   const domestic = isUS(to.country);
 
   const startBuy = async () => {
@@ -3765,7 +3769,7 @@ function ShippingPanel({ wo, customer, onChange }) {
     setBusy("rates"); setErr(""); setRates(null);
     try {
       const d = await gnwsApi("/api/shippo", {
-        action: "rates", to, reference: wo.number,
+        action: "rates", to, reference: shipReference,
         parcels: flatParcels.map(({ length, width, height, weight }) => ({ length, width, height, weight })),
         fromName: isDropShip(wo) ? customer?.company || "" : "",
       });
@@ -3779,7 +3783,7 @@ function ShippingPanel({ wo, customer, onChange }) {
     if (!window.confirm(`Buy ${carrierLabel(rate.carrier)} ${rate.service} for $${rate.amount.toFixed(2)}? This charges the Shippo account.`)) return;
     setBusy(rate.id); setErr("");
     try {
-      const d = await gnwsApi("/api/shippo", { action: "buy", rateId: rate.id, reference: wo.number });
+      const d = await gnwsApi("/api/shippo", { action: "buy", rateId: rate.id, reference: shipReference });
       const rec = {
         id: uid(), carrier: String(rate.carrier || "").toLowerCase(), service: rate.service,
         trackingNumber: d.trackingNumber, trackingUrl: d.trackingUrl, labelUrl: d.labelUrl,
