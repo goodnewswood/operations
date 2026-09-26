@@ -8,7 +8,7 @@ import {
   Ruler, Palette, StickyNote, ClipboardList, Truck, RefreshCw,
   Play, Pause, Square, Timer, CalendarDays, Tag, QrCode, Printer,
   FileText, X, Search, Pencil, Star, Settings, Menu, ExternalLink,
-  Archive, RotateCcw, GripVertical, Mail, Camera
+  Archive, RotateCcw, GripVertical, Mail, Camera, ChevronRight
 } from "lucide-react";
 
 /* ============================================================
@@ -2639,11 +2639,9 @@ const specSummary = (spec) => {
   ].filter(Boolean).join(" · ");
 };
 
-// Downscaled before it ever reaches state — a phone photo straight off the
-// camera is several MB, and every line's reference photos ride along in the
-// same shared work-orders blob on every save. Capped well below anything a
-// screen actually shows a swatch or grain pattern at.
-function resizeImageToDataUrl(file, maxDim = 900, quality = 0.82) {
+// Shrinks a phone photo (several MB straight off the camera) to a JPEG
+// canvas. Big enough to read grain and color on a phone held up close.
+function resizeImageToCanvas(file, maxDim) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
@@ -2654,7 +2652,7 @@ function resizeImageToDataUrl(file, maxDim = 900, quality = 0.82) {
         const canvas = document.createElement("canvas");
         canvas.width = w; canvas.height = h;
         canvas.getContext("2d").drawImage(img, 0, 0, w, h);
-        resolve(canvas.toDataURL("image/jpeg", quality));
+        resolve(canvas);
       };
       img.onerror = () => reject(new Error("Could not read that image"));
       img.src = reader.result;
@@ -2662,6 +2660,115 @@ function resizeImageToDataUrl(file, maxDim = 900, quality = 0.82) {
     reader.onerror = () => reject(new Error("Could not read that file"));
     reader.readAsDataURL(file);
   });
+}
+
+// Uploads to file storage and keeps just the link on the line. If the
+// upload fails (bad shop wifi), falls back to a small copy stored inline
+// so the photo still isn't lost.
+async function photoFromFile(file) {
+  try {
+    const canvas = await resizeImageToCanvas(file, 1600);
+    const blob = await new Promise((res) => canvas.toBlob(res, "image/jpeg", 0.85));
+    const url = await window.photoStore.upload(blob);
+    return { id: uid(), url, addedAt: new Date().toISOString() };
+  } catch {
+    const canvas = await resizeImageToCanvas(file, 900);
+    return { id: uid(), dataUrl: canvas.toDataURL("image/jpeg", 0.82), addedAt: new Date().toISOString() };
+  }
+}
+const photoSrc = (ph) => ph.url || ph.dataUrl;
+
+// Full-screen view of one reference photo. Tap anywhere to close.
+function PhotoViewer({ photos, index, onIndex, onClose }) {
+  useBackLayer(true, onClose);
+  const ph = photos[index];
+  if (!ph) return null;
+  const many = photos.length > 1;
+  const step = (d) => (e) => { e.stopPropagation(); onIndex((index + d + photos.length) % photos.length); };
+  return createPortal(
+    <div onClick={onClose} className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: "rgba(0,0,0,0.92)" }}>
+      <img src={photoSrc(ph)} alt="" style={{ maxWidth: "96vw", maxHeight: "90vh", objectFit: "contain" }} />
+      <button onClick={onClose} className="absolute top-3 right-3 rounded-full flex items-center justify-center" style={{ width: 40, height: 40, background: "rgba(255,255,255,0.15)", color: "#fff" }} title="Close">
+        <X size={22} />
+      </button>
+      {many && (
+        <>
+          <button onClick={step(-1)} className="absolute left-2 rounded-full flex items-center justify-center" style={{ width: 44, height: 44, background: "rgba(255,255,255,0.15)", color: "#fff" }} title="Previous"><ChevronLeft size={26} /></button>
+          <button onClick={step(1)} className="absolute right-2 rounded-full flex items-center justify-center" style={{ width: 44, height: 44, background: "rgba(255,255,255,0.15)", color: "#fff" }} title="Next"><ChevronRight size={26} /></button>
+          <div className="absolute bottom-4" style={{ fontFamily: MONO, fontSize: 12, color: "#ccc" }}>{index + 1} of {photos.length}</div>
+        </>
+      )}
+    </div>,
+    document.body,
+  );
+}
+
+// A line's reference photos, in their own box so they're seen at a glance
+// instead of hiding inside the collapsed spec. With none yet it's just a
+// small add button, so it doesn't add noise to every line.
+function LinePhotos({ photos, onChange }) {
+  const [viewing, setViewing] = useState(-1);
+  const [busy, setBusy] = useState(0);
+  const add = async (e) => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = "";
+    if (!files.length) return;
+    setBusy(files.length);
+    try {
+      const added = await Promise.all(files.map(photoFromFile));
+      onChange([...(photos || []), ...added]);
+    } catch {
+      window.alert("Couldn't read that photo. Try another one.");
+    } finally {
+      setBusy(0);
+    }
+  };
+  const remove = (id) => {
+    if (window.confirm("Remove this reference photo from the line?")) onChange(photos.filter((x) => x.id !== id));
+  };
+  const addTile = (small) => (
+    <label
+      className="flex items-center justify-center gap-1.5 rounded-sm cursor-pointer"
+      style={small
+        ? { padding: "4px 10px", border: `1px dashed ${C.kraftDark}`, color: C.faint, fontSize: 12, fontWeight: 700 }
+        : { width: 76, height: 76, border: `1px dashed ${C.kraftDark}`, color: C.faint }}
+      title="Add a reference photo"
+    >
+      <Camera size={small ? 14 : 20} />{small && (busy ? `Uploading ${busy}…` : "Add reference photo")}
+      <input type="file" accept="image/*" multiple hidden onChange={add} disabled={!!busy} />
+    </label>
+  );
+
+  if (!photos?.length) return <div className="mt-2 flex">{addTile(true)}</div>;
+  return (
+    <div className="mt-2 rounded-sm p-2" style={{ background: "#fff", border: `1px solid ${C.kraftDark}` }}>
+      <div className="flex items-center gap-1.5 mb-1.5" style={{ fontWeight: 700, fontSize: 12, color: C.ink }}>
+        <Camera size={13} /> Reference photos
+        <span style={{ fontWeight: 400, color: C.faint }}>· tap to enlarge</span>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {photos.map((ph, i) => (
+          <div key={ph.id} className="relative" style={{ width: 76, height: 76 }}>
+            <button onClick={() => setViewing(i)} className="w-full h-full">
+              <img src={photoSrc(ph)} alt="" className="w-full h-full object-cover rounded-sm" style={{ border: `1px solid ${C.kraftDark}` }} />
+            </button>
+            <button
+              onClick={() => remove(ph.id)}
+              className="absolute -top-1.5 -right-1.5 rounded-full flex items-center justify-center"
+              style={{ width: 20, height: 20, background: C.ink, color: "#fff" }}
+              title="Remove photo"
+            >
+              <X size={12} />
+            </button>
+          </div>
+        ))}
+        {busy ? (
+          <div className="flex items-center justify-center rounded-sm" style={{ width: 76, height: 76, border: `1px dashed ${C.kraftDark}`, color: C.faint, fontSize: 11 }}>Uploading…</div>
+        ) : addTile(false)}
+      </div>
+      {viewing >= 0 && <PhotoViewer photos={photos} index={viewing} onIndex={setViewing} onClose={() => setViewing(-1)} />}
+    </div>
+  );
 }
 
 /* ---------------- Start Working (from a work order) ----------------
@@ -3086,15 +3193,17 @@ function WoTimers({ wo }) {
   }
 
   const tile = (label, value, color, sub) => (
-    <div className="flex-1 rounded-sm px-3 py-2" style={{ background: "#2a241d", border: "1px solid #4a423a", minWidth: 150 }}>
-      <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: "0.08em", color: C.kraftDark }}>{label}</div>
-      <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 800, color, lineHeight: 1.15 }}>{value}</div>
-      {sub && <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.kraftDark }}>{sub}</div>}
+    <div className="flex-1 rounded-sm px-2 py-1" style={{ background: "#2a241d", border: "1px solid #4a423a", minWidth: 130 }}>
+      <div className="flex items-baseline gap-2 flex-wrap">
+        <span style={{ fontFamily: MONO, fontSize: 9.5, letterSpacing: "0.08em", color: C.kraftDark }}>{label}</span>
+        <span style={{ fontFamily: MONO, fontSize: 15, fontWeight: 800, color, lineHeight: 1.2 }}>{value}</span>
+      </div>
+      {sub && <div style={{ fontFamily: MONO, fontSize: 10, color: C.kraftDark }}>{sub}</div>}
     </div>
   );
 
   return (
-    <div className="mt-3 flex flex-wrap gap-2">
+    <div className="mt-2 flex flex-wrap gap-2">
       {tile(shipped ? "WAS OPEN" : "OPEN FOR", openText, "#fff", opened ? `since ${new Date(opened.at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}` : "")}
       {tile(shipLabel, shipText, shipColor, shipSub)}
     </div>
@@ -3614,107 +3723,99 @@ function WorkOrderDetail({ wo, customers, products, goals, sortLog, history, onL
 
       <CustomerUpdatesPanel updates={updates} customers={customers} products={products} sender={sender} onHandled={onCustomerUpdate} />
 
-      <div className="rounded-sm p-5 mb-4" style={{ background: C.ink, color: "#fff" }}>
-        <div className="flex justify-between items-start flex-wrap gap-2">
-          <div>
-            <div className="flex items-center gap-2">
-              <input
-                style={{ ...inputStyle, background: "#2a241d", color: "#fff", borderColor: "#4a423a", fontSize: 20, fontWeight: 800, padding: "2px 6px", width: 320, maxWidth: "100%" }}
-                value={wo.title || ""} onChange={(e) => update({ title: e.target.value })}
-                placeholder={woTitle(wo) || "Job title (shows on the board)"}
-                title="Job title, what the board shows"
-              />
-              <WoStar wo={wo} onToggle={() => update({ starred: !wo.starred })} size={20} />
-            </div>
-            <input
-              className="mt-1 block"
-              style={{ ...inputStyle, background: "#2a241d", color: C.kraftDark, borderColor: "#4a423a", fontFamily: MONO, fontSize: 13, fontWeight: 700, padding: "2px 6px", width: 320, maxWidth: "100%" }}
-              value={wo.number} onChange={(e) => update({ number: e.target.value })}
-              title="Work order number"
-            />
-            {customer ? (
-              <button onClick={() => update({ customerId: "" })} className="mt-1 text-left block" title="Click to change customer">
-                <div style={{ fontSize: 16, fontWeight: 700 }}>{customer.company}</div>
-              </button>
-            ) : (
-              <select
-                className="mt-1"
-                style={{ ...inputStyle, background: "#2a241d", color: "#fff", borderColor: "#4a423a", maxWidth: 260 }}
-                value={wo.customerId} onChange={(e) => update({ customerId: e.target.value })}
-              >
-                <option value="">— Assign customer —</option>
-                {customers.map((c) => <option key={c.id} value={c.id}>{c.company}</option>)}
-              </select>
-            )}
-            {customer?.contact ? <div style={{ fontSize: 13, color: C.kraftDark }}>{customer.contact}</div> : null}
-            <div className="mt-2 flex flex-wrap gap-2">
-              <select
-                style={{ ...inputStyle, background: "#2a241d", color: "#fff", borderColor: "#4a423a", maxWidth: 240 }}
-                value={wo.brand || DEFAULT_BRAND} onChange={(e) => update({ brand: e.target.value })}
-                title="Which company this order prints under"
-              >
-                {Object.entries(BRANDS).map(([key, b]) => <option key={key} value={key}>{b.label}</option>)}
-              </select>
-              <select
-                style={{ ...inputStyle, background: "#2a241d", color: "#fff", borderColor: "#4a423a", maxWidth: 160 }}
-                value={wo.status || "not_started"}
-                onChange={(e) => update({
-                  status: e.target.value,
-                  ...(e.target.value === "shipped" ? { shippedAt: wo.shippedAt || new Date().toISOString() } : { shippedAt: "" }),
-                })}
-                title="Where this job is in the shop"
-              >
-                {STATUS_FLOW.map((st) => <option key={st} value={st}>{STATUS_LABEL[st]}</option>)}
-              </select>
-            </div>
-            {wo.quoteId ? (
-              <a
-                href={`${OFFICE_URL}/?quote=${wo.quoteId}`} target="_blank" rel="noopener noreferrer"
-                className="mt-1 inline-flex items-center gap-1 text-xs hover:opacity-70"
-                style={{ fontFamily: MONO, color: C.kraftDark }}
-              >
-                <ExternalLink size={11} /> View Quote
-              </a>
-            ) : null}
-          </div>
-          <span className="px-3 py-1 rounded-sm text-sm font-bold" style={{ background: STATUS_COLOR[wo.status], fontFamily: MONO }}>
-            {STATUS_LABEL[wo.status] || wo.status}
-          </span>
+      {/* Kept tight on purpose: the crew needs the job, who it's for, where
+          it goes and when, then the buttons. Everything else lives below. */}
+      <div className="rounded-sm p-3 mb-3" style={{ background: C.ink, color: "#fff" }}>
+        <div className="flex items-center gap-2">
+          <input
+            style={{ ...inputStyle, background: "#2a241d", color: "#fff", borderColor: "#4a423a", fontSize: 17, fontWeight: 800, padding: "2px 6px", flex: 1, minWidth: 0 }}
+            value={wo.title || ""} onChange={(e) => update({ title: e.target.value })}
+            placeholder={woTitle(wo) || "Job title (shows on the board)"}
+            title="Job title, what the board shows"
+          />
+          <WoStar wo={wo} onToggle={() => update({ starred: !wo.starred })} size={20} />
+        </div>
+        <div className="mt-1.5 flex items-center gap-x-3 gap-y-1 flex-wrap">
+          {customer ? (
+            <button onClick={() => update({ customerId: "" })} className="text-left" title="Click to change customer">
+              <span style={{ fontSize: 15, fontWeight: 700 }}>{customer.company}</span>
+              {customer.contact ? <span style={{ fontSize: 12, color: C.kraftDark }}> · {customer.contact}</span> : null}
+            </button>
+          ) : (
+            <select
+              style={{ ...inputStyle, background: "#2a241d", color: "#fff", borderColor: "#4a423a", maxWidth: 240, padding: "2px 6px" }}
+              value={wo.customerId} onChange={(e) => update({ customerId: e.target.value })}
+            >
+              <option value="">— Assign customer —</option>
+              {customers.map((c) => <option key={c.id} value={c.id}>{c.company}</option>)}
+            </select>
+          )}
+          <input
+            style={{ ...inputStyle, background: "transparent", color: C.kraftDark, borderColor: "#4a423a", fontFamily: MONO, fontSize: 12, fontWeight: 700, padding: "1px 5px", width: 250, maxWidth: "100%" }}
+            value={wo.number} onChange={(e) => update({ number: e.target.value })}
+            title="Work order number"
+          />
+        </div>
+        <div className="mt-1.5 flex items-center gap-2 flex-wrap">
+          <select
+            style={{ ...inputStyle, background: STATUS_COLOR[wo.status] || "#2a241d", color: "#fff", borderColor: "#6a6058", fontFamily: MONO, fontWeight: 800, fontSize: 12, padding: "2px 6px", maxWidth: 160 }}
+            value={wo.status || "not_started"}
+            onChange={(e) => update({
+              status: e.target.value,
+              ...(e.target.value === "shipped" ? { shippedAt: wo.shippedAt || new Date().toISOString() } : { shippedAt: "" }),
+            })}
+            title="Where this job is in the shop"
+          >
+            {STATUS_FLOW.map((st) => <option key={st} value={st}>{STATUS_LABEL[st]}</option>)}
+          </select>
+          <select
+            style={{ ...inputStyle, background: "#2a241d", color: C.kraftDark, borderColor: "#4a423a", fontSize: 12, padding: "2px 6px", maxWidth: 200 }}
+            value={wo.brand || DEFAULT_BRAND} onChange={(e) => update({ brand: e.target.value })}
+            title="Which company this order prints under"
+          >
+            {Object.entries(BRANDS).map(([key, b]) => <option key={key} value={key}>{b.label}</option>)}
+          </select>
+          {wo.quoteId ? (
+            <a
+              href={`${OFFICE_URL}/?quote=${wo.quoteId}`} target="_blank" rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-xs hover:opacity-70"
+              style={{ fontFamily: MONO, color: C.kraftDark }}
+            >
+              <ExternalLink size={11} /> Quote
+            </a>
+          ) : null}
         </div>
 
+        {/* Where it's going, on one line. On a drop ship that's the end
+            customer, never the distributor's own address. */}
         {isDropShip(wo) ? (
-          // Where it's actually going, up top where the crew looks first.
-          // The distributor's own address would be the wrong one to use.
-          <div className="mt-3 pt-3 flex items-start gap-2" style={{ borderTop: "1px solid #4a423a" }}>
-            <Truck size={16} style={{ color: C.gold, marginTop: 2 }} />
-            <div style={{ fontSize: 14, lineHeight: 1.5 }}>
-              <div style={{ fontFamily: MONO, fontSize: 11, fontWeight: 800, letterSpacing: "0.06em", color: C.gold }}>
-                DROP SHIP TO{wo.customerPO ? `  ·  PO # ${wo.customerPO}` : ""}
-              </div>
+          <div className="mt-2 pt-2 flex items-start gap-1.5" style={{ borderTop: "1px solid #4a423a", fontSize: 13, lineHeight: 1.4 }}>
+            <Truck size={14} style={{ color: C.gold, marginTop: 2, flexShrink: 0 }} />
+            <div>
+              <span style={{ fontFamily: MONO, fontSize: 11, fontWeight: 800, color: C.gold }}>DROP SHIP TO </span>
               {shipToLines(wo.shipTo).length
-                ? shipToLines(wo.shipTo).map((l, i) => <div key={i}>{l}</div>)
-                : <div style={{ color: C.warn }}>No ship-to address yet. Fill it in below.</div>}
-              <div style={{ fontSize: 12, color: C.kraftDark }}>Do not ship to {customer?.company || "the customer"}.</div>
+                ? <span>{shipToLines(wo.shipTo).join(", ")}</span>
+                : <span style={{ color: C.warn }}>no address yet, fill it in below</span>}
+              {wo.customerPO ? <span style={{ fontFamily: MONO, fontSize: 11, color: C.kraftDark }}> · PO # {wo.customerPO}</span> : null}
+              <span style={{ fontSize: 11, color: C.kraftDark }}> · not to {customer?.company || "the customer"}</span>
             </div>
           </div>
         ) : (customer?.address || customer?.city) ? (
-          <div className="mt-3 pt-3 flex items-start gap-2" style={{ borderTop: "1px solid #4a423a" }}>
-            <MapPin size={16} style={{ color: C.kraftDark, marginTop: 2 }} />
-            <div style={{ fontSize: 14, lineHeight: 1.5 }}>
-              {customer.address && <div>{customer.address}</div>}
-              <div>{[customer.city, customer.state, customer.zip].filter(Boolean).join(", ")}</div>
-              {customer.country && customer.country !== "USA" ? <div>{customer.country}</div> : null}
-            </div>
+          <div className="mt-2 pt-2 flex items-start gap-1.5" style={{ borderTop: "1px solid #4a423a", fontSize: 13, lineHeight: 1.4 }}>
+            <MapPin size={14} style={{ color: C.kraftDark, marginTop: 2, flexShrink: 0 }} />
+            <span>
+              {[customer.address, [customer.city, customer.state, customer.zip].filter(Boolean).join(", "), customer.country && customer.country !== "USA" ? customer.country : ""].filter(Boolean).join(", ")}
+            </span>
           </div>
         ) : (
-          <div className="mt-3 pt-3 text-sm" style={{ borderTop: "1px solid #4a423a", color: C.warn }}>
-            <AlertTriangle size={13} className="inline mr-1" /> No address on file for this customer.
+          <div className="mt-2 pt-2 text-xs" style={{ borderTop: "1px solid #4a423a", color: C.warn }}>
+            <AlertTriangle size={12} className="inline mr-1" /> No address on file for this customer.
           </div>
         )}
 
         <WoTimers wo={wo} />
 
-        <div className="mt-4 flex gap-2 flex-wrap">
+        <div className="mt-2 flex gap-2 flex-wrap">
           {ACTIVE_WO_STATUSES.includes(wo.status) && (
             <Btn kind="primary" onClick={() => setStartWorkOpen(true)} big>
               <Play size={16} /> Start Working
@@ -3745,8 +3846,6 @@ function WorkOrderDetail({ wo, customers, products, goals, sortLog, history, onL
       </div>
 
       <DropShipPanel record={wo} customer={customer} onChange={update} />
-
-      <LaborPanel wo={wo} goals={goals} sortLog={sortLog} onClockChange={(clock) => update({ clock })} />
 
       <div className="rounded-sm overflow-hidden mb-4" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
         <div className="px-4 py-3 flex items-center justify-between" style={{ borderBottom: `1px solid ${C.kraftDark}` }}>
@@ -3821,48 +3920,9 @@ function WorkOrderDetail({ wo, customers, products, goals, sortLog, history, onL
                       <Field label="Paint tolerance"><input style={inputStyle} value={line.spec?.paintTolerance || ""} onChange={(e) => updateLineSpec(line, { paintTolerance: e.target.value })} placeholder="e.g. one side painted OK" /></Field>
                       <Field label="Knot / defect tolerance"><input style={inputStyle} value={line.spec?.knotTolerance || ""} onChange={(e) => updateLineSpec(line, { knotTolerance: e.target.value })} placeholder="e.g. no knots over 1 inch" /></Field>
                       <Field label="Other spec notes"><textarea style={{ ...inputStyle, minHeight: 50 }} value={line.spec?.notes || ""} onChange={(e) => updateLineSpec(line, { notes: e.target.value })} /></Field>
-                      <Field label="Reference photos — desired look, color, etc. (optional)">
-                        <div className="flex flex-wrap gap-2 mt-1">
-                          {(line.spec?.photos || []).map((ph) => (
-                            <div key={ph.id} className="relative" style={{ width: 64, height: 64 }}>
-                              <img
-                                src={ph.dataUrl} alt="" className="w-full h-full object-cover rounded-sm"
-                                style={{ border: `1px solid ${C.kraftDark}` }}
-                              />
-                              <button
-                                onClick={() => updateLineSpec(line, { photos: (line.spec?.photos || []).filter((x) => x.id !== ph.id) })}
-                                className="absolute -top-1.5 -right-1.5 rounded-full flex items-center justify-center"
-                                style={{ width: 18, height: 18, background: C.ink, color: "#fff" }}
-                                title="Remove photo"
-                              >
-                                <X size={11} />
-                              </button>
-                            </div>
-                          ))}
-                          <label
-                            className="flex items-center justify-center rounded-sm cursor-pointer"
-                            style={{ width: 64, height: 64, border: `1px dashed ${C.kraftDark}`, color: C.faint }}
-                            title="Add a reference photo"
-                          >
-                            <Camera size={18} />
-                            <input
-                              type="file" accept="image/*" multiple hidden
-                              onChange={async (e) => {
-                                const files = Array.from(e.target.files || []);
-                                e.target.value = "";
-                                if (!files.length) return;
-                                const dataUrls = await Promise.all(files.map((f) => resizeImageToDataUrl(f)));
-                                updateLineSpec(line, {
-                                  photos: [...(line.spec?.photos || []), ...dataUrls.map((dataUrl) => ({ id: uid(), dataUrl }))],
-                                });
-                              }}
-                            />
-                          </label>
-                        </div>
-                      </Field>
                       {customer?.spec && specSummary(customer.spec) && (
                         <button
-                          onClick={() => updateLine(line.id, { spec: { ...customer.spec } })}
+                          onClick={() => updateLine(line.id, { spec: { ...customer.spec, photos: line.spec?.photos || [] } })}
                           className="mt-2 text-xs underline"
                           style={{ color: C.faint }}
                         >
@@ -3872,6 +3932,10 @@ function WorkOrderDetail({ wo, customers, products, goals, sortLog, history, onL
                     </div>
                   )}
                 </div>
+
+                {/* Stored under spec.photos, where they've always been, so
+                    GNWS Office and the change history keep reading them. */}
+                <LinePhotos photos={line.spec?.photos || []} onChange={(photos) => updateLineSpec(line, { photos })} />
 
                 <div className="mt-2 grid grid-cols-3 sm:grid-cols-4 gap-1.5">
                   {PROCESS_STEPS.map((s) => (
@@ -3893,6 +3957,8 @@ function WorkOrderDetail({ wo, customers, products, goals, sortLog, history, onL
           <Btn onClick={addLine}><Plus size={14} /> Add line</Btn>
         </div>
       </div>
+
+      <LaborPanel wo={wo} goals={goals} sortLog={sortLog} onClockChange={(clock) => update({ clock })} />
 
       <div className="flex gap-2 mb-8 flex-wrap">
         <Btn kind="primary" onClick={() => setWoPrintOpen(true)}><Printer size={14} /> Print Work Order</Btn>
@@ -5725,14 +5791,29 @@ function DropShipPanel({ record, customer, onChange, disabled }) {
   const input = (key, placeholder) => (
     <input style={inputStyle} value={shipTo[key]} onChange={(e) => setShipTo({ [key]: e.target.value })} placeholder={placeholder} disabled={disabled} />
   );
+  // Folded shut once there's an address: the header already shows where
+  // it's going, so the full form only needs to open for edits.
+  const hasAddress = shipToLines(shipTo).length > 0;
+  const [open, setOpen] = useState(!hasAddress);
+  const summary = [shipToName(shipTo) || shipTo.name, [shipTo.city, shipTo.state].filter(Boolean).join(", ")].filter(Boolean).join(" · ");
   return (
-    <div className="rounded-sm p-4 mb-4" style={{ background: on ? "#FBF6EC" : C.panel, border: `1px solid ${on ? C.gold : C.kraftDark}` }}>
-      <label className="flex items-center gap-2 flex-wrap" style={{ fontWeight: 800, cursor: disabled ? "default" : "pointer" }}>
-        <input type="checkbox" checked={on} disabled={disabled} onChange={(e) => onChange({ dropShip: e.target.checked })} />
-        <Truck size={16} style={{ color: on ? C.gold : C.faint }} /> Drop ship
-        <span style={{ fontWeight: 400, fontSize: 12, color: C.faint }}>ships straight to {distributor}'s customer</span>
-      </label>
-      {on && (
+    <div className="rounded-sm px-3 py-2 mb-3" style={{ background: on ? "#FBF6EC" : C.panel, border: `1px solid ${on ? C.gold : C.kraftDark}` }}>
+      <div className="flex items-center gap-2 flex-wrap">
+        <label className="flex items-center gap-2" style={{ fontWeight: 800, fontSize: 14, cursor: disabled ? "default" : "pointer" }}>
+          <input type="checkbox" checked={on} disabled={disabled} onChange={(e) => { onChange({ dropShip: e.target.checked }); if (e.target.checked) setOpen(true); }} />
+          <Truck size={15} style={{ color: on ? C.gold : C.faint }} /> Drop ship
+        </label>
+        {on && !open ? (
+          <button onClick={() => setOpen(true)} className="flex-1 text-left text-xs min-w-0 truncate" style={{ color: C.faint }}>
+            {summary}{record.customerPO ? ` · PO # ${record.customerPO}` : ""} <span style={{ color: C.gold, fontWeight: 700 }}>Edit ▼</span>
+          </button>
+        ) : on ? (
+          <button onClick={() => setOpen(false)} className="ml-auto text-xs" style={{ color: C.gold, fontWeight: 700 }}>Done ▲</button>
+        ) : (
+          <span style={{ fontSize: 12, color: C.faint }}>ships straight to {distributor}'s customer</span>
+        )}
+      </div>
+      {on && open && (
         <div className="mt-3">
           <Field label="Customer PO #" w={240}>
             <input style={inputStyle} value={record.customerPO || ""} onChange={(e) => onChange({ customerPO: e.target.value })} placeholder={`${distributor}'s PO number`} disabled={disabled} />
