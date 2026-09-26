@@ -3273,6 +3273,17 @@ function describeWOChanges(a, b, { customers, products, statusLabel }) {
   if (!!a.archived !== !!b.archived) event("archived", b.archived ? "Archived" : "Took it out of the archive");
   if (b.quoteId && !same(a.quoteId, b.quoteId)) event("quote", "Linked a quote");
   if (b.salesOrderId && !same(a.salesOrderId, b.salesOrderId)) event("salesOrder", "Linked a sales order");
+  // Shipments: added, removed, or tracking moved to a new status.
+  {
+    const sa = a.shipments || [], sb = b.shipments || [];
+    const tag = (x) => `${x.carrier ? String(x.carrier).toUpperCase() : ""} ${x.trackingNumber || ""}`.trim();
+    for (const x of sb) {
+      const was = sa.find((y) => y.id === x.id);
+      if (!was) event(`ship:${x.id}`, x.via === "shippo" ? `Bought a label, ${tag(x)}` : `Added tracking ${tag(x)}`);
+      else if (was.status !== x.status) event(`ship:${x.id}:st`, `Tracking ${tag(x)}: ${(TRACK_STATUS[x.status] || TRACK_STATUS.UNKNOWN).label}`);
+    }
+    for (const x of sa) if (!sb.find((y) => y.id === x.id)) event(`ship:${x.id}`, `Removed tracking ${tag(x)}`);
+  }
 
   // The job clock stores when it started and how much is banked, so each
   // of its buttons leaves its own fingerprint on those numbers.
@@ -3646,6 +3657,337 @@ function CustomerUpdatesBadge({ count, onClick }) {
   );
 }
 
+/* ---------------- Shipping (Shippo) ----------------
+   Boxed orders get their label right from the work order: pick the boxes
+   (sizes come from the templates saved in Shippo), see rates, buy, print.
+   The tracking number lands on the order so anyone can see where it is.
+   Labels bought somewhere else can be added by hand to get tracking too.
+   Pallets still go out on the bill of lading; this is for parcels.
+
+   Rates show a price because you can't pick one without it, but nothing
+   about cost is saved on the order. The server side is api/shippo.js. */
+
+// Same access code as invoice import, asked for once per device.
+const API_CODE_KEY = "gnws-import-access-code";
+async function gnwsApi(path, body) {
+  let saved = "";
+  try { saved = localStorage.getItem(API_CODE_KEY) || ""; } catch { /* private browsing */ }
+  const send = (code) => fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-gnws-access-code": code },
+    body: JSON.stringify(body),
+  });
+  let r = await send(saved);
+  if (r.status === 401) {
+    const entered = (window.prompt("This needs the shop access code. Ask Ero for it.") || "").trim();
+    if (!entered) throw new Error("No access code entered");
+    r = await send(entered);
+    if (r.ok) { try { localStorage.setItem(API_CODE_KEY, entered); } catch { /* ask again next time */ } }
+  }
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || `Server error ${r.status}`);
+  return data;
+}
+
+const CARRIERS = [["ups", "UPS"], ["usps", "USPS"], ["fedex", "FedEx"], ["dhl_express", "DHL Express"], ["ontrac", "OnTrac"]];
+const carrierLabel = (c) => (CARRIERS.find(([k]) => k === String(c || "").toLowerCase()) || [c, c || "Carrier"])[1];
+
+// Where the box is going, in Shippo's shape. On a drop ship it's the end
+// customer, never the distributor.
+function shippoShipTo(wo, customer) {
+  if (isDropShip(wo)) {
+    const s = wo.shipTo || {};
+    return { name: s.name, company: s.company, street1: s.address, street2: s.address2, city: s.city, state: s.state, zip: s.zip, country: s.country, phone: s.phone };
+  }
+  const c = customer || {};
+  return { name: c.contact || c.company, company: c.contact ? c.company : "", street1: c.address, city: c.city, state: c.state, zip: c.zip, country: c.country, phone: c.phone, email: c.email };
+}
+const isUS = (country) => !country || /^(us|usa|united states)$/i.test(String(country).trim());
+
+const TRACK_STATUS = {
+  PRE_TRANSIT: { label: "Label made", color: C.faint },
+  TRANSIT: { label: "In transit", color: C.gold },
+  DELIVERED: { label: "Delivered", color: C.moss },
+  RETURNED: { label: "Returned", color: C.redwood },
+  FAILURE: { label: "Problem", color: C.redwood },
+  UNKNOWN: { label: "No scans yet", color: C.faint },
+};
+
+// Box templates rarely change, so one fetch per app load is plenty.
+let boxTemplatesCache = null;
+
+function ShippingPanel({ wo, customer, onChange }) {
+  // Buying is async, and the order can change while it waits (someone
+  // ticks a line). Save onto whatever the order is by then, not the copy
+  // from when the button was pressed.
+  const woRef = useRef(wo);
+  woRef.current = wo;
+  const shipments = wo.shipments || [];
+  const setShipments = (fn) => onChange({ ...woRef.current, shipments: fn(woRef.current.shipments || []) });
+
+  const [mode, setMode] = useState(""); // "", "buy", "manual"
+  const [boxes, setBoxes] = useState(boxTemplatesCache || []);
+  const [parcels, setParcels] = useState([]);
+  const [rates, setRates] = useState(null);
+  const [messages, setMessages] = useState([]);
+  const [busy, setBusy] = useState("");
+  const [err, setErr] = useState("");
+  const [manual, setManual] = useState({ carrier: "ups", trackingNumber: "" });
+  const [bought, setBought] = useState(null);
+
+  const to = shippoShipTo(wo, customer);
+  const toLine = [to.company || to.name, to.street1, [to.city, to.state].filter(Boolean).join(", "), to.zip].filter(Boolean).join(", ");
+  const addressReady = to.street1 && to.city && to.zip;
+  const domestic = isUS(to.country);
+
+  const startBuy = async () => {
+    setMode("buy"); setRates(null); setErr(""); setBought(null); setMessages([]);
+    if (!parcels.length) setParcels([{ key: uid(), boxId: "", length: "", width: "", height: "", weight: "", count: 1 }]);
+    if (boxTemplatesCache) return;
+    setBusy("boxes");
+    try {
+      const d = await gnwsApi("/api/shippo", { action: "boxes" });
+      boxTemplatesCache = d.boxes || [];
+      setBoxes(boxTemplatesCache);
+    } catch (e) { setErr(e.message); }
+    finally { setBusy(""); }
+  };
+
+  const setParcel = (key, patch) => { setRates(null); setParcels((ps) => ps.map((p) => (p.key === key ? { ...p, ...patch } : p))); };
+  const pickBox = (key, boxId) => {
+    const b = boxes.find((x) => x.id === boxId);
+    setParcel(key, b ? { boxId, length: b.length, width: b.width, height: b.height, weight: b.weight || "" } : { boxId: "" });
+  };
+  const flatParcels = parcels.flatMap((p) => Array.from({ length: Math.max(1, Math.min(30, Number(p.count) || 1)) }, () => p));
+  const parcelsOk = parcels.length > 0 && parcels.every((p) => Number(p.length) > 0 && Number(p.width) > 0 && Number(p.height) > 0 && Number(p.weight) > 0);
+
+  const getRates = async () => {
+    setBusy("rates"); setErr(""); setRates(null);
+    try {
+      const d = await gnwsApi("/api/shippo", {
+        action: "rates", to, reference: wo.number,
+        parcels: flatParcels.map(({ length, width, height, weight }) => ({ length, width, height, weight })),
+        fromName: isDropShip(wo) ? customer?.company || "" : "",
+      });
+      setRates(d.rates || []);
+      setMessages(d.messages || []);
+    } catch (e) { setErr(e.message); }
+    finally { setBusy(""); }
+  };
+
+  const buy = async (rate) => {
+    if (!window.confirm(`Buy ${carrierLabel(rate.carrier)} ${rate.service} for $${rate.amount.toFixed(2)}? This charges the Shippo account.`)) return;
+    setBusy(rate.id); setErr("");
+    try {
+      const d = await gnwsApi("/api/shippo", { action: "buy", rateId: rate.id, reference: wo.number });
+      const rec = {
+        id: uid(), carrier: String(rate.carrier || "").toLowerCase(), service: rate.service,
+        trackingNumber: d.trackingNumber, trackingUrl: d.trackingUrl, labelUrl: d.labelUrl,
+        labels: d.labels || [], boxes: flatParcels.length, via: "shippo",
+        transactionId: d.transactionId, createdAt: new Date().toISOString(), status: "PRE_TRANSIT",
+      };
+      setShipments((list) => [...list, rec]);
+      setBought(rec);
+      setRates(null);
+    } catch (e) { setErr(e.message); }
+    finally { setBusy(""); }
+  };
+
+  const addManual = () => {
+    const num = manual.trackingNumber.replace(/\s+/g, "");
+    if (!num) return;
+    setShipments((list) => [...list, { id: uid(), carrier: manual.carrier, trackingNumber: num, via: "manual", createdAt: new Date().toISOString(), status: "UNKNOWN" }]);
+    setManual({ ...manual, trackingNumber: "" });
+    setMode("");
+  };
+
+  // Checks tracking for anything not delivered yet. Only writes to the
+  // order when the status actually changed, so opening a job doesn't
+  // make a save (or a history line) every time.
+  const [checking, setChecking] = useState(false);
+  const refresh = async (list) => {
+    const open = list.filter((s) => s.trackingNumber && s.status !== "DELIVERED" && s.status !== "RETURNED");
+    if (!open.length) return;
+    setChecking(true);
+    const results = await Promise.all(open.map((s) =>
+      gnwsApi("/api/shippo", { action: "track", carrier: s.carrier, trackingNumber: s.trackingNumber })
+        .then((t) => ({ id: s.id, t })).catch(() => null)));
+    setChecking(false);
+    const changed = results.filter(Boolean).filter(({ id, t }) => {
+      const s = list.find((x) => x.id === id);
+      return s && (s.status !== t.status || s.statusDetail !== t.detail);
+    });
+    if (!changed.length) return;
+    setShipments((cur) => cur.map((s) => {
+      const hit = changed.find((c) => c.id === s.id);
+      return hit ? { ...s, status: hit.t.status, statusDetail: hit.t.detail, statusAt: hit.t.at, where: hit.t.where, eta: hit.t.eta || s.eta } : s;
+    }));
+  };
+  // Once per opening of the order, and only if something is still moving.
+  const checkedRef = useRef(false);
+  useEffect(() => {
+    if (checkedRef.current) return;
+    checkedRef.current = true;
+    refresh(shipments);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const remove = (id) => { if (window.confirm("Take this tracking number off the order? (It doesn't cancel or refund the label.)")) setShipments((list) => list.filter((s) => s.id !== id)); };
+
+  const btnSm = { fontSize: 12, fontWeight: 700 };
+
+  return (
+    <div className="rounded-sm p-3 mb-3" style={{ background: C.panel, border: `1px solid ${C.kraftDark}` }}>
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="flex items-center gap-1.5" style={{ fontWeight: 800 }}><Package size={16} style={{ color: C.faint }} /> Shipping</span>
+        {checking && <span style={{ fontSize: 11, color: C.faint }}>checking tracking…</span>}
+        <span className="ml-auto flex gap-2">
+          {mode !== "buy" && <Btn kind="primary" onClick={startBuy}><Truck size={14} /> Ship with Shippo</Btn>}
+          {mode === "" && <Btn onClick={() => setMode("manual")}><Plus size={14} /> Tracking #</Btn>}
+        </span>
+      </div>
+
+      {shipments.length > 0 && (
+        <div className="mt-2">
+          {shipments.map((s) => {
+            const st = TRACK_STATUS[s.status] || TRACK_STATUS.UNKNOWN;
+            const labels = s.labels?.length ? s.labels : s.labelUrl ? [{ labelUrl: s.labelUrl }] : [];
+            return (
+              <div key={s.id} className="py-2 flex items-start gap-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
+                <span className="px-2 py-0.5 rounded-sm" style={{ background: st.color, color: "#fff", fontFamily: MONO, fontSize: 11, fontWeight: 800 }}>{st.label}</span>
+                <div className="flex-1 min-w-0" style={{ fontSize: 13 }}>
+                  <div>
+                    <strong>{carrierLabel(s.carrier)}</strong>{s.service ? ` ${s.service}` : ""}{s.boxes > 1 ? ` · ${s.boxes} boxes` : ""}{" · "}
+                    {s.trackingUrl
+                      ? <a href={s.trackingUrl} target="_blank" rel="noopener noreferrer" style={{ fontFamily: MONO, textDecoration: "underline" }}>{s.trackingNumber}</a>
+                      : <span style={{ fontFamily: MONO }}>{s.trackingNumber}</span>}
+                  </div>
+                  {(s.statusDetail || s.where || s.eta) && (
+                    <div style={{ fontSize: 12, color: C.faint }}>
+                      {[s.statusDetail, s.where, s.eta && s.status !== "DELIVERED" ? `ETA ${new Date(s.eta).toLocaleDateString("en-US", { month: "short", day: "numeric" })}` : ""].filter(Boolean).join(" · ")}
+                    </div>
+                  )}
+                  {labels.length > 0 && (
+                    <div className="mt-1 flex gap-3 flex-wrap">
+                      {labels.map((l, i) => (
+                        <a key={i} href={l.labelUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1" style={{ ...btnSm, color: C.redwood }}>
+                          <Printer size={13} /> Label{labels.length > 1 ? ` ${i + 1}` : ""}
+                        </a>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <span className="flex gap-2 items-center">
+                  <button onClick={() => remove(s.id)} className="opacity-40 hover:opacity-100" title="Remove"><X size={14} /></button>
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {mode === "manual" && (
+        <div className="mt-2 flex gap-2 flex-wrap items-end">
+          <Field label="Carrier" w={140}>
+            <select style={inputStyle} value={manual.carrier} onChange={(e) => setManual({ ...manual, carrier: e.target.value })}>
+              {CARRIERS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+            </select>
+          </Field>
+          <Field label="Tracking number" w={240}>
+            <input style={{ ...inputStyle, fontFamily: MONO }} value={manual.trackingNumber} onChange={(e) => setManual({ ...manual, trackingNumber: e.target.value })} placeholder="1Z..." />
+          </Field>
+          <Btn kind="primary" onClick={addManual} disabled={!manual.trackingNumber.trim()}><Check size={14} /> Add</Btn>
+          <Btn onClick={() => setMode("")}>Cancel</Btn>
+        </div>
+      )}
+
+      {mode === "buy" && (
+        <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
+          <div style={{ fontSize: 13 }}>
+            <span style={{ fontFamily: MONO, fontSize: 11, fontWeight: 800, color: C.faint }}>TO </span>
+            {addressReady ? toLine : <span style={{ color: C.warn }}>No full address yet. {isDropShip(wo) ? "Fill in the drop ship address above." : "Add it to the customer's contact."}</span>}
+          </div>
+          {isDropShip(wo) && <div style={{ fontSize: 11, color: C.faint }}>Label shows {customer?.company || "the customer"} as the sender, not us.</div>}
+          {!domestic && <div className="mt-1" style={{ fontSize: 12, color: C.warn }}>Outside the US needs customs forms. Buy this one on the Shippo site, then add the tracking number here.</div>}
+
+          {bought ? (
+            <div className="mt-3 rounded-sm p-3" style={{ background: "#EEF3EA", border: `1px solid ${C.moss}` }}>
+              <div style={{ fontWeight: 800, color: C.moss }}><Check size={14} className="inline" /> Label bought · {carrierLabel(bought.carrier)} {bought.trackingNumber}</div>
+              <div className="mt-2 flex gap-2 flex-wrap">
+                {(bought.labels?.length ? bought.labels : [{ labelUrl: bought.labelUrl }]).map((l, i, arr) => (
+                  <Btn key={i} kind="primary" big onClick={() => window.open(l.labelUrl, "_blank", "noopener")}><Printer size={16} /> Print label{arr.length > 1 ? ` ${i + 1}` : ""}</Btn>
+                ))}
+                <Btn onClick={() => { setMode(""); setBought(null); setParcels([]); }}>Done</Btn>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="mt-2">
+                {parcels.map((p, idx) => (
+                  <div key={p.key} className="flex gap-2 flex-wrap items-end mb-2">
+                    <Field label={idx === 0 ? "Box" : ""} w={200}>
+                      <select style={inputStyle} value={p.boxId} onChange={(e) => pickBox(p.key, e.target.value)}>
+                        <option value="">{busy === "boxes" ? "Loading boxes…" : "Custom size"}</option>
+                        {boxes.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+                      </select>
+                    </Field>
+                    {["length", "width", "height"].map((k) => (
+                      <Field key={k} label={idx === 0 ? `${k[0].toUpperCase()} in` : ""} w={58}>
+                        <input style={{ ...inputStyle, fontFamily: MONO, padding: "6px" }} inputMode="decimal" value={p[k]} onChange={(e) => setParcel(p.key, { [k]: e.target.value, boxId: "" })} />
+                      </Field>
+                    ))}
+                    <Field label={idx === 0 ? "Lbs each" : ""} w={70}>
+                      <input style={{ ...inputStyle, fontFamily: MONO, padding: "6px" }} inputMode="decimal" value={p.weight} onChange={(e) => setParcel(p.key, { weight: e.target.value })} />
+                    </Field>
+                    <Field label={idx === 0 ? "How many" : ""} w={64}>
+                      <input style={{ ...inputStyle, fontFamily: MONO, padding: "6px" }} inputMode="numeric" value={p.count} onChange={(e) => setParcel(p.key, { count: e.target.value })} />
+                    </Field>
+                    {parcels.length > 1 && <button onClick={() => { setRates(null); setParcels(parcels.filter((x) => x.key !== p.key)); }} className="opacity-40 hover:opacity-100 mb-2"><Trash2 size={15} /></button>}
+                  </div>
+                ))}
+                <div className="flex gap-2 flex-wrap">
+                  <Btn onClick={() => { setRates(null); setParcels([...parcels, { key: uid(), boxId: "", length: "", width: "", height: "", weight: "", count: 1 }]); }}><Plus size={14} /> Another box size</Btn>
+                  <Btn kind="primary" onClick={getRates} disabled={!parcelsOk || !addressReady || !domestic || !!busy}>
+                    {busy === "rates" ? "Getting rates…" : `Get rates${flatParcels.length > 1 ? ` for ${flatParcels.length} boxes` : ""}`}
+                  </Btn>
+                  <Btn onClick={() => { setMode(""); setRates(null); }}>Cancel</Btn>
+                </div>
+              </div>
+
+              {rates && (
+                <div className="mt-3">
+                  {rates.length === 0 && <div style={{ fontSize: 13, color: C.warn }}>No rates came back for this address and box.{messages.length ? " Shippo says:" : ""}</div>}
+                  {flatParcels.length > 1 && <div className="mb-1" style={{ fontSize: 11, color: C.faint }}>No USPS here: it can't ship several boxes as one shipment.</div>}
+                  {messages.length > 0 && rates.length === 0 && <ul className="text-xs mt-1" style={{ color: C.faint }}>{messages.map((m, i) => <li key={i}>{m}</li>)}</ul>}
+                  {rates.map((r) => (
+                    <button
+                      key={r.id} onClick={() => buy(r)} disabled={!!busy}
+                      className="w-full flex items-center gap-3 px-3 py-2 mb-1.5 rounded-sm text-left"
+                      style={{ background: "#fff", border: `1px solid ${C.kraftDark}`, opacity: busy && busy !== r.id ? 0.5 : 1 }}
+                    >
+                      <span style={{ fontFamily: MONO, fontWeight: 800, fontSize: 15, minWidth: 72 }}>${r.amount.toFixed(2)}</span>
+                      <span className="flex-1 min-w-0" style={{ fontSize: 13 }}>
+                        <strong>{carrierLabel(r.carrier)}</strong> {r.service}
+                        {r.tags.includes("CHEAPEST") && <span style={{ fontSize: 10, fontFamily: MONO, color: C.moss, fontWeight: 800 }}> CHEAPEST</span>}
+                        {r.tags.includes("FASTEST") && <span style={{ fontSize: 10, fontFamily: MONO, color: C.gold, fontWeight: 800 }}> FASTEST</span>}
+                      </span>
+                      <span style={{ fontFamily: MONO, fontSize: 12, color: C.faint }}>
+                        {busy === r.id ? "Buying…" : r.days != null ? `${r.days} day${r.days === 1 ? "" : "s"}` : ""}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {err && <div className="mt-2 text-sm" style={{ color: C.redwood }}><AlertTriangle size={13} className="inline mr-1" />{err}</div>}
+    </div>
+  );
+}
+
 function WorkOrderDetail({ wo, customers, products, goals, sortLog, history, onLog, updates, sender, onCustomerUpdate, onScheduleMe, onChange, onDelete, onBack, team, whoWorking, setWhoWorking, onAddTeamMember, onUpdateCustomerSpec, onStartWork }) {
   const customer = customers.find((c) => c.id === wo.customerId);
   const update = (patch) => onChange({ ...wo, ...patch });
@@ -3959,6 +4301,8 @@ function WorkOrderDetail({ wo, customers, products, goals, sortLog, history, onL
       </div>
 
       <LaborPanel wo={wo} goals={goals} sortLog={sortLog} onClockChange={(clock) => update({ clock })} />
+
+      <ShippingPanel wo={wo} customer={customer} onChange={onChange} />
 
       <div className="flex gap-2 mb-8 flex-wrap">
         <Btn kind="primary" onClick={() => setWoPrintOpen(true)}><Printer size={14} /> Print Work Order</Btn>
