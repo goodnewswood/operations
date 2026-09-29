@@ -3592,15 +3592,30 @@ function customerUpdateEmail(u, { customer, products, brandKey, sender }) {
   return { subject, body };
 }
 
+// Customer emails open as a Gmail draft in one of the shop's accounts.
+// A mailto link handed them to whatever mail app the device defaults to,
+// which on Ero's machine was Private Email, not where the shop's mail is.
+const SEND_FROM = ["ethicawood@gmail.com", "info@ethicawood.com", "ero@ethicawood.com"];
+const SEND_FROM_KEY = "gnws-send-from";
+const readSendFrom = () => { try { const v = localStorage.getItem(SEND_FROM_KEY); return SEND_FROM.includes(v) ? v : SEND_FROM[0]; } catch { return SEND_FROM[0]; } };
+function gmailComposeUrl({ from, to, subject, body }) {
+  // encodeURIComponent, not URLSearchParams: that writes spaces as "+",
+  // which Gmail can show as literal plus signs in the draft.
+  const q = { authuser: from, view: "cm", fs: "1", to: to || "", su: subject, body };
+  return `https://mail.google.com/mail/?${Object.entries(q).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("&")}`;
+}
+
 function CustomerUpdateItem({ u, customer, products, sender, onHandled, onOpenWO }) {
   const [brandKey, setBrandKey] = useState("ethica");
+  const [from, setFrom] = useState(readSendFrom);
+  const pickFrom = (v) => { setFrom(v); try { localStorage.setItem(SEND_FROM_KEY, v); } catch { /* just this visit */ } };
   const { email } = updRecipient(u.wo, customer);
   const who = customer?.company || u.wo.customerName || "No customer";
   const title = u.wo.title || u.wo.number;
   const send = () => {
     const { subject, body } = customerUpdateEmail(u, { customer, products, brandKey, sender });
+    window.open(gmailComposeUrl({ from, to: email, subject, body }), "_blank", "noopener");
     onHandled(u, "sent", brandKey);
-    window.location.href = `mailto:${email}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
   };
   return (
     <div className="px-4 py-3 flex flex-wrap items-center gap-x-3 gap-y-2" style={{ borderBottom: `1px solid ${C.kraft}` }}>
@@ -3619,6 +3634,9 @@ function CustomerUpdateItem({ u, customer, products, sender, onHandled, onOpenWO
       <select value={brandKey} onChange={(e) => setBrandKey(e.target.value)} style={{ ...inputStyle, width: "auto" }} title="Which company the email is written as">
         <option value="ethica">As Ethica Wood</option>
         <option value="gnws">As Good News Wood</option>
+      </select>
+      <select value={from} onChange={(e) => pickFrom(e.target.value)} style={{ ...inputStyle, width: "auto", fontFamily: MONO, fontSize: 12 }} title="Which Gmail account the draft opens in">
+        {SEND_FROM.map((a) => <option key={a} value={a}>From {a}</option>)}
       </select>
       <Btn kind="primary" onClick={send}><Mail size={13} /> Email customer</Btn>
       <Btn onClick={() => onHandled(u, "skipped")}>Skip</Btn>
