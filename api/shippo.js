@@ -3,16 +3,15 @@
 // tracking. The Shippo key stays here in SHIPPO_API_KEY and never reaches
 // the browser.
 
-import crypto from "node:crypto";
-
-// Buying a label spends real money, and this URL is public, so every call
-// carries the same access code the invoice import uses. Devices that
-// already import orders don't get asked again.
-function accessCodeOk(given) {
-  const expected = process.env.PARSE_INVOICE_ACCESS_CODE;
-  if (!expected || typeof given !== "string" || !given) return false;
-  const hash = (s) => crypto.createHash("sha256").update(s, "utf8").digest();
-  return crypto.timingSafeEqual(hash(given), hash(expected));
+// Only calls made from inside the app itself get through: the browser
+// stamps every request with the page it came from, and it has to be this
+// same site. Ero dropped the access code so nobody has to type one. This
+// stops casual use of the URL from elsewhere, though a determined person
+// could fake the header.
+function fromTheApp(req) {
+  const origin = req.headers.origin || req.headers.referer || "";
+  const hosts = [req.headers.host, req.headers["x-forwarded-host"]].filter(Boolean);
+  try { return hosts.includes(new URL(origin).host); } catch { return false; }
 }
 
 // Where labels ship from. The shop is out at Celestial Valley, but boxes
@@ -85,11 +84,8 @@ const toParcel = (p = {}) => ({
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
-  if (!process.env.PARSE_INVOICE_ACCESS_CODE) {
-    return res.status(503).json({ error: "No access code is set on the server", code: "access_code_not_set" });
-  }
-  if (!accessCodeOk(req.headers["x-gnws-access-code"])) {
-    return res.status(401).json({ error: "Access code is missing or wrong", code: "access_code" });
+  if (!fromTheApp(req)) {
+    return res.status(403).json({ error: "Only the GNWS Ops app can use this", code: "not_from_app" });
   }
   if (!process.env.SHIPPO_API_KEY) {
     return res.status(503).json({ error: "Shippo isn't connected yet: SHIPPO_API_KEY is not set on the server", code: "no_key" });

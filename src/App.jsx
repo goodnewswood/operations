@@ -3667,23 +3667,12 @@ function CustomerUpdatesBadge({ count, onClick }) {
    Rates show a price because you can't pick one without it, but nothing
    about cost is saved on the order. The server side is api/shippo.js. */
 
-// Same access code as invoice import, asked for once per device.
-const API_CODE_KEY = "gnws-import-access-code";
 async function gnwsApi(path, body) {
-  let saved = "";
-  try { saved = localStorage.getItem(API_CODE_KEY) || ""; } catch { /* private browsing */ }
-  const send = (code) => fetch(path, {
+  const r = await fetch(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-gnws-access-code": code },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  let r = await send(saved);
-  if (r.status === 401) {
-    const entered = (window.prompt("This needs the shop access code. Ask Ero for it.") || "").trim();
-    if (!entered) throw new Error("No access code entered");
-    r = await send(entered);
-    if (r.ok) { try { localStorage.setItem(API_CODE_KEY, entered); } catch { /* ask again next time */ } }
-  }
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.error || `Server error ${r.status}`);
   return data;
@@ -4450,30 +4439,17 @@ function ImportInvoiceModal({ customers, products, onClose, onImported }) {
     setBusy(true);
     setError("");
     try {
-      // Import spends the shop's AI credits, so the server wants an access
-      // code. It can't live in the app (everything in the app is public),
-      // so this device asks for it once and remembers it after it works.
-      const CODE_KEY = "gnws-import-access-code";
-      let saved = "";
-      try { saved = localStorage.getItem(CODE_KEY) || ""; } catch { /* private browsing */ }
       // The SKU list goes along with the order text so lines come back
       // pointing at real items instead of loose descriptions the crew has
       // to match by hand. Test SKUs and the placeholder aren't offered.
       const catalog = (products || [])
         .filter((p) => p.sku && !/^ZZ/i.test(p.sku) && p.sku !== "NEW-SKU")
         .map((p) => ({ sku: p.sku, name: p.name }));
-      const send = (code) => fetch("/api/parse-invoice", {
+      const response = await fetch("/api/parse-invoice", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-gnws-access-code": code },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...body, catalog }),
       });
-      let response = await send(saved);
-      if (response.status === 401) {
-        const entered = (window.prompt("Import needs the access code. Ask Ero for it.") || "").trim();
-        if (!entered) throw new Error("no access code entered");
-        response = await send(entered);
-        if (response.ok) { try { localStorage.setItem(CODE_KEY, entered); } catch { /* ask again next time */ } }
-      }
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Server couldn't read that");
       const textBlock = (data.content || []).find((b) => b.type === "text");

@@ -26,8 +26,12 @@ one database, so a change in either shows up in both.
   only if `updated_at` hasn't changed since they read it (see
   `scripts/order-intake/enter-order.mjs`).
 - API routes (Vercel functions in `api/`):
-  - `POST /api/parse-invoice`: reads a PDF or pasted order with Claude. Requires the
-    header `x-gnws-access-code` to match the `PARSE_INVOICE_ACCESS_CODE` env var.
+  - `POST /api/parse-invoice`: reads a PDF or pasted order with Claude.
+  - `POST /api/shippo`: box templates, rates, buying labels and tracking for the work
+    order Shipping panel. Needs `SHIPPO_API_KEY`.
+  - Neither asks for an access code: Ero wants everyone able to use them without one.
+    Both only accept requests whose Origin/Referer is the app's own site
+    (`fromTheApp`). Don't add a code back unless Ero asks.
   - `POST /api/shopify-order`: Shopify `orders/create` webhook, verified by HMAC with
     `SHOPIFY_WEBHOOK_SECRET`, entered through `enterOrder()`. `GET` is a health check.
 
