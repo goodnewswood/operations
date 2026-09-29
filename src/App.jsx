@@ -3477,6 +3477,14 @@ function WorkOrderHistory({ wo, history, sortLog }) {
 
 const UPDATE_DATE_FIELDS = { readyByDate: "ready date", shipDate: "ship date" };
 
+// Was this history line an email going out, or a skip? Newer lines say so
+// in `how`; older ones only in their wording.
+const updHow = (h) => h.how || (/^Skipped/.test(h.label || "") ? "skipped" : "sent");
+
+// Every customer update for an order's current state. Ones not dealt with
+// yet come back with handled: null. Ones already emailed or skipped come
+// back too, with who and when, so the button can say so and still offer a
+// resend instead of vanishing the moment it's clicked.
 function pendingCustomerUpdates(workOrders, history, statusLabel) {
   const byWo = {};
   (history || []).forEach((h) => { (byWo[h.woId] = byWo[h.woId] || []).push(h); });
@@ -3484,27 +3492,42 @@ function pendingCustomerUpdates(workOrders, history, statusLabel) {
   (workOrders || []).forEach((wo) => {
     if (wo.archived) return;
     const entries = (byWo[wo.id] || []).slice().sort((a, b) => String(a.at).localeCompare(String(b.at)));
-    const handledAt = (kind) => entries.reduce((t, h) => (h.field === "customerUpdate" && h.update === kind && h.at > t ? h.at : t), "");
+    const handledList = (kind) => entries.filter((h) => h.field === "customerUpdate" && h.update === kind);
+    const lastHandled = (kind, after = "") => {
+      const h = handledList(kind).filter((x) => x.at > after).pop();
+      return h ? { at: h.at, by: h.by || "", how: updHow(h) } : null;
+    };
     ["packed", "shipped"].forEach((kind) => {
       if ((wo.status || "not_started") !== kind) return;
       const reached = entries.filter((h) => h.field === "status" && h.to === statusLabel[kind]).pop();
-      if (reached && reached.at > handledAt(kind)) out.push({ key: `${wo.id}:${kind}`, wo, kind, since: reached.at });
+      if (!reached) return;
+      out.push({ key: `${wo.id}:${kind}`, wo, kind, since: reached.at, handled: lastHandled(kind, reached.at) });
     });
     // A new date on an order that's already gone isn't news to anyone.
     if (wo.status === "shipped") return;
     // Both dates usually move together, and that's one piece of news, not
     // two, so every date that moved on an order goes out as one update.
-    const done = handledAt("date");
-    const dates = Object.keys(UPDATE_DATE_FIELDS).map((field) => {
+    // Dates that moved since the last time this went out are pending. If
+    // none did, the last batch that went out is shown as handled.
+    const dateHandles = handledList("date").map((h) => h.at);
+    const datesBetween = (after, upTo) => Object.keys(UPDATE_DATE_FIELDS).map((field) => {
       // Only a date that was already set counts. Setting one for the
       // first time isn't a change the customer was told about.
-      const changes = entries.filter((h) => h.field === field && h.from && h.at > done);
+      const changes = entries.filter((h) => h.field === field && h.from && h.at > after && (!upTo || h.at <= upTo));
       if (!changes.length) return null;
       const from = changes[0].from;
-      const to = histText(wo[field]);
+      const to = upTo ? histText(changes[changes.length - 1].to) : histText(wo[field]);
       return to && to !== from ? { field, from, to, at: changes[changes.length - 1].at } : null;
     }).filter(Boolean);
-    if (dates.length) out.push({ key: `${wo.id}:date`, wo, kind: "date", dates, since: dates.map((d) => d.at).sort().pop() });
+    const done = dateHandles[dateHandles.length - 1] || "";
+    const pending = datesBetween(done);
+    if (pending.length) {
+      out.push({ key: `${wo.id}:date`, wo, kind: "date", dates: pending, since: pending.map((d) => d.at).sort().pop(), handled: null });
+    } else if (done) {
+      const prev = dateHandles[dateHandles.length - 2] || "";
+      const sentDates = datesBetween(prev, done);
+      if (sentDates.length) out.push({ key: `${wo.id}:date`, wo, kind: "date", dates: sentDates, since: sentDates.map((d) => d.at).sort().pop(), handled: lastHandled("date", prev) });
+    }
   });
   return out.sort((a, b) => String(b.since).localeCompare(String(a.since)));
 }
@@ -3612,13 +3635,19 @@ function CustomerUpdateItem({ u, customer, products, sender, onHandled, onOpenWO
   const { email } = updRecipient(u.wo, customer);
   const who = customer?.company || u.wo.customerName || "No customer";
   const title = u.wo.title || u.wo.number;
+  const h = u.handled;
+  const sentBefore = h?.how === "sent";
+  const when = h ? new Date(h.at).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "";
   const send = () => {
+    // Already went out once: say so, since the customer may already have
+    // it. Still allowed, for when the draft never actually got sent.
+    if (sentBefore && !window.confirm(`This update was already emailed ${when}${h.by ? ` by ${h.by}` : ""}, so the customer may have it.\n\nSend it again?`)) return;
     const { subject, body } = customerUpdateEmail(u, { customer, products, brandKey, sender });
     window.open(gmailComposeUrl({ from, to: email, subject, body }), "_blank", "noopener");
     onHandled(u, "sent", brandKey);
   };
   return (
-    <div className="px-4 py-3 flex flex-wrap items-center gap-x-3 gap-y-2" style={{ borderBottom: `1px solid ${C.kraft}` }}>
+    <div className="px-4 py-3 flex flex-wrap items-center gap-x-3 gap-y-2" style={{ borderBottom: `1px solid ${C.kraft}`, background: h ? C.paper : "transparent" }}>
       <div className="flex-1" style={{ minWidth: 200 }}>
         <div style={{ fontWeight: 700 }}>
           {onOpenWO ? <button onClick={() => onOpenWO(u.wo.id)} className="text-left hover:underline">{title}</button> : title}
@@ -3630,6 +3659,12 @@ function CustomerUpdateItem({ u, customer, products, sender, onHandled, onOpenWO
           ? <div className="text-xs" style={{ fontFamily: MONO, color: C.faint }}>to {email}</div>
           : <div className="text-xs" style={{ color: C.warn }}>No email on file, so the email opens without an address.</div>}
         {isDropShip(u.wo) && <div className="text-xs" style={{ color: C.faint }}>Drop ship: this goes to {who}, never to their customer.</div>}
+        {h && (
+          <div className="text-xs mt-0.5 flex items-center gap-1" style={{ color: sentBefore ? C.moss : C.faint, fontWeight: 700 }}>
+            {sentBefore ? <Check size={12} /> : null}
+            {sentBefore ? "Emailed" : "Skipped"} {when}{h.by ? ` by ${h.by}` : ""}
+          </div>
+        )}
       </div>
       <select value={brandKey} onChange={(e) => setBrandKey(e.target.value)} style={{ ...inputStyle, width: "auto" }} title="Which company the email is written as">
         <option value="ethica">As Ethica Wood</option>
@@ -3638,19 +3673,22 @@ function CustomerUpdateItem({ u, customer, products, sender, onHandled, onOpenWO
       <select value={from} onChange={(e) => pickFrom(e.target.value)} style={{ ...inputStyle, width: "auto", fontFamily: MONO, fontSize: 12 }} title="Which Gmail account the draft opens in">
         {SEND_FROM.map((a) => <option key={a} value={a}>From {a}</option>)}
       </select>
-      <Btn kind="primary" onClick={send}><Mail size={13} /> Email customer</Btn>
-      <Btn onClick={() => onHandled(u, "skipped")}>Skip</Btn>
+      {h
+        ? <Btn onClick={send}><Mail size={13} /> {sentBefore ? "Resend" : "Send anyway"}</Btn>
+        : <Btn kind="primary" onClick={send}><Mail size={13} /> Email customer</Btn>}
+      {!h && <Btn onClick={() => onHandled(u, "skipped")}>Skip</Btn>}
     </div>
   );
 }
 
 function CustomerUpdatesPanel({ updates, customers, products, sender, onHandled, onOpenWO }) {
   if (!updates?.length) return null;
+  const toSend = updates.filter((u) => !u.handled).length;
   return (
-    <div className="rounded-sm overflow-hidden mb-4" style={{ background: C.panel, border: `1px solid ${C.gold}`, borderLeft: `4px solid ${C.gold}` }}>
+    <div className="rounded-sm overflow-hidden mb-4" style={{ background: C.panel, border: `1px solid ${toSend ? C.gold : C.kraftDark}`, borderLeft: `4px solid ${toSend ? C.gold : C.kraftDark}` }}>
       <div className="px-4 py-3 flex items-center gap-2" style={{ borderBottom: `1px solid ${C.kraft}`, fontWeight: 800 }}>
-        <Mail size={16} style={{ color: C.gold }} /> Customer updates to send
-        <span style={{ fontFamily: MONO, fontSize: 12, color: C.faint }}>{updates.length}</span>
+        <Mail size={16} style={{ color: C.gold }} /> Customer updates{toSend ? " to send" : ""}
+        {toSend > 0 && <span style={{ fontFamily: MONO, fontSize: 12, color: C.faint }}>{toSend}</span>}
       </div>
       {updates.map((u) => (
         <CustomerUpdateItem
@@ -10073,12 +10111,22 @@ export default function App() {
   };
 
   // Customer updates waiting to be sent (see pendingCustomerUpdates).
-  const customerUpdates = useMemo(() => pendingCustomerUpdates(workOrders, woHistory, STATUS_LABEL), [workOrders, woHistory]);
+  const allCustomerUpdates = useMemo(() => pendingCustomerUpdates(workOrders, woHistory, STATUS_LABEL), [workOrders, woHistory]);
+  // Still to send: what the badge counts.
+  const customerUpdates = useMemo(() => allCustomerUpdates.filter((u) => !u.handled), [allCustomerUpdates]);
+  // The dashboard also keeps ones handled in the last 3 days, so a click
+  // that didn't really send (wrong mail app, closed the draft) can be
+  // redone. The work order itself always shows its own.
+  const dashboardUpdates = useMemo(() => {
+    const cutoff = new Date(Date.now() - 3 * 86400000).toISOString();
+    return allCustomerUpdates.filter((u) => !u.handled || u.handled.at > cutoff);
+  }, [allCustomerUpdates]);
   const handleCustomerUpdate = (u, how, brandKey) => {
-    const label = how === "sent"
-      ? `Opened an email to the customer: ${updWhat(u)} (as ${BRANDS[brandKey]?.label || BRANDS.ethica.label})`
-      : `Skipped the customer update: ${updWhat(u)}`;
-    addWOHistory([{ ...makeHistoryEntry(u.wo, { field: "customerUpdate", label }, deviceUserRef.current), update: u.kind }]);
+    const as = `(as ${BRANDS[brandKey]?.label || BRANDS.ethica.label})`;
+    const label = how !== "sent" ? `Skipped the customer update: ${updWhat(u)}`
+      : u.handled?.how === "sent" ? `Resent the email to the customer: ${updWhat(u)} ${as}`
+      : `Opened an email to the customer: ${updWhat(u)} ${as}`;
+    addWOHistory([{ ...makeHistoryEntry(u.wo, { field: "customerUpdate", label }, deviceUserRef.current), update: u.kind, how }]);
   };
 
   const [whoWorking, setWhoWorking] = useState("");
@@ -10891,7 +10939,7 @@ export default function App() {
       <main className="max-w-6xl mx-auto px-4 py-5 pb-24 sm:pb-5">
         {tab === "dashboard" && (
           <Dashboard workOrders={workOrders} products={products} sortLog={sortLog} units={units}
-            customerUpdates={customerUpdates} customers={customers} sender={deviceUser} onCustomerUpdate={handleCustomerUpdate} onOpenWO={(id) => { setActiveWOId(id); goTab("orders"); setOrdersSubTab("workorders"); }} goTab={goTab} whoWorking={whoWorking} />
+            customerUpdates={dashboardUpdates} customers={customers} sender={deviceUser} onCustomerUpdate={handleCustomerUpdate} onOpenWO={(id) => { setActiveWOId(id); goTab("orders"); setOrdersSubTab("workorders"); }} goTab={goTab} whoWorking={whoWorking} />
         )}
 
         {tab === "orders" && !(ordersSubTab === "workorders" && activeWO) && (
@@ -10912,7 +10960,7 @@ export default function App() {
             <WorkOrderDetail
               wo={activeWO} customers={customers} products={products} goals={goals} sortLog={sortLog}
               history={woHistory} onLog={(label) => logWOEvent(activeWO.id, label)}
-              updates={customerUpdates.filter((u) => u.wo.id === activeWO.id)} sender={deviceUser} onCustomerUpdate={handleCustomerUpdate}
+              updates={allCustomerUpdates.filter((u) => u.wo.id === activeWO.id)} sender={deviceUser} onCustomerUpdate={handleCustomerUpdate}
               onScheduleMe={scheduleMe}
               onChange={updateWO} onDelete={() => deleteWO(activeWO.id)} onBack={() => setActiveWOId(null)}
               team={team} whoWorking={whoWorking} setWhoWorking={setWhoWorking} onAddTeamMember={addTeamMember}
