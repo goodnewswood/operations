@@ -3575,6 +3575,22 @@ function updWhat(u) {
   return updDatesText(u.dates, updShortDate, false);
 }
 
+// Tracking for the shipped email, one block per shipment on the order:
+// carrier, number(s) and the link to that carrier's tracking page. A
+// multi-box shipment lists every box's number under one link.
+function updTrackingLines(wo) {
+  const list = (wo.shipments || []).filter((s) => s.trackingNumber);
+  if (!list.length) return [];
+  const lines = ["Tracking:"];
+  list.forEach((s) => {
+    const nums = [...new Set([s.trackingNumber, ...(s.labels || []).map((l) => l.trackingNumber).filter(Boolean)])];
+    lines.push(`  ${carrierLabel(s.carrier)}${s.service ? ` ${s.service}` : ""}: ${nums.join(", ")}`);
+    const link = trackingLink(s);
+    if (link) lines.push(`  Track it here: ${link}`);
+  });
+  return lines;
+}
+
 function customerUpdateEmail(u, { customer, products, brandKey, sender }) {
   const wo = u.wo;
   const brand = BRANDS[brandKey] || BRANDS.ethica;
@@ -3593,7 +3609,7 @@ function customerUpdateEmail(u, { customer, products, brandKey, sender }) {
       return `  ${fmtConv(convertQty(p, l.qtySF, "sf", unit))} ${unitLabel(unit)}, ${p ? p.name : (l.desc || "custom item")}`;
     });
 
-  let subject, news;
+  let subject, news, tracking = [];
   if (u.kind === "packed") {
     subject = `Your order ${ref} is packed and ready`;
     news = `Your ${order} is packed and ready to ship.${wo.shipDate ? ` We're planning to ship it on ${updLongDate(wo.shipDate)}.` : ""}`;
@@ -3601,6 +3617,7 @@ function customerUpdateEmail(u, { customer, products, brandKey, sender }) {
     const day = wo.shippedAt ? new Date(wo.shippedAt).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" }) : "";
     subject = `Your order ${ref} has shipped`;
     news = `Your ${order} shipped${day ? ` on ${day}` : ""}.${wo.shipVia ? ` It's on its way by ${wo.shipVia}.` : ""}`;
+    tracking = updTrackingLines(wo);
   } else {
     subject = `An update on your order ${ref}`;
     news = `A quick update on your ${order}: the ${updDatesText(u.dates, updLongDate, true)}.`;
@@ -3608,6 +3625,7 @@ function customerUpdateEmail(u, { customer, products, brandKey, sender }) {
   const signature = !sender || /^ero\b/i.test(sender) ? ["Ero Gorski", brand.name, "630-484-3242"] : [sender, brand.name];
   const body = [
     `Hi ${first || "there"},`, "", news, "",
+    ...(tracking.length ? [...tracking, ""] : []),
     ...(items.length ? ["On this order:", ...items, ""] : []),
     "If you have any questions, just reply to this email.", "",
     "Thanks,", ...signature,
@@ -3659,6 +3677,11 @@ function CustomerUpdateItem({ u, customer, products, sender, onHandled, onOpenWO
           ? <div className="text-xs" style={{ fontFamily: MONO, color: C.faint }}>to {email}</div>
           : <div className="text-xs" style={{ color: C.warn }}>No email on file, so the email opens without an address.</div>}
         {isDropShip(u.wo) && <div className="text-xs" style={{ color: C.faint }}>Drop ship: this goes to {who}, never to their customer.</div>}
+        {u.kind === "shipped" && (
+          (u.wo.shipments || []).some((x) => x.trackingNumber)
+            ? <div className="text-xs" style={{ color: C.faint }}>Includes tracking: {(u.wo.shipments || []).filter((x) => x.trackingNumber).map((x) => `${carrierLabel(x.carrier)} ${x.trackingNumber}`).join(", ")}</div>
+            : <div className="text-xs" style={{ color: C.warn }}>No tracking on this order. Add it under Shipping on the work order first if it has one.</div>
+        )}
         {h && (
           <div className="text-xs mt-0.5 flex items-center gap-1" style={{ color: sentBefore ? C.moss : C.faint, fontWeight: 700 }}>
             {sentBefore ? <Check size={12} /> : null}
@@ -3736,6 +3759,21 @@ async function gnwsApi(path, body) {
 
 const CARRIERS = [["ups", "UPS"], ["usps", "USPS"], ["fedex", "FedEx"], ["dhl_express", "DHL Express"], ["ontrac", "OnTrac"]];
 const carrierLabel = (c) => (CARRIERS.find(([k]) => k === String(c || "").toLowerCase()) || [c, c || "Carrier"])[1];
+
+// The carrier's own public tracking page. Shippo's links for UPS are long
+// and odd-looking in an email, and hand-added numbers have no link at all,
+// so every link is built the same clean way from carrier and number.
+const TRACK_URL = {
+  ups: (n) => `https://www.ups.com/track?tracknum=${n}`,
+  usps: (n) => `https://tools.usps.com/go/TrackConfirmAction?tLabels=${n}`,
+  fedex: (n) => `https://www.fedex.com/fedextrack/?trknbr=${n}`,
+  dhl_express: (n) => `https://www.dhl.com/us-en/home/tracking/tracking-express.html?tracking-id=${n}`,
+  ontrac: (n) => `https://www.ontrac.com/tracking/?number=${n}`,
+};
+function trackingLink(s) {
+  const make = TRACK_URL[String(s?.carrier || "").toLowerCase()];
+  return make && s?.trackingNumber ? make(encodeURIComponent(s.trackingNumber)) : s?.trackingUrl || "";
+}
 
 // Where the box is going, in Shippo's shape. On a drop ship it's the end
 // customer, never the distributor.
@@ -3907,8 +3945,8 @@ function ShippingPanel({ wo, customer, onChange }) {
                 <div className="flex-1 min-w-0" style={{ fontSize: 13 }}>
                   <div>
                     <strong>{carrierLabel(s.carrier)}</strong>{s.service ? ` ${s.service}` : ""}{s.boxes > 1 ? ` · ${s.boxes} boxes` : ""}{" · "}
-                    {s.trackingUrl
-                      ? <a href={s.trackingUrl} target="_blank" rel="noopener noreferrer" style={{ fontFamily: MONO, textDecoration: "underline" }}>{s.trackingNumber}</a>
+                    {trackingLink(s)
+                      ? <a href={trackingLink(s)} target="_blank" rel="noopener noreferrer" style={{ fontFamily: MONO, textDecoration: "underline" }}>{s.trackingNumber}</a>
                       : <span style={{ fontFamily: MONO }}>{s.trackingNumber}</span>}
                   </div>
                   {(s.statusDetail || s.where || s.eta) && (
