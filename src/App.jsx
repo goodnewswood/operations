@@ -10150,15 +10150,9 @@ export default function App() {
 
   // Customer updates waiting to be sent (see pendingCustomerUpdates).
   const allCustomerUpdates = useMemo(() => pendingCustomerUpdates(workOrders, woHistory, STATUS_LABEL), [workOrders, woHistory]);
-  // Still to send: what the badge counts.
+  // Still to send: the badge and the dashboard. Sent or skipped ones
+  // only show on their own work order, where they can be resent.
   const customerUpdates = useMemo(() => allCustomerUpdates.filter((u) => !u.handled), [allCustomerUpdates]);
-  // The dashboard also keeps ones handled in the last 3 days, so a click
-  // that didn't really send (wrong mail app, closed the draft) can be
-  // redone. The work order itself always shows its own.
-  const dashboardUpdates = useMemo(() => {
-    const cutoff = new Date(Date.now() - 3 * 86400000).toISOString();
-    return allCustomerUpdates.filter((u) => !u.handled || u.handled.at > cutoff);
-  }, [allCustomerUpdates]);
   const handleCustomerUpdate = (u, how, brandKey) => {
     const as = `(as ${BRANDS[brandKey]?.label || BRANDS.ethica.label})`;
     const label = how !== "sent" ? `Skipped the customer update: ${updWhat(u)}`
@@ -10977,7 +10971,7 @@ export default function App() {
       <main className="max-w-6xl mx-auto px-4 py-5 pb-24 sm:pb-5">
         {tab === "dashboard" && (
           <Dashboard workOrders={workOrders} products={products} sortLog={sortLog} units={units}
-            customerUpdates={dashboardUpdates} customers={customers} sender={deviceUser} onCustomerUpdate={handleCustomerUpdate} onOpenWO={(id) => { setActiveWOId(id); goTab("orders"); setOrdersSubTab("workorders"); }} goTab={goTab} whoWorking={whoWorking} />
+            customerUpdates={customerUpdates} customers={customers} sender={deviceUser} onCustomerUpdate={handleCustomerUpdate} onOpenWO={(id) => { setActiveWOId(id); goTab("orders"); setOrdersSubTab("workorders"); }} goTab={goTab} whoWorking={whoWorking} />
         )}
 
         {tab === "orders" && !(ordersSubTab === "workorders" && activeWO) && (
