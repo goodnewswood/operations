@@ -2557,7 +2557,7 @@ function WorkOrderBoard({ workOrders, customers, products, goals, onOpen, onNew,
               </button>
               {w.status !== "shipped" && (
                 <button
-                  onClick={(e) => { e.stopPropagation(); onPushThrough(w.id); }}
+                  onClick={(e) => { e.stopPropagation(); onPushThrough(w.id); celebrateShipped(); }}
                   className="mt-2 w-full text-center px-2 py-1.5 rounded-sm text-xs font-bold hover:opacity-85"
                   style={{ background: C.moss, color: "#fff", fontFamily: MONO }}
                 >
@@ -4129,7 +4129,7 @@ function WorkOrderDetail({ wo, customers, products, goals, sortLog, history, onL
   // Stamp when it actually shipped. The ship date on the order is a plan;
   // without this there's no record of what really happened, so on-time
   // performance can only ever compare one guess against another.
-  const pushThrough = () => update({ status: "shipped", shippedAt: new Date().toISOString() });
+  const pushThrough = () => { update({ status: "shipped", shippedAt: new Date().toISOString() }); celebrateShipped(); };
   const reopen = () => update({ status: "not_started", shippedAt: "" });
 
 
@@ -9940,6 +9940,58 @@ function SyncBar({ state, remoteAhead, lastSyncedAt, onSave, onSync, compact, sa
   );
 }
 
+/* ---------------- Shipped celebration ----------------
+   Pushing a job through to Shipped drops a cascade of balloons, logs,
+   axes and whatever else over the screen for a few seconds. It never
+   blocks a tap (pointer-events off) and skips itself for anyone whose
+   phone is set to reduce motion. */
+const CASCADE_MAIN = ["🎈", "🎈", "🎈", "🪵", "🪵", "🪵", "🪓", "🪓"];
+const CASCADE_EXTRA = ["🎉", "🌲", "🚚", "📦", "⭐", "🔥", "🌈", "🦫", "🍕", "🎸", "🌻", "🐿️", "💥", "🥳", "🌵", "🛻", "🍾", "🦉", "🍄", "🎺", "🌮", "🦄", "💰", "🏆", "🍩", "🐻"];
+const celebrateShipped = () => window.dispatchEvent(new Event("gnws-shipped"));
+
+function ShipCascade() {
+  const [drops, setDrops] = useState([]);
+  useEffect(() => {
+    const go = () => {
+      try { if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return; } catch { /* old browser: go ahead */ }
+      const batch = Array.from({ length: 70 }, () => {
+        const pool = Math.random() < 0.6 ? CASCADE_MAIN : CASCADE_EXTRA;
+        return {
+          id: uid(),
+          e: pool[Math.floor(Math.random() * pool.length)],
+          left: Math.random() * 100,
+          size: 22 + Math.random() * 30,
+          delay: Math.random() * 1.2,
+          dur: 2.2 + Math.random() * 1.8,
+          spin: (Math.random() < 0.5 ? -1 : 1) * (90 + Math.random() * 360),
+          sway: (Math.random() - 0.5) * 120,
+        };
+      });
+      setDrops((d) => [...d, ...batch]);
+      setTimeout(() => setDrops((d) => d.filter((x) => !batch.includes(x))), 4500);
+    };
+    window.addEventListener("gnws-shipped", go);
+    return () => window.removeEventListener("gnws-shipped", go);
+  }, []);
+  if (!drops.length) return null;
+  return createPortal(
+    <div className="fixed inset-0 overflow-hidden" style={{ pointerEvents: "none", zIndex: 9999 }}>
+      <style>{`@keyframes gnwsFall { from { transform: translate(0, -12vh) rotate(0deg); opacity: 1; } 85% { opacity: 1; } to { transform: translate(var(--sway), 110vh) rotate(var(--spin)); opacity: 0.2; } }`}</style>
+      {drops.map((d) => (
+        <span
+          key={d.id}
+          style={{
+            position: "absolute", top: 0, left: `${d.left}vw`, fontSize: d.size, lineHeight: 1,
+            "--spin": `${d.spin}deg`, "--sway": `${d.sway}px`,
+            animation: `gnwsFall ${d.dur}s cubic-bezier(.35,.1,.6,1) ${d.delay}s both`,
+          }}
+        >{d.e}</span>
+      ))}
+    </div>,
+    document.body,
+  );
+}
+
 export default function App() {
   const [loaded, setLoaded] = useState(false);
   // Which tab you're on survives a reload — phones reclaim a backgrounded
@@ -10838,6 +10890,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen" style={{ background: C.paper, color: C.ink, fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif" }}>
+      <ShipCascade />
       <header style={{ background: C.ink, color: "#fff" }}>
         <div className="max-w-6xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-baseline gap-3">
