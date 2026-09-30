@@ -1509,6 +1509,19 @@ const STATUS_LABEL = {
 // forms — packed and shipped orders are done, so logging against them
 // would just be a mistake waiting to happen.
 const ACTIVE_WO_STATUSES = ["not_started", "sorting", "milling"];
+
+// Shipped orders stay in the Active view for this long, so the crew can
+// still see what just went out, then archive themselves.
+const SHIPPED_STAYS_DAYS = 10;
+// When it shipped. Orders from before we stamped a real ship time count
+// from their planned ship date instead, so they age off too.
+function woShippedOn(w) {
+  const stamped = Date.parse(w.shippedAt || "");
+  if (Number.isFinite(stamped)) return stamped;
+  const planned = Date.parse(w.shipDate ? `${w.shipDate}T12:00:00` : "");
+  return Number.isFinite(planned) ? planned : NaN;
+}
+const shippedRecently = (w) => w.status === "shipped" && !(woShippedOn(w) < Date.now() - SHIPPED_STAYS_DAYS * 86400000);
 const STATUS_COLOR = {
   not_started: C.faint, sorting: C.gold, milling: C.redwood, packed: C.moss, shipped: C.ink,
 };
@@ -2459,7 +2472,8 @@ function WorkOrderBoard({ workOrders, customers, products, goals, onOpen, onNew,
   const shown = workOrders
     // Archived orders are off the board unless you go looking for them.
     .filter((w) => (filter === "archived" ? !!w.archived : !w.archived))
-    .filter((w) => (filter === "active" ? w.status !== "shipped" : true))
+    // Active keeps orders shipped in the last 10 days alongside open ones.
+    .filter((w) => (filter === "active" ? w.status !== "shipped" || shippedRecently(w) : true))
     .slice()
     .sort(sort === "ready" ? byReadyDate
       : sort === "manual" ? byBoardRank
@@ -10698,32 +10712,23 @@ export default function App() {
     setWorkOrders(workOrders.map((w) => (w.id === id ? { ...w, status: "shipped", shippedAt: w.shippedAt || new Date().toISOString() } : w)));
   };
 
-  /* A shipped order stays on the board for a week, so the crew can still
-     see what just went out and reopen it if something comes back. After
-     that it takes itself off. Orders put back by hand carry keepOnBoard
-     and are left alone. Orders from before we stamped a real ship time
-     count from their planned ship date instead, so they age off too
-     rather than sitting on the board for good. */
-  const AUTO_ARCHIVE_DAYS = 7;
+  /* A shipped order stays in Active for SHIPPED_STAYS_DAYS (10 days), so
+     the crew can still see what just went out and reopen it if something
+     comes back. After that it takes itself off. Orders put back by hand
+     carry keepOnBoard and are left alone. */
   useEffect(() => {
     if (!loaded) return;
-    const shippedOn = (w) => {
-      const stamped = Date.parse(w.shippedAt || "");
-      if (Number.isFinite(stamped)) return stamped;
-      const planned = Date.parse(w.shipDate ? `${w.shipDate}T12:00:00` : "");
-      return Number.isFinite(planned) ? planned : NaN;
-    };
     const sweep = () => {
-      const cutoff = Date.now() - AUTO_ARCHIVE_DAYS * 86400000;
+      const cutoff = Date.now() - SHIPPED_STAYS_DAYS * 86400000;
       const due = workOrdersRef.current.filter((w) =>
-        w.status === "shipped" && !w.archived && !w.keepOnBoard && shippedOn(w) < cutoff);
+        w.status === "shipped" && !w.archived && !w.keepOnBoard && woShippedOn(w) < cutoff);
       if (!due.length) return;
       const ids = new Set(due.map((w) => w.id));
       const next = workOrdersRef.current.map((w) => (ids.has(w.id) ? { ...w, archived: true } : w));
       workOrdersRef.current = next;
       _setWorkOrders(next);
       addWOHistory(due.map((w) => makeHistoryEntry(w, {
-        field: "archived", label: `Archived automatically, a week after it shipped`,
+        field: "archived", label: `Archived automatically, ${SHIPPED_STAYS_DAYS} days after it shipped`,
       }, "")));
     };
     sweep();
