@@ -2334,7 +2334,11 @@ function WorkOrderKanban({ workOrders, products, goals, onOpen, onMove, onToggle
   };
 
   return (
-    <div ref={stripRef} className="flex gap-3 overflow-x-auto pb-2">
+    // relative: makes the strip the box its cards' hidden screen-reader
+    // labels (absolutely positioned) belong to. Without it they escape the
+    // sideways scroll and stretch the whole page past the phone's width,
+    // which made phones zoom the app out to a third of the screen.
+    <div ref={stripRef} className="relative flex gap-3 overflow-x-auto pb-2">
       {STATUS_FLOW.map((status) => {
         const col = workOrders.filter((w) => (w.status || "not_started") === status);
         const others = col.filter((w) => w.id !== draggedId);
