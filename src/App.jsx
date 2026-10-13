@@ -4314,19 +4314,16 @@ function WorkOrderDetail({ wo, customers, products, goals, sortLog, history, onL
                 {line.done && <Check size={16} color="#fff" />}
               </button>
               <div className="flex-1 min-w-0">
-                <select
-                  style={{ ...inputStyle, fontWeight: 700, marginBottom: 4 }}
+                <ProductPicker
+                  products={products.filter((pr) => !isArchivedProduct(pr) || pr.id === line.productId)}
                   value={line.productId}
-                  onChange={(e) => {
-                    const newProduct = products.find((pr) => pr.id === e.target.value);
-                    updateLine(line.id, { productId: e.target.value, displayUnit: isService(newProduct) ? canonicalUnitFor(newProduct) : "sf", steps: newProduct?.steps ? { ...newProduct.steps } : defaultSteps() });
+                  extra={[["", "Custom / describe below…"]]}
+                  style={{ marginBottom: 4 }}
+                  onChange={(id) => {
+                    const newProduct = products.find((pr) => pr.id === id);
+                    updateLine(line.id, { productId: id, displayUnit: isService(newProduct) ? canonicalUnitFor(newProduct) : "sf", steps: newProduct?.steps ? { ...newProduct.steps } : defaultSteps() });
                   }}
-                >
-                  <option value="">Custom / describe below…</option>
-                  {products.slice().sort(bySkuFavoritesFirst).map((pr) => (
-                    <option key={pr.id} value={pr.id}>{pr.favorite ? "★ " : ""}{pr.sku} — {pr.name}</option>
-                  ))}
-                </select>
+                />
                 {!line.productId && (
                   <input style={{ ...inputStyle, marginBottom: 4 }} placeholder="Describe item" value={line.desc || ""} onChange={(e) => updateLine(line.id, { desc: e.target.value })} />
                 )}
@@ -6909,6 +6906,127 @@ const bySkuFavoritesFirst = (a, b) => {
 
 const skuSizeKey = (sku) => (/^(\d{3})/.exec(String(sku || "")) || [])[1] || null;
 
+/* Product families. Every paint color and finish is its own SKU, because
+   each one is counted on its own shelf, but scrolling past nine S3S colors
+   and four 185s to find one item was miserable. So pickers show one row
+   per family ("5/16 x 5 x 45 S3S", "1x8x5 Redwood") and a second box for
+   the finish. Nothing about the SKUs changes; this is only how they're
+   listed. A family comes from the SKU itself: 185N/185P/185RAW share
+   "185", S3S-545-NAT and S3S-545-BLK share "S3S-545", and the paint
+   colors share "GS". A product can also name its family outright. */
+const FAMILY_GROUPS = [["wood", "Raw and sorted boards"], ["milled", "Milled"], ["paint", "Paint"], ["packing", "Packaging"], ["service", "Services"]];
+function familyKeyOf(p) {
+  if (p.family) return `f:${p.family}`;
+  const sku = String(p.sku || "").trim();
+  const board = /^(\d{3,4})(N|P|RAW|OG)$/i.exec(sku);
+  if (board) return `b:${board[1]}`;
+  const coded = /^(.+)-([A-Z]{2,10})$/i.exec(sku);
+  // Only when the front part is a real product code (it has a size in it),
+  // or it's paint: MILL-STOCK and TNG-RWD-CUSTOM stay on their own.
+  if (coded && (/\d/.test(coded[1]) || p.category === "paint")) return `c:${coded[1].toUpperCase()}`;
+  return `s:${p.id}`;
+}
+const trimSep = (s) => String(s || "").replace(/[\s,\-—–:]+$/, "").trim();
+function productFamilies(products) {
+  const byKey = new Map();
+  products.forEach((p) => {
+    const key = familyKeyOf(p);
+    if (!byKey.has(key)) byKey.set(key, []);
+    byKey.get(key).push(p);
+  });
+  return [...byKey.entries()].map(([key, members]) => {
+    members.sort(bySkuFavoritesFirst);
+    const names = members.map((m) => String(m.name || m.sku));
+    let label = names[0];
+    if (members.length > 1) {
+      // The words every member's name starts with ("5/16 x 5 x 45" - S3S"),
+      // or the shortest name minus its last word when they share too little.
+      const split = names.map((n) => n.split(" "));
+      let i = 0;
+      while (split.every((w) => w[i] !== undefined && w[i] === split[0][i])) i++;
+      label = trimSep(split[0].slice(0, i).join(" "));
+      if (i < 2) label = p0Label(members.slice().sort((a, b) => String(a.name || a.sku).length - String(b.name || b.sku).length)[0]);
+    }
+    const finishOf = (m) => {
+      const n = String(m.name || m.sku);
+      const rest = members.length > 1 && n.startsWith(label) ? n.slice(label.length).replace(/^[\s,\-—–:]+/, "").trim() : "";
+      return rest || n;
+    };
+    const skuRoot = members.length > 1 && (key.startsWith("b:") || key.startsWith("c:")) ? key.slice(2) : members[0].sku;
+    return {
+      key, members, label, skuRoot,
+      category: members[0].category || "wood",
+      favorite: members.some((m) => m.favorite),
+      finishes: members.map((m) => ({ product: m, label: finishOf(m) })),
+    };
+  }).sort((a, b) => bySkuFavoritesFirst({ sku: a.skuRoot, favorite: a.favorite }, { sku: b.skuRoot, favorite: b.favorite }));
+}
+// Some older items saved "archived" as the text "false", which still means live.
+const isArchivedProduct = (p) => p?.archived === true || p?.archived === "true";
+const p0Label = (p) => trimSep(String(p.name || p.sku).split(" ").slice(0, -1).join(" ")) || p.sku;
+
+/* The picker itself: family first, then finish when there's more than one.
+   Picking a family with a single SKU picks it outright. `extra` adds
+   options at the top (like "Custom / describe below") that pass straight
+   through to onChange. */
+function ProductPicker({ products, value, onChange, placeholder = "Pick a product", extra = [], showStock = false, style, onCreateNew }) {
+  const families = useMemo(() => productFamilies(products), [products]);
+  const current = products.find((p) => p.id === value) || null;
+  const currentFamily = current ? families.find((f) => f.members.some((m) => m.id === current.id)) : null;
+  // A family picked but no finish yet. Cleared whenever the value changes
+  // from outside, so the boxes always show what's actually saved.
+  const [pending, setPending] = useState(null);
+  useEffect(() => { setPending(null); }, [value]);
+  const family = pending ? families.find((f) => f.key === pending) : currentFamily;
+  const stock = (p) => (showStock ? ` (${num(p.onHand)} on hand)` : "");
+
+  const pickFamily = (key) => {
+    if (key === "__new__") return onCreateNew?.();
+    if (!key.startsWith("fam:")) { setPending(null); return onChange(key); }
+    const f = families.find((x) => x.key === key.slice(4));
+    if (!f) return;
+    if (f.members.length === 1) { setPending(null); return onChange(f.members[0].id); }
+    setPending(f.key);
+  };
+
+  const famValue = family ? `fam:${family.key}` : (extra.some(([v]) => v === value) ? value : "");
+  return (
+    <div className="flex gap-2 flex-wrap" style={style}>
+      <select style={{ ...inputStyle, flex: "2 1 200px", fontWeight: 700 }} value={famValue} onChange={(e) => pickFamily(e.target.value)}>
+        {!extra.some(([v]) => v === "") && <option value="">{placeholder}</option>}
+        {extra.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+        {FAMILY_GROUPS.map(([cat, groupLabel]) => {
+          const list = families.filter((f) => (FAMILY_GROUPS.some(([c]) => c === f.category) ? f.category : "wood") === cat);
+          if (!list.length) return null;
+          return (
+            <optgroup key={cat} label={groupLabel}>
+              {list.map((f) => (
+                <option key={f.key} value={`fam:${f.key}`}>
+                  {f.favorite ? "★ " : ""}{f.skuRoot}{f.label && f.label !== f.skuRoot ? ` · ${f.label}` : ""}
+                  {f.members.length > 1 ? ` (${f.members.length})` : stock(f.members[0])}
+                </option>
+              ))}
+            </optgroup>
+          );
+        })}
+        {onCreateNew && <option value="__new__">+ Create new SKU…</option>}
+      </select>
+      {family && family.members.length > 1 && (
+        <select
+          style={{ ...inputStyle, flex: "1 1 140px", fontWeight: 700, borderColor: pending ? C.redwood : C.kraftDark }}
+          value={pending ? "" : current?.id || ""}
+          onChange={(e) => { if (e.target.value) { setPending(null); onChange(e.target.value); } }}
+        >
+          {pending && <option value="">Pick the finish</option>}
+          {family.finishes.map(({ product: m, label }) => (
+            <option key={m.id} value={m.id}>{m.favorite ? "★ " : ""}{label} · {m.sku}{stock(m)}</option>
+          ))}
+        </select>
+      )}
+    </div>
+  );
+}
+
 // Wood arrives on pallets that need a scannable label; paint and packing
 // don't. Missing category is treated as wood, matching the rest of the app.
 const producesUnits = (product) => !!product && ["wood", "milled"].includes(product.category || "wood");
@@ -7638,19 +7756,15 @@ function SkuPicker({ products, value, onChange, onCreate, placeholder = "— Sel
   }
 
   return (
-    <select
-      style={{ ...inputStyle, marginTop: 8 }}
+    <ProductPicker
+      products={sorted.filter((p) => !isArchivedProduct(p) || p.id === value)}
       value={value || ""}
-      onChange={(e) => (e.target.value === "__new__" ? setCreating(true) : onChange(e.target.value))}
-    >
-      <option value="">{placeholder}</option>
-      {sorted.map((p) => (
-        <option key={p.id} value={p.id}>
-          {p.favorite ? "★ " : ""}{p.sku}{p.name && p.name !== p.sku ? ` — ${p.name}` : ""} ({num(p.onHand)} on hand)
-        </option>
-      ))}
-      <option value="__new__">+ Create new SKU…</option>
-    </select>
+      onChange={onChange}
+      placeholder={placeholder}
+      showStock
+      style={{ marginTop: 8 }}
+      onCreateNew={() => setCreating(true)}
+    />
   );
 }
 

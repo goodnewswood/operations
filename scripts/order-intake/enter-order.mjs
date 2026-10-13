@@ -62,7 +62,7 @@ const norm = (s) => String(s ?? "").toLowerCase().replace(/\s+/g, " ").trim();
 const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const short = (s, n) => (s.length > n ? `${s.slice(0, n - 1).trim()}…` : s);
-const UNIT_WORD = { sf: ["SF", "SF"], box: ["box", "boxes"], board: ["board", "boards"], plank: ["plank", "planks"], pallet: ["pallet", "pallets"], ea: ["ea", "ea"] };
+const UNIT_WORD = { sf: ["SF", "SF"], box: ["box", "boxes"], board: ["board", "boards"], plank: ["plank", "planks"], pallet: ["pallet", "pallets"], sample: ["sample", "samples"], ea: ["ea", "ea"] };
 const unitWord = (u, n) => (UNIT_WORD[u] ? UNIT_WORD[u][round(n, 2) === 1 ? 0 : 1] : u);
 
 /* ---------------- Units ---------------- */
@@ -393,11 +393,15 @@ export async function enterOrder(order, { dryRun = false } = {}) {
     steps: r.product?.steps ? { ...r.product.steps } : defaultSteps(),
   }));
 
-  const one = resolved.length === 1 ? resolved[0] : null;
-  const what = !one ? `${resolved.length} items`
-    : one.product && one.displayUnit === "box" ? `${fmtNum(one.shown)} ${unitWord("box", one.shown)}`
-    : `${fmtNum(one.qty)} × ${short(one.name, 28)}`;
-  const title = `${surname(buyerName) || "Online order"} · ${what} · ${orderLabel}`;
+  // The title says what's actually being made, from the catalog name
+  // ("1 box 8" x 48" End Trim, Natural"), not just "1 box", so the board
+  // reads at a glance. Store listing titles are long and salesy, so a line
+  // with no catalog item gets a shortened one.
+  const lineWhat = (r) => (r.product
+    ? `${fmtNum(r.shown)} ${unitWord(r.displayUnit, r.shown)} ${r.product.name || r.product.sku}`
+    : `${fmtNum(r.qty)} × ${short(r.name, 40)}`);
+  const what = resolved.length <= 2 ? resolved.map(lineWhat).join(" + ") : `${resolved.length} items: ${resolved.map(lineWhat).join(", ")}`;
+  const title = `${surname(buyerName) || "Online order"} · ${short(what, 110)} · ${orderLabel}`;
 
   const header = `${orderLabel} (${ch.store}), placed ${placedText}${buyerName ? ` by ${buyerName}` : ""}.`;
   const tail = [

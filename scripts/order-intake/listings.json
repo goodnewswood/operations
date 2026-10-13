@@ -16,6 +16,78 @@
       "unit": "box",
       "perItem": 1,
       "why": "The Shopify listing's SKU field (SHP-748-NAT, 7\" Shiplap Natural) is wrong; the real item is the 8\" x 48\" End Trim, Natural (TRM-848-NAT), same as the matching Etsy listing. Sold per box of 10 boards, per Ero 2026-09-16."
+    },
+    {
+      "title": "Reclaimed Wood Interior Samples",
+      "variant": "Barnwood Mix",
+      "sku": "SMP-516-NAT",
+      "unit": "sample",
+      "perItem": 1,
+      "why": "Shopify sample variant Barnwood Mix: one 16\" piece of 5/16 x 5 S3S, per Ero 2026-10-12."
+    },
+    {
+      "title": "Reclaimed Wood Interior Samples",
+      "variant": "Brushed Brown",
+      "sku": "SMP-516-BRS",
+      "unit": "sample",
+      "perItem": 1,
+      "why": "Shopify sample variant Brushed Brown: one 16\" piece of 5/16 x 5 S3S, per Ero 2026-10-12."
+    },
+    {
+      "title": "Reclaimed Wood Interior Samples",
+      "variant": "Whitewash",
+      "sku": "SMP-516-WHT",
+      "unit": "sample",
+      "perItem": 1,
+      "why": "Shopify sample variant Whitewash: one 16\" piece of 5/16 x 5 S3S, per Ero 2026-10-12."
+    },
+    {
+      "title": "Reclaimed Wood Interior Samples",
+      "variant": "Grey",
+      "sku": "SMP-516-GRY",
+      "unit": "sample",
+      "perItem": 1,
+      "why": "Shopify sample variant Grey: one 16\" piece of 5/16 x 5 S3S, per Ero 2026-10-12."
+    },
+    {
+      "title": "Reclaimed Wood Interior Samples",
+      "variant": "Tan",
+      "sku": "SMP-516-TAN",
+      "unit": "sample",
+      "perItem": 1,
+      "why": "Shopify sample variant Tan: one 16\" piece of 5/16 x 5 S3S, per Ero 2026-10-12."
+    },
+    {
+      "title": "Reclaimed Wood Interior Samples",
+      "variant": "Umber",
+      "sku": "SMP-516-UMB",
+      "unit": "sample",
+      "perItem": 1,
+      "why": "Shopify sample variant Umber: one 16\" piece of 5/16 x 5 S3S, per Ero 2026-10-12."
+    },
+    {
+      "title": "Reclaimed Wood Interior Samples",
+      "variant": "Red",
+      "sku": "SMP-516-RED",
+      "unit": "sample",
+      "perItem": 1,
+      "why": "Shopify sample variant Red: one 16\" piece of 5/16 x 5 S3S, per Ero 2026-10-12."
+    },
+    {
+      "title": "Reclaimed Wood Interior Samples",
+      "variant": "Blue",
+      "sku": "SMP-516-BLU",
+      "unit": "sample",
+      "perItem": 1,
+      "why": "Shopify sample variant Blue: one 16\" piece of 5/16 x 5 S3S, per Ero 2026-10-12."
+    },
+    {
+      "title": "Reclaimed Wood Interior Samples",
+      "variant": "Black",
+      "sku": "SMP-516-BLK",
+      "unit": "sample",
+      "perItem": 1,
+      "why": "Shopify sample variant Black: one 16\" piece of 5/16 x 5 S3S, per Ero 2026-10-12."
     }
   ],
   "etsy": [
