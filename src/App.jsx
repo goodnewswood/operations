@@ -7737,6 +7737,12 @@ const WALKIN_MILLED = [
   { group: '7" Shiplap', items: [["SHP-748-NAT", 6.5], ["SHP-748-BRS", 7.0]] },
   { group: '5" T&G', items: [["TNG-548-NAT", 6.0], ["TNG-548-BRS", 6.5]] },
   { group: '7" T&G', items: [["TNG-748-NAT", 6.5], ["TNG-748-BRS", 7.0]] },
+  // Not on the guide, so Ero said to assume these: end trim at what the
+  // website gets ($80 a box of 10 is about $3/SF), the 1/4" S3S a bit over
+  // Rockin' Wood's $4.50, and acoustic slats at what the website gets.
+  { group: "End trim", items: [["TRM-848-NAT", 3.0], ["TRM-845-NAT", 3.0], ["TRM-648-NAT", 3.0]] },
+  { group: '1/4" S3S, 1/4 x 7 x 55"', items: [["S3S-755-NAT", 5.0]] },
+  { group: "Acoustic slats", items: [["SHP-748-ACO", 11.0]] },
 ];
 const boardFeet = (p) => {
   const t = Number(p.thickness) || 1, w = Number(p.widthIn) || 0, l = Number(p.lengthIn) || 0;
@@ -7847,7 +7853,7 @@ function WalkInPricesTab({ products }) {
             </div>
           ))}
           <div className="px-3 py-2 text-xs" style={{ color: C.faint, fontFamily: MONO, borderTop: `1px solid ${C.kraft}` }}>
-            From the wholesale price guide. A box is usually 20 SF (5") or 40 SF (7").
+            S3S, shiplap and T&G from the wholesale price guide. A box is usually 20 SF (5") or 40 SF (7").
           </div>
         </div>
       )}
