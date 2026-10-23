@@ -13,7 +13,9 @@ import {
 
 /* ============================================================
    GNWS OPS — SHARED TEAM OPERATIONS SYSTEM
-   Employee-facing. No dollar amounts anywhere.
+   Employee-facing. No dollar amounts anywhere, with one exception Ero
+   asked for: the Walk-in Prices tab, so the crew can quote a random
+   customer at the yard without calling him.
    Shares data (customers, catalog, inventory, work orders, sorting,
    time log) with the Quote & Pricing Studio via shared persistent storage.
 
@@ -7712,6 +7714,122 @@ function WorkTab(props) {
   );
 }
 
+
+/* ---------------- Walk-in prices ----------------
+   What the crew charges a retail or walk-in customer, per board. Ero's
+   rule: sorted boards $1.25 a board foot, painted $1.00, unsorted $0.80,
+   rounded to the nearest dollar a board. Prices come from each board's
+   size in the catalog, so a new size shows up here on its own. Old growth
+   and mushroom wood aren't on it yet: the crew asks Ero for those.
+   Wholesale and online prices live in GNWS Office, not here. */
+const WALKIN_RATE = { N: 1.25, P: 1.0, RAW: 0.8 };
+const WALKIN_GRADES = [["N", "Sorted", "Non-painted"], ["P", "Painted", "Sorted"], ["RAW", "Unsorted", "As it comes"]];
+// Milled product per square foot, once Ero sets the prices. Each entry:
+// { sku: "SHP-748-NAT", perSF: 7 }. Empty until then, so nothing shows.
+const WALKIN_MILLED = [];
+const boardFeet = (p) => {
+  const t = Number(p.thickness) || 1, w = Number(p.widthIn) || 0, l = Number(p.lengthIn) || 0;
+  return (t * w * (l / 12)) / 12;
+};
+
+function WalkInPricesTab({ products }) {
+  const rows = useMemo(() => {
+    const bySize = new Map();
+    products.forEach((p) => {
+      if (isArchivedProduct(p)) return;
+      const m = /^(\d{3,4})(N|P|RAW)$/i.exec(String(p.sku || "").trim());
+      if (!m || !(boardFeet(p) > 0)) return;
+      const grade = m[2].toUpperCase();
+      const key = m[1];
+      if (!bySize.has(key)) bySize.set(key, { key, label: `${num(Number(p.thickness) || 1)}x${num(p.widthIn)}x${num(Number(p.lengthIn) / 12, Number(p.lengthIn) % 12 ? 1 : 0)}`, bf: boardFeet(p), cells: {} });
+      bySize.get(key).cells[grade] = { product: p, price: Math.round(boardFeet(p) * WALKIN_RATE[grade]) };
+    });
+    return [...bySize.values()].sort((a, b) => a.key.localeCompare(b.key, undefined, { numeric: true }));
+  }, [products]);
+  const milled = WALKIN_MILLED.map((m) => ({ ...m, product: products.find((p) => p.sku === m.sku) })).filter((m) => m.product);
+
+  // Tap a price, type how many, see the total. Nothing is saved.
+  const [pick, setPick] = useState(null);
+  const [count, setCount] = useState("");
+  const picked = pick ? rows.find((r) => r.key === pick.key)?.cells[pick.grade] : null;
+  const total = picked && Number(count) > 0 ? picked.price * Number(count) : null;
+
+  return (
+    <div className="max-w-3xl">
+      <div style={{ fontWeight: 800, fontSize: 20 }}>Walk-in prices</div>
+      <div className="text-sm mb-4" style={{ color: C.faint }}>
+        Per board, for retail and walk-in customers. Tap a price to add up an order.
+        Old growth, mushroom wood and big orders: ask Ero.
+      </div>
+
+      <div className="rounded-sm mb-4 px-4 py-3 flex items-center gap-3 flex-wrap" style={{ background: "#FBF6EC", border: `2px solid ${C.gold}` }}>
+        {picked ? (
+          <>
+            <div style={{ fontWeight: 800 }}>{picked.product.sku} · ${picked.price} a board</div>
+            <input
+              inputMode="numeric" placeholder="How many boards" value={count}
+              onChange={(e) => setCount(e.target.value.replace(/[^0-9]/g, ""))}
+              style={{ ...inputStyle, width: 170 }}
+            />
+            {total !== null && <div style={{ fontWeight: 800, fontSize: 22 }}>= {money(total)}</div>}
+          </>
+        ) : (
+          <div className="text-sm" style={{ color: C.faint }}>Tap any price below to start.</div>
+        )}
+      </div>
+
+      <div className="rounded-sm overflow-hidden" style={{ border: `1px solid ${C.kraftDark}`, background: C.panel }}>
+        <div className="grid" style={{ gridTemplateColumns: "1.2fr repeat(3, 1fr)", background: C.ink, color: "#fff", fontFamily: MONO, fontSize: 12 }}>
+          <div className="px-3 py-2">Board</div>
+          {WALKIN_GRADES.map(([g, label, sub]) => (
+            <div key={g} className="px-3 py-2 text-center">{label}<div style={{ opacity: 0.6, fontSize: 10 }}>{sub}</div></div>
+          ))}
+        </div>
+        {rows.map((r) => (
+          <div key={r.key} className="grid items-center" style={{ gridTemplateColumns: "1.2fr repeat(3, 1fr)", borderTop: `1px solid ${C.kraft}` }}>
+            <div className="px-3 py-2">
+              <div style={{ fontWeight: 800, fontSize: 16 }}>{r.label}</div>
+              <div style={{ color: C.faint, fontSize: 11, fontFamily: MONO }}>{r.key} · {num(r.bf, 2)} BF</div>
+            </div>
+            {WALKIN_GRADES.map(([g]) => {
+              const cell = r.cells[g];
+              const on = pick && pick.key === r.key && pick.grade === g;
+              return (
+                <div key={g} className="px-1 py-1 text-center">
+                  {cell ? (
+                    <button
+                      onClick={() => { setPick({ key: r.key, grade: g }); setCount(""); }}
+                      className="w-full rounded-sm py-2"
+                      style={{ fontWeight: 800, fontSize: 20, background: on ? C.moss : "transparent", color: on ? "#fff" : C.ink, border: `1px solid ${on ? C.moss : "transparent"}` }}
+                    >
+                      ${cell.price}
+                    </button>
+                  ) : <span style={{ color: C.faint }}>-</span>}
+                </div>
+              );
+            })}
+          </div>
+        ))}
+      </div>
+      <div className="text-xs mt-2" style={{ color: C.faint, fontFamily: MONO }}>
+        Sorted $1.25, painted $1.00, unsorted $0.80 a board foot, rounded to the dollar.
+      </div>
+
+      {milled.length > 0 && (
+        <div className="rounded-sm overflow-hidden mt-6" style={{ border: `1px solid ${C.kraftDark}`, background: C.panel }}>
+          <div className="px-3 py-2" style={{ background: C.ink, color: "#fff", fontFamily: MONO, fontSize: 12 }}>Milled, per square foot</div>
+          {milled.map((m) => (
+            <div key={m.sku} className="px-3 py-2 flex justify-between" style={{ borderTop: `1px solid ${C.kraft}` }}>
+              <div><b>{m.product.name}</b> <span style={{ color: C.faint, fontFamily: MONO, fontSize: 11 }}>{m.sku}</span></div>
+              <div style={{ fontWeight: 800, fontSize: 18 }}>${m.perSF} / SF</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ---------------- SKU picker ----------------
    Every stock picker on the shop floor uses this: it lists ALL products,
    not a role-filtered subset. The old filters (raw-only inbound,
@@ -10873,7 +10991,7 @@ export default function App() {
      rather than a fixed home screen. Repeats collapse — bouncing between
      two tabs shouldn't build a stack you have to unwind press by press. */
   const tabStackRef = useRef([tab]);
-  const TAB_IDS = ["dashboard", "work", "orders", "inventory", "contacts", "schedule", "time", "reports"];
+  const TAB_IDS = ["dashboard", "work", "orders", "inventory", "contacts", "schedule", "time", "reports", "prices"];
   const goTab = (next) => {
     if (!next || next === tab || !TAB_IDS.includes(next)) return;
     const stack = tabStackRef.current;
@@ -10968,6 +11086,7 @@ export default function App() {
     { id: "schedule", label: "Schedule", short: "Sched", icon: CalendarDays },
     { id: "time", label: "Time", short: "Time", icon: Clock },
     { id: "reports", label: "Reports", short: "Rates", icon: Timer },
+    { id: "prices", label: "Walk-in Prices", short: "Prices", icon: Tag },
   ];
 
   const [ordersSubTab, setOrdersSubTab] = useState("workorders");
@@ -11243,6 +11362,8 @@ export default function App() {
             purchaseOrders={purchaseOrders}
           />
         )}
+
+        {tab === "prices" && <WalkInPricesTab products={products} />}
 
         {tab === "inventory" && (
           <InventoryTab

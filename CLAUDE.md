@@ -64,5 +64,5 @@ one database, so a change in either shows up in both.
   `displayUnit` is how they're shown. A sales order's `unitPrice` is per `displayUnit`.
 - Products with category `service` (like `INSTALL`) are sold, not stocked: they stay
   off counts, floor pickers and square-foot totals.
-- This app never shows money. Prices live in GNWS Office.
+- This app never shows money. Prices live in GNWS Office. One exception Ero asked for: the Walk-in Prices tab (`WalkInPricesTab`), retail per-board prices for the crew to quote walk-in customers.
 - Assume $20/hour for labor unless Ero says otherwise.
