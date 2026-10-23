@@ -7739,10 +7739,10 @@ const WALKIN_MILLED = [
   { group: '7" T&G', items: [["TNG-748-NAT", 6.5], ["TNG-748-BRS", 7.0]] },
   // Not on the guide, so Ero said to assume these: end trim at what the
   // website gets ($80 a box of 10 is about $3/SF), the 1/4" S3S a bit over
-  // Rockin' Wood's $4.50, and acoustic slats at what the website gets.
+  // Rockin' Wood's $4.50, and slat lap at the website price ($12.65).
   { group: "End trim", items: [["TRM-848-NAT", 3.0], ["TRM-845-NAT", 3.0], ["TRM-648-NAT", 3.0]] },
   { group: '1/4" S3S, 1/4 x 7 x 55"', items: [["S3S-755-NAT", 5.0]] },
-  { group: "Acoustic slats", items: [["SHP-748-ACO", 11.0]] },
+  { group: "Acoustic slat wall (slat lap)", items: [["SHP-748-ACO", 12.65]] },
 ];
 const boardFeet = (p) => {
   const t = Number(p.thickness) || 1, w = Number(p.widthIn) || 0, l = Number(p.lengthIn) || 0;
