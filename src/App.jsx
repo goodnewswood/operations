@@ -7742,7 +7742,7 @@ const WALKIN_MILLED = [
   // Rockin' Wood's $4.50, and slat lap at the website price ($12.65).
   { group: "End trim", items: [["TRM-848-NAT", 3.0], ["TRM-845-NAT", 3.0], ["TRM-648-NAT", 3.0]] },
   { group: '1/4" S3S, 1/4 x 7 x 55"', items: [["S3S-755-NAT", 5.0]] },
-  { group: "Acoustic slat wall (slat lap)", items: [["SHP-748-ACO", 12.65]] },
+  { group: "Acoustic slat wall (slat lap)", items: [["SLT-748-NAT", 12.65]] },
 ];
 const boardFeet = (p) => {
   const t = Number(p.thickness) || 1, w = Number(p.widthIn) || 0, l = Number(p.lengthIn) || 0;
