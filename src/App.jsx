@@ -7724,9 +7724,20 @@ function WorkTab(props) {
    Wholesale and online prices live in GNWS Office, not here. */
 const WALKIN_RATE = { N: 1.25, P: 1.0, RAW: 0.8 };
 const WALKIN_GRADES = [["N", "Sorted", "Non-painted"], ["P", "Painted", "Sorted"], ["RAW", "Unsorted", "As it comes"]];
-// Milled product per square foot, once Ero sets the prices. Each entry:
-// { sku: "SHP-748-NAT", perSF: 7 }. Empty until then, so nothing shows.
-const WALKIN_MILLED = [];
+// Milled product per square foot, from the wholesale price guide Ero made
+// for Huasna (Ethica-Wood-Price-Guide-Jethro-v6, July 2026). He said that's
+// good enough for walk-ins. Painted colors are the guide's Paint column.
+const WALKIN_MILLED = [
+  { group: '5" S3S thin, 5/16 x 5 x 45"', items: [
+    ["S3S-545-NAT", 5.0], ["S3S-545-BRS", 5.5],
+    ["S3S-545-BLK", 6.0], ["S3S-545-BLU", 6.0], ["S3S-545-GRY", 6.0], ["S3S-545-RED", 6.0],
+    ["S3S-545-TAN", 6.0], ["S3S-545-UMB", 6.0], ["S3S-545-WHT", 6.0],
+  ] },
+  { group: '7" S3S, 1/2 x 7 x 48"', items: [["S3S 1/2\u201d X 7\u201d X 4\u2019", 6.0]] },
+  { group: '7" Shiplap', items: [["SHP-748-NAT", 6.5], ["SHP-748-BRS", 7.0]] },
+  { group: '5" T&G', items: [["TNG-548-NAT", 6.0], ["TNG-548-BRS", 6.5]] },
+  { group: '7" T&G', items: [["TNG-748-NAT", 6.5], ["TNG-748-BRS", 7.0]] },
+];
 const boardFeet = (p) => {
   const t = Number(p.thickness) || 1, w = Number(p.widthIn) || 0, l = Number(p.lengthIn) || 0;
   return (t * w * (l / 12)) / 12;
@@ -7746,7 +7757,10 @@ function WalkInPricesTab({ products }) {
     });
     return [...bySize.values()].sort((a, b) => a.key.localeCompare(b.key, undefined, { numeric: true }));
   }, [products]);
-  const milled = WALKIN_MILLED.map((m) => ({ ...m, product: products.find((p) => p.sku === m.sku) })).filter((m) => m.product);
+  const milled = WALKIN_MILLED.map((g) => ({
+    group: g.group,
+    items: g.items.map(([sku, perSF]) => ({ sku, perSF, product: products.find((p) => p.sku === sku && !isArchivedProduct(p)) })).filter((m) => m.product),
+  })).filter((g) => g.items.length);
 
   // Tap a price, type how many, see the total. Nothing is saved.
   const [pick, setPick] = useState(null);
@@ -7818,12 +7832,23 @@ function WalkInPricesTab({ products }) {
       {milled.length > 0 && (
         <div className="rounded-sm overflow-hidden mt-6" style={{ border: `1px solid ${C.kraftDark}`, background: C.panel }}>
           <div className="px-3 py-2" style={{ background: C.ink, color: "#fff", fontFamily: MONO, fontSize: 12 }}>Milled, per square foot</div>
-          {milled.map((m) => (
-            <div key={m.sku} className="px-3 py-2 flex justify-between" style={{ borderTop: `1px solid ${C.kraft}` }}>
-              <div><b>{m.product.name}</b> <span style={{ color: C.faint, fontFamily: MONO, fontSize: 11 }}>{m.sku}</span></div>
-              <div style={{ fontWeight: 800, fontSize: 18 }}>${m.perSF} / SF</div>
+          {milled.map((g) => (
+            <div key={g.group} style={{ borderTop: `1px solid ${C.kraft}` }}>
+              <div className="px-3 pt-2" style={{ fontWeight: 800, fontSize: 15 }}>{g.group}</div>
+              {g.items.map((m) => {
+                const finish = String(m.product.name || m.sku).split(/ - |, /).pop();
+                return (
+                  <div key={m.sku} className="px-3 py-1 flex justify-between items-center">
+                    <div>{finish} <span style={{ color: C.faint, fontFamily: MONO, fontSize: 11 }}>{m.sku}</span></div>
+                    <div style={{ fontWeight: 800, fontSize: 18 }}>${m.perSF.toFixed(2)} / SF</div>
+                  </div>
+                );
+              })}
             </div>
           ))}
+          <div className="px-3 py-2 text-xs" style={{ color: C.faint, fontFamily: MONO, borderTop: `1px solid ${C.kraft}` }}>
+            From the wholesale price guide. A box is usually 20 SF (5") or 40 SF (7").
+          </div>
         </div>
       )}
     </div>
