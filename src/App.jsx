@@ -10164,9 +10164,14 @@ function mergeCollections(baseline, ours, theirs) {
     result.push(weChanged ? ourRow : r);
     taken.add(r.id);
   }
-  // Then anything we added that they've never seen.
+  // Then anything we added that they've never seen. A row we already had
+  // and didn't touch, that's gone from theirs, was deleted elsewhere: keep
+  // it deleted rather than bringing it back from a stale screen.
   for (const r of ours) {
-    if (!taken.has(r.id) && !yours.has(r.id)) result.push(r);
+    if (taken.has(r.id) || yours.has(r.id)) continue;
+    const baseRow = base.get(r.id);
+    if (baseRow && same(baseRow, r)) continue;
+    result.push(r);
   }
   return result;
 }
