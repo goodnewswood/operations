@@ -10610,13 +10610,19 @@ export default function App() {
   // when it was saved. While the time hasn't moved, storage still holds
   // exactly that copy, so there's no need to download it again.
   const storedRef = useRef({});
-  const readKey = async (key) => {
+  // A row that isn't there yet comes back null. Anything else going wrong
+  // (no signal, Supabase refusing us) throws when `strict`, so the first
+  // load can tell "empty" from "couldn't ask".
+  const readKey = async (key, { strict = false } = {}) => {
     try {
       const res = await window.storage.get(key, true);
       const parsed = res && res.value ? JSON.parse(res.value) : null;
       if (parsed != null && res.updatedAt) storedRef.current[key] = { at: res.updatedAt, value: parsed };
       return parsed;
-    } catch (e) { return null; }
+    } catch (e) {
+      if (strict && !/not found/i.test(e?.message || "")) throw e;
+      return null;
+    }
   };
   // The rows whose saved time differs from the copy we hold. If the check
   // itself fails, assume all of them did, the old safe behavior.
@@ -10761,19 +10767,37 @@ export default function App() {
     setTimeout(() => setSyncState((v) => (v === "synced" ? "idle" : v)), 1200);
   };
 
+  // First load. If storage can't be reached, keep trying and never mark the
+  // app loaded: a loaded app saves what's on screen, and what's on screen
+  // before a load is the built-in starter list. On Oct 27, phones that had
+  // opened during the Supabase outage merged that starter list into the
+  // real customers and products the moment the outage ended.
+  const [loadError, setLoadError] = useState(null);
   useEffect(() => {
-    (async () => {
-      for (const c of collectionsRef.current) {
-        const d = await readKey(c.key);
-        if (d == null) continue;
-        baselineRef.current[c.key] = d;
-        if (c.arr) { if (Array.isArray(d) && d.length) c.set(d); }
-        else c.set(d);
+    let stop = false;
+    const attempt = async () => {
+      try {
+        const got = [];
+        for (const c of collectionsRef.current) got.push([c, await readKey(c.key, { strict: true })]);
+        if (stop) return;
+        for (const [c, d] of got) {
+          if (d == null) continue;
+          baselineRef.current[c.key] = d;
+          if (c.arr) { if (Array.isArray(d) && d.length) c.set(d); }
+          else c.set(d);
+        }
+        setLoadError(null);
+        setLastSyncedAt(Date.now());
+        loadedRef.current = true;
+        setLoaded(true);
+      } catch (e) {
+        if (stop) return;
+        setLoadError(e?.message || String(e));
+        setTimeout(attempt, 15000);
       }
-      setLastSyncedAt(Date.now());
-      loadedRef.current = true;
-      setLoaded(true);
-    })();
+    };
+    attempt();
+    return () => { stop = true; };
   }, []);
 
   const saveKey = (key, value) => {
@@ -11178,7 +11202,16 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   if (!loaded) {
-    return <div className="min-h-screen flex items-center justify-center" style={{ background: C.paper, fontFamily: MONO, color: C.faint }}>Loading shared data…</div>;
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center px-6 text-center" style={{ background: C.paper, fontFamily: MONO, color: C.faint }}>
+        <div>Loading shared data…</div>
+        {loadError && (
+          <div className="mt-3 text-xs" style={{ color: C.redwood, maxWidth: 360 }}>
+            Can't reach the database right now ({loadError}). Nothing is lost. Trying again every 15 seconds.
+          </div>
+        )}
+      </div>
+    );
   }
 
   return (
