@@ -10606,11 +10606,31 @@ export default function App() {
   const pendingRef = useRef({});
   const loadedRef = useRef(false);
 
+  // What storage held for each row the last time we read or wrote it, and
+  // when it was saved. While the time hasn't moved, storage still holds
+  // exactly that copy, so there's no need to download it again.
+  const storedRef = useRef({});
   const readKey = async (key) => {
     try {
       const res = await window.storage.get(key, true);
-      return res && res.value ? JSON.parse(res.value) : null;
+      const parsed = res && res.value ? JSON.parse(res.value) : null;
+      if (parsed != null && res.updatedAt) storedRef.current[key] = { at: res.updatedAt, value: parsed };
+      return parsed;
     } catch (e) { return null; }
+  };
+  // The rows whose saved time differs from the copy we hold. If the check
+  // itself fails, assume all of them did, the old safe behavior.
+  const changedKeys = async (keys) => {
+    try {
+      const stamps = await window.storage.stamps(keys);
+      return keys.filter((k) => !storedRef.current[k] || stamps[k] !== storedRef.current[k].at);
+    } catch (e) { return keys; }
+  };
+  // Storage's current copy of one row, downloading it only if it changed.
+  const readKeyFresh = async (key) => {
+    const [changed] = await changedKeys([key]);
+    if (!changed && storedRef.current[key]) return storedRef.current[key].value;
+    return readKey(key);
   };
 
   // One storage conversation per key at a time. A sync's read landing in
@@ -10666,7 +10686,9 @@ export default function App() {
     await flushSaves();
     // All at once rather than one after another, so the stretch where the
     // screen is being refreshed is a single round trip, not eleven.
-    await Promise.all(collectionsRef.current.map((c) => withKeyLock(c.key, async () => {
+    // Only the rows someone else has saved since we last looked.
+    const changed = new Set(await changedKeys(collectionsRef.current.map((c) => c.key)));
+    await Promise.all(collectionsRef.current.filter((c) => changed.has(c.key)).map((c) => withKeyLock(c.key, async () => {
       const d = await readKey(c.key);
       if (d != null) applyFromStorage(c.key, d);
     })));
@@ -10684,7 +10706,7 @@ export default function App() {
     const { value, base } = entry;
     let toWrite = value;
     if (Array.isArray(value)) {
-      const remote = await readKey(key);
+      const remote = await readKeyFresh(key);
       if (Array.isArray(remote)) {
         const merged = mergeCollections(base, value, remote);
         if (JSON.stringify(merged) !== JSON.stringify(value)) {
@@ -10693,7 +10715,8 @@ export default function App() {
         toWrite = merged;
       }
     }
-    await window.storage.set(key, JSON.stringify(toWrite), true);
+    const saved = await window.storage.set(key, JSON.stringify(toWrite), true);
+    if (saved?.updatedAt) storedRef.current[key] = { at: saved.updatedAt, value: toWrite };
     // Only clear if nothing newer queued while this write was in
     // flight — otherwise a keystroke mid-await gets silently dropped
     // instead of waiting for its own turn.
@@ -10792,12 +10815,9 @@ export default function App() {
     const id = setInterval(async () => {
       if (document.hidden) return;
       const busy = Object.keys(pendingRef.current).length > 0;
-      let ahead = false;
-      for (const c of collectionsRef.current) {
-        const d = await readKey(c.key);
-        if (d == null) continue;
-        if (JSON.stringify(d) !== JSON.stringify(baselineRef.current[c.key])) { ahead = true; break; }
-      }
+      // One tiny request for the save times. Our own saves update the
+      // times we hold, so anything that moved is someone else's save.
+      const ahead = (await changedKeys(collectionsRef.current.map((c) => c.key))).length > 0;
       if (!ahead) { setRemoteAhead(false); return; }
       if (busy) setRemoteAhead(true);
       else await syncNow({ silent: true });
