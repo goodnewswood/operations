@@ -427,11 +427,23 @@ export async function enterOrder(order, { dryRun = false } = {}) {
     paymentStatus: order.paid ? "Paid" : "Unpaid", paidVia: order.paid ? paidVia : "",
     quoteId: "", workOrderId: "", customerPO: orderLabel, sourceRef: ref,
   };
+  // The buyer's address goes in the order's ship-to, so the label, packing
+  // slip and Shipping panel pick it up. Shipped under our own name: these
+  // are our customers, not a distributor's (so never a blind ship).
+  const shipToRec = order.shipTo ? {
+    name: String(order.shipTo.name || buyerName || ""), company: String(order.shipTo.company || ""),
+    address: String(order.shipTo.address || ""), address2: String(order.shipTo.address2 || ""),
+    city: String(order.shipTo.city || ""), state: String(order.shipTo.state || ""), zip: String(order.shipTo.zip || ""),
+    country: /^(us|usa|united states)$/i.test(String(order.shipTo.country || "").trim()) ? "USA" : String(order.shipTo.country || ""),
+    phone: String(order.shipTo.phone || phone || ""),
+  } : null;
+  const shipFields = shipToRec ? { dropShip: true, blindShip: false, shipTo: shipToRec } : {};
+  if (!soMine) Object.assign(so, shipFields);
   const wo = woMine || {
     id: uid(), number: `WO-${base}`, customerId: customer.id, customerName: customer.company,
     status: "not_started", date: placedDate, createdAt: new Date().toISOString(), brand: "ethica",
     title, lines: woLines, readyByDate: shipBy, shipDate: shipBy, shipVia, notes: woNotes,
-    salesOrderId: "", customerPO: orderLabel, sourceRef: ref,
+    salesOrderId: "", customerPO: orderLabel, sourceRef: ref, ...shipFields,
   };
   if (!soMine) so.workOrderId = wo.id;
   if (!woMine) wo.salesOrderId = so.id;
@@ -532,6 +544,33 @@ export async function enterOrder(order, { dryRun = false } = {}) {
     ...lineSummary,
     ...warnings.map((w) => `  ⚠ ${w}`),
   ], { order: orderLabel, salesOrder: so.number, workOrder: wo.number, title: wo.title, warnings, newCustomer: newCustomer?.company || null });
+}
+
+// A store order was cancelled. Flags the sales order and work order this
+// script made for it (found by sourceRef), so nobody mills or ships it.
+// Nothing is deleted: Ero decides what happens to anything already cut.
+export async function markCancelled({ channel, orderNumber, cancelledAt, reason }) {
+  if (!SB_URL || !SB_KEY) throw new Error("no Supabase settings");
+  const ch = CHANNELS[norm(channel)];
+  if (!ch) throw new Error(`unknown channel ${channel}`);
+  const num = String(orderNumber ?? "").replace(/^#/, "").trim();
+  const ref = `${norm(channel)}:${num}`;
+  const when = new Date(cancelledAt || Date.now());
+  const whenText = `${when.toLocaleDateString("en-US", { month: "short", day: "numeric" })} at ${when.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}`;
+  const note = `CANCELLED on ${ch.label} ${whenText}${reason ? ` (${reason})` : ""}. Don't mill or ship this order.`;
+  const found = [];
+  for (const key of [KEY.salesOrders, KEY.workOrders]) {
+    const { value } = await readRow(key);
+    const mine = value.find((r) => r?.sourceRef === ref);
+    if (!mine || mine.cancelledAt) continue;
+    const patch = { cancelledAt: when.toISOString(), notes: [note, mine.notes].filter(Boolean).join("\n") };
+    if (key === KEY.workOrders) patch.title = `CANCELLED · ${String(mine.title || "").replace(/^CANCELLED · /, "")}`;
+    await patchOwnRecord(key, mine.id, patch);
+    found.push(mine.number);
+  }
+  return found.length
+    ? finish(0, "cancelled", [`CANCELLED ${ch.label} #${num}: flagged ${found.join(", ")}`], { order: `${ch.label} #${num}`, flagged: found })
+    : finish(2, "not-found", [`${ch.label} #${num} was cancelled, but it isn't in the app (or was already flagged). Nothing written.`], { order: `${ch.label} #${num}` });
 }
 
 // Command line: same output as always (the scheduled checks read the

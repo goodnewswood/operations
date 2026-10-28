@@ -21,7 +21,7 @@
    answered "already entered" and nothing is written. */
 
 import crypto from "node:crypto";
-import { enterOrder, loadListings } from "../scripts/order-intake/enter-order.mjs";
+import { enterOrder, loadListings, markCancelled } from "../scripts/order-intake/enter-order.mjs";
 
 function signatureOk(rawBody, header, secret) {
   const expected = crypto.createHmac("sha256", secret).update(rawBody).digest();
@@ -79,12 +79,28 @@ export async function POST(request) {
   }
 
   const topic = request.headers.get("x-shopify-topic") || "";
-  if (topic && topic !== "orders/create") return Response.json({ status: "ignored", reason: `topic ${topic}` });
+  if (topic && topic !== "orders/create" && topic !== "orders/cancelled") return Response.json({ status: "ignored", reason: `topic ${topic}` });
 
   let order;
   try { order = JSON.parse(raw.toString("utf8")); } catch { return Response.json({ error: "body isn't JSON" }, { status: 400 }); }
   const label = `Shopify #${order.order_number ?? order.name ?? "?"}`;
   if (order.test) return Response.json({ status: "ignored", reason: "test order", order: label });
+
+  // Cancelled (Ero set up a second webhook for orders/cancelled): flag the
+  // order's sales order and work order so it doesn't get milled or shipped.
+  if (topic === "orders/cancelled") {
+    try {
+      const { code, lines, ...result } = await markCancelled({
+        channel: "shopify", orderNumber: order.order_number ?? order.name,
+        cancelledAt: order.cancelled_at, reason: order.cancel_reason || "",
+      });
+      console.log(`[shopify-order] ${label} cancelled: ${lines.join(" ")}`);
+      return Response.json(result);
+    } catch (e) {
+      console.error(`[shopify-order] ${label} cancel: ${e.message}`);
+      return Response.json({ error: e.message, order: label }, { status: 500 });
+    }
+  }
   if (order.cancelled_at) return Response.json({ status: "ignored", reason: "cancelled", order: label });
 
   try {
@@ -102,5 +118,5 @@ export async function POST(request) {
 export async function GET() {
   let listings = null;
   try { const l = loadListings(); listings = Object.values(l).filter(Array.isArray).reduce((s, a) => s + a.length, 0); } catch { /* reported as null */ }
-  return Response.json({ route: "shopify orders/create", secretConfigured: !!process.env.SHOPIFY_WEBHOOK_SECRET, listingEntries: listings });
+  return Response.json({ route: "shopify orders/create + orders/cancelled", secretConfigured: !!process.env.SHOPIFY_WEBHOOK_SECRET, listingEntries: listings });
 }
