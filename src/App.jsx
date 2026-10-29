@@ -4322,9 +4322,22 @@ function WorkOrderDetail({ onCreateProduct, wo, customers, products, goals, sort
                   extra={[["", "Custom / describe below…"]]}
                   onCreateProduct={onCreateProduct}
                   style={{ marginBottom: 4 }}
-                  onChange={(id) => {
-                    const newProduct = products.find((pr) => pr.id === id);
-                    updateLine(line.id, { productId: id, displayUnit: isService(newProduct) ? canonicalUnitFor(newProduct) : "sf", steps: newProduct?.steps ? { ...newProduct.steps } : defaultSteps() });
+                  onChange={(id, made) => {
+                    const newProduct = products.find((pr) => pr.id === id) || made;
+                    // Switching to another size (TRM-848 to TRM-856, say) keeps the
+                    // count the line is shown in, 5 units or 10 boxes, and works the
+                    // square feet out again for the new size, rather than keeping
+                    // the old square feet and quietly changing the board count.
+                    const unit = line.displayUnit || "sf";
+                    const keepUnit = !isService(newProduct) && unit !== "sf" && p && newProduct
+                      && unitsFor(p).includes(unit) && unitsFor(newProduct).includes(unit) && hasSF(newProduct);
+                    const count = keepUnit ? convertQty(p, Number(line.qtySF) || 0, "sf", unit) : null;
+                    updateLine(line.id, {
+                      productId: id,
+                      displayUnit: isService(newProduct) ? canonicalUnitFor(newProduct) : keepUnit ? unit : "sf",
+                      ...(keepUnit ? { qtySF: Math.round(convertQty(newProduct, count, unit, "sf") * 100) / 100 } : {}),
+                      steps: newProduct?.steps ? { ...newProduct.steps } : defaultSteps(),
+                    });
                   }}
                 />
                 {!line.productId && (
@@ -7051,7 +7064,7 @@ function ProductPicker({ products, value, onChange, placeholder = "Pick a produc
         </select>
       )}
       {onCreateProduct && sizedSku(current?.sku || family?.members[0]?.sku) && (
-        <SizeVariantMaker base={current || family.members[0]} products={products} onCreate={onCreateProduct} onPick={(id) => { setPending(null); onChange(id); }} />
+        <SizeVariantMaker base={current || family.members[0]} products={products} onCreate={onCreateProduct} onPick={(id, made) => { setPending(null); onChange(id, made); }} />
       )}
     </div>
   );
@@ -7098,7 +7111,9 @@ function SizeVariantMaker({ base, products, onCreate, onPick }) {
       notes: `Made from ${base.sku} on ${today()}.`,
     };
     onCreate(np);
-    onPick(np.id);
+    // Handed along too: the new SKU isn't in the product list until the
+    // next render, and the line needs its size now to redo the square feet.
+    onPick(np.id, np);
     setOpen(false);
   };
   if (!open) {
