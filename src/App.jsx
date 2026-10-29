@@ -4095,7 +4095,7 @@ function ShippingPanel({ wo, customer, onChange }) {
   );
 }
 
-function WorkOrderDetail({ wo, customers, products, goals, sortLog, history, onLog, updates, sender, onCustomerUpdate, onScheduleMe, onChange, onDelete, onBack, team, whoWorking, setWhoWorking, onAddTeamMember, onUpdateCustomerSpec, onStartWork }) {
+function WorkOrderDetail({ onCreateProduct, wo, customers, products, goals, sortLog, history, onLog, updates, sender, onCustomerUpdate, onScheduleMe, onChange, onDelete, onBack, team, whoWorking, setWhoWorking, onAddTeamMember, onUpdateCustomerSpec, onStartWork }) {
   const customer = customers.find((c) => c.id === wo.customerId);
   const update = (patch) => onChange({ ...wo, ...patch });
   const [bolOpen, setBolOpen] = useState(false);
@@ -4320,6 +4320,7 @@ function WorkOrderDetail({ wo, customers, products, goals, sortLog, history, onL
                   products={products.filter((pr) => !isArchivedProduct(pr) || pr.id === line.productId)}
                   value={line.productId}
                   extra={[["", "Custom / describe below…"]]}
+                  onCreateProduct={onCreateProduct}
                   style={{ marginBottom: 4 }}
                   onChange={(id) => {
                     const newProduct = products.find((pr) => pr.id === id);
@@ -6995,7 +6996,7 @@ const p0Label = (p) => trimSep(String(p.name || p.sku).split(" ").slice(0, -1).j
    Picking a family with a single SKU picks it outright. `extra` adds
    options at the top (like "Custom / describe below") that pass straight
    through to onChange. */
-function ProductPicker({ products, value, onChange, placeholder = "Pick a product", extra = [], showStock = false, style, onCreateNew }) {
+function ProductPicker({ products, value, onChange, placeholder = "Pick a product", extra = [], showStock = false, style, onCreateNew, onCreateProduct }) {
   const families = useMemo(() => productFamilies(products), [products]);
   const current = products.find((p) => p.id === value) || null;
   const currentFamily = current ? families.find((f) => f.members.some((m) => m.id === current.id)) : null;
@@ -7049,6 +7050,79 @@ function ProductPicker({ products, value, onChange, placeholder = "Pick a produc
           ))}
         </select>
       )}
+      {onCreateProduct && sizedSku(current?.sku || family?.members[0]?.sku) && (
+        <SizeVariantMaker base={current || family.members[0]} products={products} onCreate={onCreateProduct} onPick={(id) => { setPending(null); onChange(id); }} />
+      )}
+    </div>
+  );
+}
+
+/* A new length, width or finish of a sized SKU, made right where it's
+   needed. End trim gets cut to whatever the job calls for (848, 856,
+   866...), so instead of setting each one up in Inventory first, the crew
+   types the size and finish and gets TRM-856-BRS, built from the SKU it
+   came from: same category, steps, box and pallet counts, with the
+   square feet worked out from the new size. If that SKU already exists,
+   it's just picked. */
+const sizedSku = (sku) => /^([A-Z0-9]+)-(\d{1,2})(\d{2})-([A-Z]{2,4})$/i.exec(String(sku || "").trim());
+const FINISH_NAMES = { NAT: "Natural", BRS: "Brushed", BLK: "Black", WHT: "White", GRY: "Gray", TAN: "Tan", RED: "Red", BLU: "Blue", UMB: "Burnt Umber", PNT: "Painted" };
+function SizeVariantMaker({ base, products, onCreate, onPick }) {
+  const m = sizedSku(base.sku);
+  const [open, setOpen] = useState(false);
+  const [w, setW] = useState(m ? m[2] : "");
+  const [l, setL] = useState(m ? m[3] : "");
+  const [fin, setFin] = useState(m ? m[4].toUpperCase() : "NAT");
+  if (!m) return null;
+  const prefix = m[1].toUpperCase();
+  const okSize = /^\d{1,2}$/.test(w) && /^\d{2}$/.test(l);
+  const sku = okSize && /^[A-Z]{2,4}$/.test(fin) ? `${prefix}-${w}${l}-${fin}` : "";
+  const existing = sku ? products.find((p) => String(p.sku || "").toUpperCase() === sku) : null;
+  const make = () => {
+    if (!sku) return;
+    if (existing) { onPick(existing.id); setOpen(false); return; }
+    const finishName = FINISH_NAMES[fin] || fin;
+    const baseName = String(base.name || "");
+    // Swap the size in the name ('8" x 48"') and the finish after the last comma.
+    let name = /\d+(\.\d+)?"\s*x\s*\d+(\.\d+)?"/.test(baseName) ? baseName.replace(/\d+(\.\d+)?"\s*x\s*\d+(\.\d+)?"/, `${w}" x ${l}"`) : `${w}" x ${l}" ${baseName}`;
+    name = /,\s*[^,]+$/.test(name) ? name.replace(/,\s*[^,]+$/, `, ${finishName}`) : `${name}, ${finishName}`;
+    const steps = { ...(base.steps || defaultSteps()) };
+    if (fin === "BRS") steps.brush = true;
+    const np = {
+      id: uid(), sku, name, kind: base.kind || "board", category: base.category || "milled",
+      thickness: base.thickness || "1", widthIn: w, lengthIn: l,
+      sfPerBoard: Math.round((Number(w) * Number(l) / 144) * 10000) / 10000,
+      steps, conversions: (base.conversions || []).map((c) => ({ ...c, key: uid() })),
+      ...(base.boardsPerUnit ? { boardsPerUnit: base.boardsPerUnit } : {}),
+      ...(base.boardsPerBox ? { boardsPerBox: base.boardsPerBox } : {}),
+      unitLabel: base.unitLabel || "ea", onHand: 0,
+      notes: `Made from ${base.sku} on ${today()}.`,
+    };
+    onCreate(np);
+    onPick(np.id);
+    setOpen(false);
+  };
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)} className="text-xs" style={{ color: C.gold, fontWeight: 700, alignSelf: "center" }}>
+        + Other size or finish
+      </button>
+    );
+  }
+  const small = { ...inputStyle, width: 64, padding: "6px 8px" };
+  return (
+    <div className="w-full rounded-sm px-3 py-2 flex items-end gap-2 flex-wrap" style={{ background: "#FBF6EC", border: `1px solid ${C.gold}` }}>
+      <Field label="Width in" w={70}><input style={small} inputMode="numeric" value={w} onChange={(e) => setW(e.target.value.replace(/\D/g, "").slice(0, 2))} /></Field>
+      <Field label="Length in" w={70}><input style={small} inputMode="numeric" value={l} onChange={(e) => setL(e.target.value.replace(/\D/g, "").slice(0, 2))} /></Field>
+      <Field label="Finish" w={130}>
+        <select style={{ ...inputStyle, padding: "6px 8px" }} value={fin} onChange={(e) => setFin(e.target.value)}>
+          {Object.entries(FINISH_NAMES).map(([k, n]) => <option key={k} value={k}>{k} · {n}</option>)}
+        </select>
+      </Field>
+      <div className="flex items-center gap-2" style={{ paddingBottom: 6 }}>
+        <span style={{ fontFamily: MONO, fontWeight: 800 }}>{sku || "…"}</span>
+        <Btn kind="moss" onClick={make}>{existing ? "Use it" : "Create"}</Btn>
+        <Btn onClick={() => setOpen(false)}><X size={13} /></Btn>
+      </div>
     </div>
   );
 }
@@ -7937,6 +8011,7 @@ function SkuPicker({ products, value, onChange, onCreate, placeholder = "— Sel
       showStock
       style={{ marginTop: 8 }}
       onCreateNew={() => setCreating(true)}
+      onCreateProduct={onCreate}
     />
   );
 }
@@ -11399,6 +11474,7 @@ export default function App() {
           activeWO ? (
             <WorkOrderDetail
               wo={activeWO} customers={customers} products={products} goals={goals} sortLog={sortLog}
+              onCreateProduct={(np) => setProductsLogged([...products, np], { by: whoWorking })}
               history={woHistory} onLog={(label) => logWOEvent(activeWO.id, label)}
               updates={allCustomerUpdates.filter((u) => u.wo.id === activeWO.id)} sender={deviceUser} onCustomerUpdate={handleCustomerUpdate}
               onScheduleMe={scheduleMe}
