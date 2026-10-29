@@ -1356,7 +1356,10 @@ function buildUnitGraph(product) {
   if (Number(product?.planksPerBoard) > 0) addEdge("board", "plank", Number(product.planksPerBoard));
   const sfb = Number(product?.sfPerBoard) || (Number(product?.sfPerPlank) || 0) * (Number(product?.planksPerBoard) || 0);
   if (sfb > 0) addEdge("board", "sf", sfb);
-  if (Number(product?.boardsPerUnit) > 0) addEdge("pallet", "board", Number(product.boardsPerUnit));
+  // A unit (pallet) is the SKU's own count, or the company standard for
+  // its width (300 boards of 1x8, 400 of 1x6) when it doesn't say.
+  const bpu = Number(product?.boardsPerUnit) || standardBoardsPerUnit(product);
+  if (bpu > 0) addEdge("pallet", "board", bpu);
   if (Number(product?.boardsPerBox) > 0) addEdge("box", "board", Number(product.boardsPerBox));
   (product?.conversions || []).forEach((c) => {
     const qtyA = Number(c.qtyA), qtyB = Number(c.qtyB);
@@ -2575,15 +2578,7 @@ function WorkOrderBoard({ workOrders, customers, products, goals, onOpen, onNew,
                 <div className="mt-1.5 text-xs" style={{ fontFamily: MONO, color: C.faint }}>{w.lines?.length || 0} line{(w.lines?.length || 0) === 1 ? "" : "s"} · {w.date}</div>
                 <ClockBadge wo={w} goals={goals} />
               </button>
-              {w.status !== "shipped" && (
-                <button
-                  onClick={(e) => { e.stopPropagation(); onPushThrough(w.id); celebrateShipped(); }}
-                  className="mt-2 w-full text-center px-2 py-1.5 rounded-sm text-xs font-bold hover:opacity-85"
-                  style={{ background: C.moss, color: "#fff", fontFamily: MONO }}
-                >
-                  Push Through → Shipped
-                </button>
-              )}
+
             </div>
           ))}
         </div>
@@ -4149,7 +4144,6 @@ function WorkOrderDetail({ onCreateProduct, wo, customers, products, goals, sort
   // Stamp when it actually shipped. The ship date on the order is a plan;
   // without this there's no record of what really happened, so on-time
   // performance can only ever compare one guess against another.
-  const pushThrough = () => { update({ status: "shipped", shippedAt: new Date().toISOString() }); celebrateShipped(); };
   const reopen = () => update({ status: "not_started", shippedAt: "" });
 
 
@@ -4266,17 +4260,15 @@ function WorkOrderDetail({ onCreateProduct, wo, customers, products, goals, sort
 
         <div className="mt-2 flex gap-2 flex-wrap">
           {ACTIVE_WO_STATUSES.includes(wo.status) && (
-            <Btn kind="primary" onClick={() => setStartWorkOpen(true)} big>
+            <Btn kind="moss" onClick={() => setStartWorkOpen(true)} big>
               <Play size={16} /> Start Working
             </Btn>
           )}
-          {wo.status === "shipped" ? (
+          {/* Ero dropped "Push Through to Shipped" here (Oct 29): an order
+              moves to Shipped from its status, the board, or a bought label. */}
+          {wo.status === "shipped" && (
             <Btn kind="ghost" onClick={reopen}>
               <span>↺ Reopen</span>
-            </Btn>
-          ) : (
-            <Btn kind="moss" onClick={pushThrough} big>
-              <Check size={16} /> Push Through → Shipped
             </Btn>
           )}
         </div>
@@ -4307,13 +4299,14 @@ function WorkOrderDetail({ onCreateProduct, wo, customers, products, goals, sort
           const p = products.find((x) => x.id === line.productId);
           const displayUnit = line.displayUnit || "sf";
           return (
-            <div key={line.id} className="px-4 py-3 flex items-start gap-3" style={{ borderBottom: `1px solid ${C.kraft}`, background: line.done ? C.paper : "transparent" }}>
+            <div key={line.id} className="px-3 py-3 flex items-start gap-2" style={{ borderBottom: `1px solid ${C.kraft}`, background: line.done ? C.paper : "transparent" }}>
               <button
                 onClick={() => updateLine(line.id, { done: !line.done })}
-                className="shrink-0 mt-0.5 flex items-center justify-center rounded-sm"
-                style={{ width: 26, height: 26, border: `2px solid ${line.done ? C.moss : C.kraftDark}`, background: line.done ? C.moss : "transparent" }}
+                title={line.done ? "Done. Tap to undo" : "Tap when this line is pulled or made"}
+                className="shrink-0 mt-2.5 flex items-center justify-center rounded-sm"
+                style={{ width: 18, height: 18, border: `1.5px solid ${line.done ? C.moss : C.kraftDark}`, background: line.done ? C.moss : "transparent" }}
               >
-                {line.done && <Check size={16} color="#fff" />}
+                {line.done && <Check size={12} color="#fff" />}
               </button>
               <div className="flex-1 min-w-0">
                 <ProductPicker
@@ -6205,7 +6198,20 @@ const SHIPPER = {
   address: "15775 Celestial Valley Road",
   cityStateZip: "North San Juan, CA 95960",
 };
-const LBS_PER_SF = 1.5;
+// Shipping weight per square foot from the board's thickness. Dry
+// reclaimed redwood runs about 28 lb a cubic foot, which is 2.33 lb per SF
+// per inch of real thickness. A "1" in the catalog is nominal 1x, really
+// 3/4", so 1.75 lb/SF; 5/16" thin S3S about 0.73; 9/16" slat lap 1.31.
+// Checked against our own boxes: 10 boards of 1x8x5 (25 SF) ship at 48 lb,
+// a box of slat lap (25 SF) at 31 lb. A product can override with lbsPerSF.
+const PALLET_LBS = 40;
+function lbsPerSFFor(p) {
+  if (Number(p?.lbsPerSF) > 0) return Number(p.lbsPerSF);
+  const t = Number(p?.thickness);
+  if (!(t > 0)) return 1.75;
+  const actual = t >= 1 ? t - 0.25 : t;
+  return Math.round(actual * 2.33 * 100) / 100;
+}
 
 /* ---------------- Drop ship ----------------
    A distributor (Rockin Wood, say) orders from us as the manufacturer and
@@ -6588,7 +6594,13 @@ function BOLModal({ wo, customer, products, onClose }) {
     return sum + convertQty(product, Number(l.qtySF) || 0, "sf", "pallet");
   }, 0);
   const [pallets, setPallets] = useState(estimatedPallets > 0 ? String(Math.ceil(estimatedPallets)) : "");
-  const [weight, setWeight] = useState(String(Math.round(totalSF * LBS_PER_SF)));
+  // Each line at its own thickness, plus the pallets themselves.
+  const woodLbs = (wo.lines || []).reduce((sum, l) => {
+    const product = products.find((p) => p.id === l.productId);
+    if (product && (product.category === "packing" || isService(product))) return sum;
+    return sum + (Number(l.qtySF) || 0) * lbsPerSFFor(product);
+  }, 0);
+  const [weight, setWeight] = useState(String(Math.round((woodLbs + Math.ceil(estimatedPallets) * PALLET_LBS) / 10) * 10));
   const [date, setDate] = useState(today());
   const [carrier, setCarrier] = useState(wo.shipVia || "");
   const bolNumber = `BOL-${wo.number}`;
@@ -7043,7 +7055,7 @@ function ProductPicker({ products, value, onChange, placeholder = "Pick a produc
               {list.map((f) => (
                 <option key={f.key} value={`fam:${f.key}`}>
                   {f.favorite ? "★ " : ""}{f.skuRoot}{f.label && f.label !== f.skuRoot ? ` · ${f.label}` : ""}
-                  {f.members.length > 1 ? ` (${f.members.length})` : stock(f.members[0])}
+                  {f.members.length > 1 ? "" : stock(f.members[0])}
                 </option>
               ))}
             </optgroup>
@@ -7154,9 +7166,18 @@ function boardsPerPalletFor(products, sku) {
   const direct = Number(exact?.boardsPerUnit) || 0;
   if (direct > 0) return direct;
   const size = skuSizeKey(sku);
-  if (!size) return 0;
-  const sibling = products.find((p) => skuSizeKey(p.sku) === size && Number(p.boardsPerUnit) > 0);
-  return Number(sibling?.boardsPerUnit) || 0;
+  const sibling = size && products.find((p) => skuSizeKey(p.sku) === size && Number(p.boardsPerUnit) > 0);
+  if (sibling) return Number(sibling.boardsPerUnit);
+  return standardBoardsPerUnit(exact);
+}
+// Company standard when a SKU doesn't say (Ero, Oct 29): a unit of 1x8 is
+// 300 boards and a unit of 1x6 is 400, whatever the length. One-off units
+// (a special order) just get their count typed on the line.
+function standardBoardsPerUnit(p) {
+  const w = Number(p?.widthIn) || Number((/^1(\d{1,2})\d$/.exec(String(p?.sku || "").replace(/[^0-9]/g, "").slice(0, 3)) || [])[1]) || 0;
+  if (Math.round(w) === 8) return 300;
+  if (Math.round(w) === 6) return 400;
+  return 0;
 }
 
 function vendorPriceFor(supplier, sku, painted) {
@@ -11491,7 +11512,7 @@ export default function App() {
               wo={activeWO} customers={customers} products={products} goals={goals} sortLog={sortLog}
               onCreateProduct={(np) => setProductsLogged([...products, np], { by: whoWorking })}
               history={woHistory} onLog={(label) => logWOEvent(activeWO.id, label)}
-              updates={allCustomerUpdates.filter((u) => u.wo.id === activeWO.id)} sender={deviceUser} onCustomerUpdate={handleCustomerUpdate}
+              updates={allCustomerUpdates.filter((u) => u.wo.id === activeWO.id && u.handled?.how !== "skipped")} sender={deviceUser} onCustomerUpdate={handleCustomerUpdate}
               onScheduleMe={scheduleMe}
               onChange={updateWO} onDelete={() => deleteWO(activeWO.id)} onBack={() => setActiveWOId(null)}
               team={team} whoWorking={whoWorking} setWhoWorking={setWhoWorking} onAddTeamMember={addTeamMember}
