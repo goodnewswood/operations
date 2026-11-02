@@ -3814,7 +3814,7 @@ const TRACK_STATUS = {
 // Box templates rarely change, so one fetch per app load is plenty.
 let boxTemplatesCache = null;
 
-function ShippingPanel({ wo, customer, onChange }) {
+function ShippingPanel({ wo, customer, products, onChange }) {
   // Buying is async, and the order can change while it waits (someone
   // ticks a line). Save onto whatever the order is by then, not the copy
   // from when the button was pressed.
@@ -3842,15 +3842,34 @@ function ShippingPanel({ wo, customer, onChange }) {
   const shipReference = [wo.customerPO, wo.number, to.company || to.name || customer?.company].filter(Boolean).join(" / ");
   const domestic = isUS(to.country);
 
+  // Shows a saved Shippo box by name when one is the same size, whichever
+  // way round its sides were typed in (7x7x48 or 48x7x7).
+  const sameSize = (a, b) => [a.length, a.width, a.height].map(Number).sort((x, y) => x - y).join("x") === [b.length, b.width, b.height].map(Number).sort((x, y) => x - y).join("x");
+  const nameBoxes = (ps, templates) => ps.map((p) => {
+    if (p.boxId) return p;
+    const t = templates.find((b) => sameSize(b, p));
+    return t ? { ...p, boxId: t.id } : p;
+  });
+
   const startBuy = async () => {
     setMode("buy"); setRates(null); setErr(""); setBought(null); setMessages([]);
-    if (!parcels.length) setParcels([{ key: uid(), boxId: "", length: "", width: "", height: "", weight: "", count: 1 }]);
+    let start = parcels;
+    if (!start.length) {
+      // Starts from each product's default box and count (Products tab),
+      // or one blank box when none of the lines has one set.
+      const defaults = defaultParcelsFor(wo, products);
+      start = defaults.length
+        ? defaults.map((g) => ({ key: uid(), boxId: "", length: String(g.length), width: String(g.width), height: String(g.height), weight: String(g.weight), count: g.count, from: g.label }))
+        : [{ key: uid(), boxId: "", length: "", width: "", height: "", weight: "", count: 1 }];
+      setParcels(boxTemplatesCache ? nameBoxes(start, boxTemplatesCache) : start);
+    }
     if (boxTemplatesCache) return;
     setBusy("boxes");
     try {
       const d = await gnwsApi("/api/shippo", { action: "boxes" });
       boxTemplatesCache = d.boxes || [];
       setBoxes(boxTemplatesCache);
+      setParcels((ps) => nameBoxes(ps, boxTemplatesCache));
     } catch (e) { setErr(e.message); }
     finally { setBusy(""); }
   };
@@ -4025,6 +4044,11 @@ function ShippingPanel({ wo, customer, onChange }) {
           ) : (
             <>
               <div className="mt-2">
+                {parcels.some((p) => p.from) && (
+                  <div className="mb-2" style={{ fontSize: 11, color: C.faint }}>
+                    Filled in from each product's default box ({[...new Set(parcels.map((p) => p.from).filter(Boolean))].join(", ")}). Weights are worked out from the wood, so change anything that's packed differently.
+                  </div>
+                )}
                 {parcels.map((p, idx) => (
                   <div key={p.key} className="flex gap-2 flex-wrap items-end mb-2">
                     <Field label={idx === 0 ? "Box" : ""} w={200}>
@@ -4413,7 +4437,7 @@ function WorkOrderDetail({ onCreateProduct, wo, customers, products, goals, sort
 
       <LaborPanel wo={wo} goals={goals} sortLog={sortLog} onClockChange={(clock) => update({ clock })} />
 
-      <ShippingPanel wo={wo} customer={customer} onChange={onChange} />
+      <ShippingPanel wo={wo} customer={customer} products={products} onChange={onChange} />
 
       <div className="flex gap-2 mb-8 flex-wrap">
         <Btn kind="primary" onClick={() => setWoPrintOpen(true)}><Printer size={14} /> Print Work Order</Btn>
@@ -4961,12 +4985,26 @@ function InventoryDetail({ product, products, invLog, onChange, onBack, onDelete
             </div>
           </Field>
         ) : category === "packing" ? (
-          <Field label="On hand">
-            <div className="flex items-center gap-1">
-              <input type="number" style={{ ...inputStyle, textAlign: "right", fontFamily: MONO }} value={p.onHand ?? ""} onChange={(e) => update({ onHand: e.target.value })} />
-              <input style={{ ...inputStyle, width: 70, fontSize: 12 }} value={p.unitLabel || ""} placeholder="ea" onChange={(e) => update({ unitLabel: e.target.value })} />
+          <>
+            <Field label="On hand">
+              <div className="flex items-center gap-1">
+                <input type="number" style={{ ...inputStyle, textAlign: "right", fontFamily: MONO }} value={p.onHand ?? ""} onChange={(e) => update({ onHand: e.target.value })} />
+                <input style={{ ...inputStyle, width: 70, fontSize: 12 }} value={p.unitLabel || ""} placeholder="ea" onChange={(e) => update({ unitLabel: e.target.value })} />
+              </div>
+            </Field>
+            {/* A box's outside size is what the carrier charges on, so the
+                Shipping panel fills it in from here for any product that
+                packs into this box. Empty weight gets added to the wood. */}
+            <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
+              <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, color: C.gold }}>Box size for shipping (outside, inches)</div>
+              <div className="grid grid-cols-4 gap-2">
+                <Field label="Length"><input type="number" style={inputStyle} value={p.boxL ?? ""} placeholder="—" onChange={(e) => update({ boxL: e.target.value })} /></Field>
+                <Field label="Width"><input type="number" style={inputStyle} value={p.boxW ?? ""} placeholder="—" onChange={(e) => update({ boxW: e.target.value })} /></Field>
+                <Field label="Height"><input type="number" style={inputStyle} value={p.boxH ?? ""} placeholder="—" onChange={(e) => update({ boxH: e.target.value })} /></Field>
+                <Field label="Empty lbs"><input type="number" style={inputStyle} value={p.boxLbs ?? ""} placeholder={String(EMPTY_BOX_LBS)} onChange={(e) => update({ boxLbs: e.target.value })} /></Field>
+              </div>
             </div>
-          </Field>
+          </>
         ) : (
           <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
             <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 2, color: C.gold }}>On hand by condition</div>
@@ -5021,14 +5059,17 @@ function InventoryDetail({ product, products, invLog, onChange, onBack, onDelete
                   16 boards doesn't say which box off the shelf to grab, and
                   that was being worked out fresh on every order. */}
               <div className="mt-2">
-                <Field label="Packs into">
+                <Field label="Default box">
                   <select style={inputStyle} value={p.boxProductId || ""} onChange={(e) => update({ boxProductId: e.target.value })}>
                     <option value="">— No box set —</option>
                     {products.filter((x) => x.category === "packing" && !x.archived).map((x) => (
-                      <option key={x.id} value={x.id}>{x.sku} — {x.name}</option>
+                      <option key={x.id} value={x.id}>{x.sku} — {x.name}{boxDims(x) ? "" : " (no size set)"}</option>
                     ))}
                   </select>
                 </Field>
+                <div className="text-xs mt-1" style={{ color: C.faint }}>
+                  The Shipping panel starts with this box, and with as many as the order needs at {p.boardsPerBox || "the boards-per-box count"} per box.
+                </div>
               </div>
             </div>
 
@@ -6213,6 +6254,54 @@ function lbsPerSFFor(p) {
   return Math.round(actual * 2.33 * 100) / 100;
 }
 
+// Default boxes. A product says which box it packs into (boxProductId, a
+// packing SKU) and how many boards a box holds; the box says its outside
+// size. From those, an order line knows how many boxes it fills and what
+// each one weighs, so the Shipping panel can start filled in instead of
+// the crew working it out on every order.
+const EMPTY_BOX_LBS = 2;
+function boxDims(box) {
+  const l = Number(box?.boxL), w = Number(box?.boxW), h = Number(box?.boxH);
+  return l > 0 && w > 0 && h > 0 ? { length: l, width: w, height: h } : null;
+}
+function boxPlanFor(product, qtySF, products) {
+  const sf = Number(qtySF) || 0;
+  const box = product?.boxProductId ? products?.find((x) => x.id === product.boxProductId) : null;
+  const dims = boxDims(box);
+  if (!dims || !(sf > 0)) return null;
+  // Without a boards-per-box count it can't split the line, so it's one box.
+  const perBoxSF = unitReaches(product, "sf", "box") ? convertQty(product, 1, "box", "sf") : sf;
+  const count = Math.max(1, Math.ceil(sf / perBoxSF - 1e-9));
+  const lastSF = sf - (count - 1) * perBoxSF;
+  const lbs = lbsPerSFFor(product);
+  const empty = Number(box.boxLbs) > 0 ? Number(box.boxLbs) : EMPTY_BOX_LBS;
+  return {
+    box, dims, count,
+    fullLbs: Math.ceil(perBoxSF * lbs + empty),
+    lastLbs: Math.ceil(lastSF * lbs + empty),
+  };
+}
+// The Shipping panel's starting boxes for a whole order: every line's
+// boxes, with full ones and the partly filled last one kept apart since
+// they weigh different amounts, and same-size, same-weight boxes merged.
+function defaultParcelsFor(wo, products) {
+  const groups = [];
+  const add = (dims, weight, count, label) => {
+    const hit = groups.find((g) => g.length === dims.length && g.width === dims.width && g.height === dims.height && g.weight === weight);
+    if (hit) { hit.count += count; return; }
+    groups.push({ ...dims, weight, count, label });
+  };
+  (wo?.lines || []).forEach((l) => {
+    const product = products?.find((x) => x.id === l.productId);
+    if (!product || product.category === "packing" || isService(product)) return;
+    const plan = boxPlanFor(product, l.qtySF, products);
+    if (!plan) return;
+    if (plan.count > 1) add(plan.dims, plan.fullLbs, plan.count - 1, plan.box.sku);
+    add(plan.dims, plan.lastLbs, 1, plan.box.sku);
+  });
+  return groups;
+}
+
 /* ---------------- Drop ship ----------------
    A distributor (Rockin Wood, say) orders from us as the manufacturer and
    we ship straight to their customer. The order's customer stays the
@@ -7119,6 +7208,9 @@ function SizeVariantMaker({ base, products, onCreate, onPick }) {
       steps, conversions: (base.conversions || []).map((c) => ({ ...c, key: uid() })),
       ...(base.boardsPerUnit ? { boardsPerUnit: base.boardsPerUnit } : {}),
       ...(base.boardsPerBox ? { boardsPerBox: base.boardsPerBox } : {}),
+      // Same length packs into the same box. A longer cut needs a longer
+      // box, so that's left for someone to pick.
+      ...(base.boxProductId && String(base.lengthIn) === String(l) ? { boxProductId: base.boxProductId } : {}),
       unitLabel: base.unitLabel || "ea", onHand: 0,
       notes: `Made from ${base.sku} on ${today()}.`,
     };
