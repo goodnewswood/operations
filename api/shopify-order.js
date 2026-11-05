@@ -70,11 +70,17 @@ export function toIntakeOrder(o) {
 }
 
 export async function POST(request) {
-  const secret = process.env.SHOPIFY_WEBHOOK_SECRET;
+  // Trimmed: a secret pasted into Vercel with a stray space or line break
+  // would otherwise fail every signature check without saying why.
+  const secret = (process.env.SHOPIFY_WEBHOOK_SECRET || "").trim();
   if (!secret) return Response.json({ error: "webhook secret isn't configured" }, { status: 503 });
 
   const raw = Buffer.from(await request.arrayBuffer());
   if (!signatureOk(raw, request.headers.get("x-shopify-hmac-sha256"), secret)) {
+    // Logged so a turned-away order leaves a trace (Shopify #71053 didn't).
+    // Only what's safe to show: which topic, whether a signature came at
+    // all, and the secret's length. Never the secret or the signature.
+    console.error(`[shopify-order] signature rejected: topic ${request.headers.get("x-shopify-topic") || "?"}, shop ${request.headers.get("x-shopify-shop-domain") || "?"}, signature ${request.headers.get("x-shopify-hmac-sha256") ? "present" : "missing"}, body ${raw.length} bytes, secret ${secret.length} chars`);
     return Response.json({ error: "invalid signature" }, { status: 401 });
   }
 
