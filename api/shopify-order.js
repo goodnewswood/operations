@@ -90,7 +90,11 @@ export async function POST(request) {
   let order;
   try { order = JSON.parse(raw.toString("utf8")); } catch { return Response.json({ error: "body isn't JSON" }, { status: 400 }); }
   const label = `Shopify #${order.order_number ?? order.name ?? "?"}`;
-  if (order.test) return Response.json({ status: "ignored", reason: "test order", order: label });
+  if (order.test) {
+    // Logged so "Send test" in Shopify shows up as proof the hookup works.
+    console.log(`[shopify-order] ${label} test notification received, signature ok, topic ${topic || "?"}`);
+    return Response.json({ status: "ignored", reason: "test order", order: label });
+  }
 
   // Cancelled (Ero set up a second webhook for orders/cancelled): flag the
   // order's sales order and work order so it doesn't get milled or shipped.
