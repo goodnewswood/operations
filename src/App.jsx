@@ -2219,11 +2219,17 @@ function WoStar({ wo, onToggle, size = 16 }) {
 }
 
 // Manual order: cards someone has placed keep their spot, and anything
-// never placed falls in after them by ready date.
+// never placed falls in after them, oldest first, so a new order lands at
+// the bottom of the column instead of jumping ahead of what's already
+// waiting (Ero, Nov 5). The WO number carries the day and sequence, so it
+// breaks ties when two orders have no creation time.
+const createdKey = (w) => `${w.createdAt || w.date || ""}|${w.number || ""}`;
 const byBoardRank = (a, b) => {
   const A = Number.isFinite(a.rank) ? a.rank : Infinity;
   const B = Number.isFinite(b.rank) ? b.rank : Infinity;
-  return A === B ? byReadyDate(a, b) : A - B;
+  if (A !== B) return A - B;
+  const ca = createdKey(a), cb = createdKey(b);
+  return ca < cb ? -1 : ca > cb ? 1 : 0;
 };
 
 /* Kanban view of the shop floor: one column per pipeline stage. Drag a
@@ -2456,10 +2462,13 @@ function woLineSummary(wo, products, max = 3) {
 // no ready date ahead of the job shipping tomorrow.
 const byReadyDate = (a, b) => {
   const A = a.readyByDate || "", B = b.readyByDate || "";
-  if (!A && !B) return 0;
+  if (!A && !B) { const ca = createdKey(a), cb = createdKey(b); return ca < cb ? -1 : ca > cb ? 1 : 0; }
   if (!A) return 1;
   if (!B) return -1;
-  return A < B ? -1 : A > B ? 1 : 0;
+  if (A !== B) return A < B ? -1 : 1;
+  // Same day: the one that came in first stays first.
+  const ca = createdKey(a), cb = createdKey(b);
+  return ca < cb ? -1 : ca > cb ? 1 : 0;
 };
 
 function WorkOrderBoard({ workOrders, customers, products, goals, onOpen, onNew, onImport, onPushThrough, onMove, onToggleStar }) {
@@ -2472,10 +2481,14 @@ function WorkOrderBoard({ workOrders, customers, products, goals, onOpen, onNew,
   const setView = (v) => { _setView(v); try { localStorage.setItem("gnws-nav-woview", v); } catch { /* private browsing */ } };
   // Sort sticks like the view does. Dragging a card into place switches to
   // Manual, since any other sort would snap it straight back out.
+  // Manual is the default: the board reads as the line of jobs in the order
+  // they came in or were dragged into, with new orders joining the bottom.
+  // Sorting by ready date put every new web order (ready tomorrow) on top.
+  // The key changed on Nov 5 so every device starts over on Manual.
   const [sort, _setSort] = useState(() => {
-    try { return localStorage.getItem("gnws-nav-wosort") || "ready"; } catch { return "ready"; }
+    try { return localStorage.getItem("gnws-nav-wosort-v2") || "manual"; } catch { return "manual"; }
   });
-  const setSort = (s) => { _setSort(s); try { localStorage.setItem("gnws-nav-wosort", s); } catch { /* private browsing */ } };
+  const setSort = (s) => { _setSort(s); try { localStorage.setItem("gnws-nav-wosort-v2", s); } catch { /* private browsing */ } };
 
   const archivedCount = workOrders.filter((w) => w.archived).length;
   const shown = workOrders
