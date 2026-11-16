@@ -8,7 +8,7 @@ import {
   Ruler, Palette, StickyNote, ClipboardList, Truck, RefreshCw,
   Play, Pause, Square, Timer, CalendarDays, Tag, QrCode, Printer,
   FileText, X, Search, Pencil, Star, Settings, Menu, ExternalLink,
-  Archive, RotateCcw, GripVertical, Mail, Camera, ChevronRight
+  Archive, RotateCcw, GripVertical, Mail, Camera, ChevronRight, ListChecks
 } from "lucide-react";
 
 /* ============================================================
@@ -74,6 +74,7 @@ const KEY = {
   invLog: "gnws-shared-invlog-v1",
   woHistory: "gnws-shared-wohistory-v1",
   schedule: "gnws-shared-schedule-v1",
+  tasks: "gnws-shared-tasks-v1",
   // GNWS Office owns these. Ops loads them only so a work order edit can
   // carry its dates and customer up to them (see carryWorkOrderUp).
   quotes: "gnws-shared-quotes-v1",
@@ -2429,6 +2430,7 @@ function WorkOrderKanban({ workOrders, products, goals, onOpen, onMove, onToggle
                         {woLineSummary(w, products, 2)}
                       </div>
                     )}
+                    <AssigneeTags names={w.assignees} />
                     <ClockBadge wo={w} goals={goals} />
                   </div>
                 );
@@ -2451,7 +2453,14 @@ function woLineSummary(wo, products, max = 3) {
     const label = p?.sku || (l.desc || "").trim() || "—";
     const qty = Number(l.qtySF) || 0;
     if (isService(p)) return qty ? `${label} × ${fmtConv(qty)}` : label;
-    return qty ? `${label} ${fmtConv(qty)} SF` : label;
+    if (!qty) return label;
+    // "SHP-748-NAT 100 SF (45 planks, 3 bx)": the counts the crew pulls by.
+    const c = lineCounts(p, qty);
+    const extra = [
+      c?.pieces ? `${Math.ceil(c.pieces - 1e-9)} ${unitLabel(c.piece)}` : "",
+      c?.boxes ? `${c.boxes} bx` : "",
+    ].filter(Boolean).join(", ");
+    return `${label} ${fmtConv(qty)} SF${extra ? ` (${extra})` : ""}`;
   });
   const head = parts.slice(0, max).join(" · ");
   return parts.length > max ? `${head} +${parts.length - max} more` : head;
@@ -2589,6 +2598,7 @@ function WorkOrderBoard({ workOrders, customers, products, goals, onOpen, onNew,
                   </div>
                 )}
                 <div className="mt-1.5 text-xs" style={{ fontFamily: MONO, color: C.faint }}>{w.lines?.length || 0} line{(w.lines?.length || 0) === 1 ? "" : "s"} · {w.date}</div>
+                <AssigneeTags names={w.assignees} />
                 <ClockBadge wo={w} goals={goals} />
               </button>
 
@@ -2600,53 +2610,95 @@ function WorkOrderBoard({ workOrders, customers, products, goals, onOpen, onNew,
   );
 }
 
-/* The square-foot math the crew was redoing by hand on every order: what
-   one piece covers, how many pieces the line works out to, and which box
-   it packs into. Only states what the SKU can actually prove — a product
-   with no plank or box conversion set says so rather than showing a
-   number derived from nothing. */
-function LineMath({ product, qtySF, products }) {
-  if (!product) return null;
+/* A number box that lets you type freely ("4", "4.", "4.5") and only
+   hands the number back as you go, so typing in one count doesn't get
+   fought by the others rewriting it on every keystroke. */
+function CountField({ value, onCommit, width = 76, label }) {
+  const [draft, setDraft] = useState(null);
+  const shown = draft ?? (value === "" || value == null ? "" : String(value));
+  return (
+    <label className="flex items-center gap-1" style={{ fontFamily: MONO, fontSize: 11.5 }}>
+      <input
+        type="number" inputMode="decimal" min="0"
+        style={{ ...inputStyle, width, padding: "5px 6px", textAlign: "right", fontFamily: MONO, fontSize: 12.5 }}
+        value={shown}
+        onFocus={() => setDraft(shown)}
+        onChange={(e) => {
+          setDraft(e.target.value);
+          const n = Number(e.target.value);
+          if (e.target.value !== "" && Number.isFinite(n) && n >= 0) onCommit(n);
+        }}
+        onBlur={() => setDraft(null)}
+      />
+      <span style={{ color: C.faint }}>{label}</span>
+    </label>
+  );
+}
+
+/* How many pieces and boxes a line's square feet works out to. Pieces are
+   planks when the SKU knows its plank size, otherwise boards. Only counts
+   the SKU can actually prove: no box conversion, no box count. */
+function lineCounts(product, qtySF) {
+  if (!product || !hasSF(product)) return null;
   const sf = Number(qtySF) || 0;
-  const per = (unit) => (unitReaches(product, unit, "sf") ? convertQty(product, 1, unit, "sf") : null);
-  const sfPerPlank = per("plank");
-  const sfPerBoard = per("board");
+  const piece = unitReaches(product, "plank", "sf") ? "plank" : unitReaches(product, "board", "sf") ? "board" : null;
+  const sfPerPiece = piece ? convertQty(product, 1, piece, "sf") : null;
+  const sfPerBox = unitReaches(product, "sf", "box") ? convertQty(product, 1, "box", "sf") : null;
+  const perBox = piece && sfPerBox ? convertQty(product, 1, "box", piece) : null;
+  return {
+    sf, piece, sfPerPiece, sfPerBox, perBox,
+    pieces: sfPerPiece ? sf / sfPerPiece : null,
+    boxes: sfPerBox ? (sf > 0 ? Math.max(1, Math.ceil(sf / sfPerBox - 1e-9)) : 0) : null,
+  };
+}
+const roundCount = (n) => (n == null ? "" : Math.round(n * 10) / 10);
 
+/* The square feet, pieces and boxes on a work order line, all editable:
+   change any one and the other two follow (Ero, Nov 16). Square feet is
+   what's stored; pieces and boxes are worked out from the SKU's sizes.
+   Typing a box count means full boxes, so it sets the square feet to
+   exactly that many boxes' worth. */
+function LineMath({ product, qtySF, products, onChange, displayUnit, onDisplayUnitChange }) {
+  const c = lineCounts(product, qtySF);
+  if (!c) return null;
+  // Units beyond these three (pallets, say) still get their own box.
+  const extraUnits = unitsFor(product).filter((u) => !["sf", "plank", "board", "box"].includes(u) && unitReaches(product, u, "sf"));
+  const allUnits = unitsFor(product);
+  const set = (sf) => onChange?.(Math.round(sf * 100) / 100);
+  const box = products?.find((x) => x.id === product.boxProductId);
+  const last = c.perBox && c.boxes ? Math.round((c.pieces - (c.boxes - 1) * c.perBox) * 10) / 10 : null;
   const each = [];
-  if (sfPerPlank) each.push(`1 plank = ${fmtConv(sfPerPlank)} SF`);
-  if (sfPerBoard) each.push(`1 board = ${fmtConv(sfPerBoard)} SF`);
-
-  const totals = [];
-  if (sf > 0) {
-    if (sfPerPlank) totals.push(`${fmtConv(sf / sfPerPlank)} planks`);
-    if (sfPerBoard) totals.push(`${fmtConv(sf / sfPerBoard)} boards`);
-    // Whole boxes, since nobody ships 1.67 of one, plus how full each gets:
-    // "2 boxes BOX8860 (36 planks per box, last box 24)".
-    if (unitReaches(product, "sf", "box")) {
-      const piece = sfPerPlank ? "plank" : "board";
-      const perBox = convertQty(product, 1, "box", piece);
-      const pieces = convertQty(product, sf, "sf", piece);
-      const whole = Math.max(1, Math.ceil(pieces / perBox - 1e-9));
-      const last = Math.round((pieces - (whole - 1) * perBox) * 10) / 10;
-      const box = products?.find((x) => x.id === product.boxProductId);
-      const fill = whole > 1 && last < perBox ? `, last box ${fmtConv(last)}` : whole === 1 ? `, this one holds ${fmtConv(last)}` : "";
-      totals.push(`${whole} box${whole === 1 ? "" : "es"}${box ? ` ${box.sku}` : ""} (${fmtConv(perBox)} ${unitLabel(piece)} per box${fill})`);
-    }
-  }
-
-  if (!each.length && !totals.length) return null;
-  const missing = !unitReaches(product, "sf", "box");
+  if (c.sfPerPiece) each.push(`1 ${c.piece} = ${fmtConv(c.sfPerPiece)} SF`);
+  if (c.perBox) each.push(`${fmtConv(c.perBox)} ${unitLabel(c.piece)} per box${box ? ` (${box.sku})` : ""}`);
+  if (c.boxes > 1 && last != null && last < c.perBox) each.push(`last box ${fmtConv(last)}`);
   return (
     <div className="mt-1.5 px-2 py-1.5 rounded-sm" style={{ background: "#F3F5F0", border: `1px solid ${C.kraft}` }}>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+        <CountField value={roundCount(c.sf)} label="SF" onCommit={(n) => set(n)} />
+        {c.sfPerPiece && (
+          <CountField value={roundCount(c.pieces)} label={unitLabel(c.piece)} onCommit={(n) => set(n * c.sfPerPiece)} />
+        )}
+        {c.sfPerBox && (
+          <CountField value={c.boxes} width={60} label={c.boxes === 1 ? "box" : "boxes"} onCommit={(n) => set(Math.round(n) * c.sfPerBox)} />
+        )}
+        {extraUnits.map((u) => {
+          const per = convertQty(product, 1, u, "sf");
+          return <CountField key={u} value={roundCount(c.sf / per)} width={60} label={unitLabel(u)} onCommit={(n) => set(n * per)} />;
+        })}
+        {onDisplayUnitChange && allUnits.length > 1 && (
+          <label className="flex items-center gap-1" style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint }} title="Which count the order and its paperwork show">
+            order in
+            <select value={displayUnit || "sf"} onChange={(e) => onDisplayUnitChange(e.target.value)}
+              style={{ ...inputStyle, width: "auto", padding: "4px 4px", fontFamily: MONO, fontSize: 11 }}>
+              {allUnits.map((u) => <option key={u} value={u}>{unitLabel(u)}</option>)}
+            </select>
+          </label>
+        )}
+      </div>
       {each.length > 0 && (
-        <div style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>{each.join("   ·   ")}</div>
+        <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint, marginTop: 4 }}>{each.join("   ·   ")}</div>
       )}
-      {totals.length > 0 && (
-        <div style={{ fontFamily: MONO, fontSize: 11.5, fontWeight: 700, color: C.ink, marginTop: each.length ? 2 : 0 }}>
-          {fmtConv(sf)} SF = {totals.join("  ·  ")}
-        </div>
-      )}
-      {missing && (
+      {!c.sfPerBox && (
         <div style={{ fontFamily: MONO, fontSize: 10, color: C.faint, marginTop: 2 }}>
           set boards-per-box on {product.sku} to get box counts
         </div>
@@ -3290,6 +3342,7 @@ function describeWOChanges(a, b, { customers, products, statusLabel }) {
   change("customer", "Customer", customer(a.customerId), customer(b.customerId));
   change("brand", "Prints under", brand(a.brand), brand(b.brand));
   change("date", "Order date", a.date, b.date, true);
+  change("assignees", "Assigned to", (a.assignees || []).join(", "), (b.assignees || []).join(", "));
   change("readyByDate", "Ready by", a.readyByDate, b.readyByDate, true);
   change("shipDate", "Ship date", a.shipDate, b.shipDate, true);
   change("shipTime", "Ship time", a.shipTime, b.shipTime, true);
@@ -3445,6 +3498,44 @@ function DeviceUserPicker({ team, value, onChange }) {
         {names.map((n) => <option key={n} value={n} style={{ color: C.ink }}>{n}</option>)}
       </select>
     </label>
+  );
+}
+
+// Who's on this order. Tap names to put them on or take them off; the
+// order then shows on the board card and in that person's My Week tab.
+// Names come from the crew list (Settings), plus anyone already on it.
+function AssigneePicker({ team, value, onChange, me }) {
+  const on = value || [];
+  const names = [...new Set([...(team || []), ...on])];
+  const toggle = (n) => onChange(on.includes(n) ? on.filter((x) => x !== n) : [...on, n]);
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {names.map((n) => {
+        const picked = on.includes(n);
+        return (
+          <button
+            key={n} type="button" onClick={() => toggle(n)}
+            className="px-2.5 py-1 rounded-sm"
+            style={{ fontFamily: MONO, fontSize: 12, fontWeight: picked ? 800 : 400, background: picked ? C.moss : "transparent", color: picked ? "#fff" : C.ink, border: `1px solid ${picked ? C.moss : C.kraftDark}` }}
+          >
+            {picked ? "✓ " : ""}{n}{n === me ? " (me)" : ""}
+          </button>
+        );
+      })}
+      {!names.length && <span style={{ fontSize: 12, color: C.faint }}>Add crew names in Settings first.</span>}
+    </div>
+  );
+}
+
+// A row of small name tags for a board card.
+function AssigneeTags({ names }) {
+  if (!names?.length) return null;
+  return (
+    <div className="mt-1 flex flex-wrap gap-1">
+      {names.map((n) => (
+        <span key={n} className="px-1.5 rounded-sm" style={{ fontFamily: MONO, fontSize: 10, fontWeight: 700, background: "#E7EEE3", color: C.moss, border: `1px solid ${C.moss}` }}>{n}</span>
+      ))}
+    </div>
   );
 }
 
@@ -4127,7 +4218,7 @@ function ShippingPanel({ wo, customer, products, onChange }) {
   );
 }
 
-function WorkOrderDetail({ onCreateProduct, wo, customers, products, goals, sortLog, history, onLog, updates, sender, onCustomerUpdate, onScheduleMe, onChange, onDelete, onBack, team, whoWorking, setWhoWorking, onAddTeamMember, onUpdateCustomerSpec, onStartWork }) {
+function WorkOrderDetail({ me, onCreateProduct, wo, customers, products, goals, sortLog, history, onLog, updates, sender, onCustomerUpdate, onScheduleMe, onChange, onDelete, onBack, team, whoWorking, setWhoWorking, onAddTeamMember, onUpdateCustomerSpec, onStartWork }) {
   const customer = customers.find((c) => c.id === wo.customerId);
   const update = (patch) => onChange({ ...wo, ...patch });
   const [bolOpen, setBolOpen] = useState(false);
@@ -4318,6 +4409,11 @@ function WorkOrderDetail({ onCreateProduct, wo, customers, products, goals, sort
           <Field label="Ship time" w={120}><input type="time" style={inputStyle} value={wo.shipTime || ""} onChange={(e) => update({ shipTime: e.target.value })} /></Field>
           <Field label="Ship via" w={160}><input style={inputStyle} value={wo.shipVia || ""} onChange={(e) => update({ shipVia: e.target.value })} placeholder="Dry van, pickup…" /></Field>
         </div>
+        <div className="mt-3">
+          <Field label="Assigned to">
+            <AssigneePicker team={team} value={wo.assignees} me={me} onChange={(assignees) => update({ assignees })} />
+          </Field>
+        </div>
         <Field label="General notes">
           <textarea style={{ ...inputStyle, minHeight: 70, marginTop: 8 }} value={wo.notes || ""} onChange={(e) => update({ notes: e.target.value })} placeholder="Anything the crew needs to know…" />
         </Field>
@@ -4373,16 +4469,26 @@ function WorkOrderDetail({ onCreateProduct, wo, customers, products, goals, sort
                 {!line.productId && (
                   <input style={{ ...inputStyle, marginBottom: 4 }} placeholder="Describe item" value={line.desc || ""} onChange={(e) => updateLine(line.id, { desc: e.target.value })} />
                 )}
-                <UnitSwitchInput
-                  product={p}
-                  value={line.qtySF}
-                  canonicalUnit="sf"
-                  onChange={(v) => updateLine(line.id, { qtySF: v })}
-                  displayUnit={displayUnit}
-                  onDisplayUnitChange={(u) => updateLine(line.id, { displayUnit: u })}
-                  width={110}
-                />
-                <LineMath product={p} qtySF={line.qtySF} products={products} />
+                {/* Items with square feet get the linked SF / planks / boxes
+                    boxes; anything else (installs, paint, plain counts)
+                    keeps the single quantity box. */}
+                {lineCounts(p, line.qtySF) ? (
+                  <LineMath
+                    product={p} qtySF={line.qtySF} products={products}
+                    onChange={(v) => updateLine(line.id, { qtySF: v })}
+                    displayUnit={displayUnit} onDisplayUnitChange={(u) => updateLine(line.id, { displayUnit: u })}
+                  />
+                ) : (
+                  <UnitSwitchInput
+                    product={p}
+                    value={line.qtySF}
+                    canonicalUnit="sf"
+                    onChange={(v) => updateLine(line.id, { qtySF: v })}
+                    displayUnit={displayUnit}
+                    onDisplayUnitChange={(u) => updateLine(line.id, { displayUnit: u })}
+                    width={110}
+                  />
+                )}
                 <input className="mt-2" style={inputStyle} placeholder="Note for this line" value={line.note || ""} onChange={(e) => updateLine(line.id, { note: e.target.value })} />
 
                 {/* Spec lives on the line, not the customer. One order can mix
@@ -9425,6 +9531,151 @@ function ScheduleEditor({ row, team, workOrders, onSave, onDelete, onClose }) {
   );
 }
 
+/* My Week (Ero, Nov 16): one person's week on one screen. Their to-do
+   list for the week, the orders assigned to them on the board, and the
+   days they're on the schedule. Opens on whoever picked their name on
+   this device; tap another name to see or fill in theirs, so Ero can
+   hand out the week's tasks. A task not done by the end of its week
+   carries over and shows at the top of the next one until it's checked. */
+function MyWeekTab({ tasks, onChange, team, me, workOrders, schedule, products, onOpenWO }) {
+  const [person, setPerson] = useState(me || team[0] || "");
+  const [week, setWeek] = useState(() => weekStart(today()));
+  const [draft, setDraft] = useState("");
+  const thisWeek = weekStart(today());
+  const weekEnd = addDays(week, 6);
+
+  const mine = (tasks || []).filter((t) => t.person === person);
+  const forWeek = mine.filter((t) => t.week === week);
+  // Unfinished from earlier weeks only shows on the current week, so
+  // looking back at an old week shows what that week really held.
+  const carried = week === thisWeek ? mine.filter((t) => !t.done && t.week < week) : [];
+  const open = [...carried, ...forWeek.filter((t) => !t.done)];
+  const done = forWeek.filter((t) => t.done);
+
+  const add = () => {
+    const text = draft.trim();
+    if (!text || !person) return;
+    onChange([{ id: uid(), person, week, text, done: false, by: me || "", at: new Date().toISOString() }, ...(tasks || [])]);
+    setDraft("");
+  };
+  const patch = (id, fields) => onChange((tasks || []).map((t) => (t.id === id ? { ...t, ...fields } : t)));
+  const remove = (id) => onChange((tasks || []).filter((t) => t.id !== id));
+
+  const orders = (workOrders || [])
+    .filter((w) => (w.assignees || []).includes(person) && w.status !== "shipped" && !w.archived)
+    .sort(byBoardRank);
+  const shifts = (schedule || [])
+    .filter((x) => x.person === person && x.date >= week && x.date <= weekEnd)
+    .sort((a, b) => (a.date < b.date ? -1 : 1));
+  const woById = (id) => (workOrders || []).find((w) => w.id === id);
+
+  const card = { background: C.panel, border: `1px solid ${C.kraftDark}` };
+  const head = { fontWeight: 800, fontSize: 14 };
+
+  // A plain function, not a component, so typing in a task keeps focus.
+  const taskRow = (t, old) => (
+    <div key={t.id} className="flex items-start gap-2 py-2" style={{ borderBottom: `1px solid ${C.kraft}` }}>
+      <button
+        onClick={() => patch(t.id, t.done ? { done: false, doneAt: null } : { done: true, doneAt: new Date().toISOString(), doneBy: me || "" })}
+        className="shrink-0 mt-0.5 flex items-center justify-center rounded-sm"
+        style={{ width: 20, height: 20, border: `1.5px solid ${t.done ? C.moss : C.kraftDark}`, background: t.done ? C.moss : "transparent" }}
+        title={t.done ? "Done. Tap to undo" : "Tap when it's done"}
+      >
+        {t.done && <Check size={13} color="#fff" />}
+      </button>
+      <div className="flex-1 min-w-0">
+        <input
+          value={t.text} onChange={(e) => patch(t.id, { text: e.target.value })}
+          style={{ ...inputStyle, border: "none", background: "transparent", padding: 0, textDecoration: t.done ? "line-through" : "none", color: t.done ? C.faint : C.ink }}
+        />
+        <div style={{ fontFamily: MONO, fontSize: 10, color: C.faint }}>
+          {old ? `carried over from week of ${dayLabel(t.week)}` : ""}{old && t.by ? " · " : ""}{t.by && t.by !== person ? `from ${t.by}` : ""}
+        </div>
+      </div>
+      <button onClick={() => remove(t.id)} title="Delete this task" style={{ color: C.faint, padding: 2 }}><X size={14} /></button>
+    </div>
+  );
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+        <div className="flex flex-wrap gap-1.5">
+          {team.map((n) => (
+            <button key={n} onClick={() => setPerson(n)} className="px-3 py-1.5 rounded-sm"
+              style={{ fontFamily: MONO, fontSize: 13, fontWeight: n === person ? 800 : 400, background: n === person ? C.ink : "transparent", color: n === person ? "#fff" : C.ink, border: `1px solid ${C.kraftDark}` }}>
+              {n}{n === me ? " (me)" : ""}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2" style={{ fontFamily: MONO, fontSize: 13 }}>
+          <Btn kind="ghost" onClick={() => setWeek(addDays(week, -7))}>‹</Btn>
+          <span style={{ fontWeight: 700 }}>Week of {dayLabel(week)}{week === thisWeek ? " (this week)" : ""}</span>
+          <Btn kind="ghost" onClick={() => setWeek(addDays(week, 7))}>›</Btn>
+          {week !== thisWeek && <Btn kind="ghost" onClick={() => setWeek(thisWeek)}>This week</Btn>}
+        </div>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2">
+        <div className="rounded-sm p-4" style={card}>
+          <div style={head}>{person ? `${person}'s tasks` : "Tasks"} <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint, fontWeight: 400 }}>{open.length} to do · {done.length} done</span></div>
+          <div className="flex gap-2 mt-3">
+            <input
+              style={inputStyle} value={draft} placeholder={person === me ? "Add a task for this week" : `Add a task for ${person}`}
+              onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") add(); }}
+            />
+            <Btn kind="moss" onClick={add}><Plus size={14} /> Add</Btn>
+          </div>
+          <div className="mt-2">
+            {carried.map((t) => taskRow(t, true))}
+            {forWeek.filter((t) => !t.done).map((t) => taskRow(t, false))}
+            {done.map((t) => taskRow(t, false))}
+            {!open.length && !done.length && (
+              <div className="py-4 text-center text-sm" style={{ color: C.faint }}>Nothing on the list for this week yet.</div>
+            )}
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-4">
+          <div className="rounded-sm p-4" style={card}>
+            <div style={head}>Orders assigned to {person || "…"} <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint, fontWeight: 400 }}>{orders.length}</span></div>
+            <div className="mt-2">
+              {orders.map((w) => (
+                <button key={w.id} onClick={() => onOpenWO(w.id)} className="w-full text-left py-2" style={{ borderBottom: `1px solid ${C.kraft}` }}>
+                  <div className="flex items-center justify-between gap-2">
+                    <span style={{ fontWeight: 700, fontSize: 13 }}>{woTitle(w) || w.customerName || "Untitled job"}</span>
+                    <span className="px-1.5 rounded-sm shrink-0" style={{ fontFamily: MONO, fontSize: 10, background: STATUS_COLOR[w.status] || C.kraftDark, color: "#fff" }}>{STATUS_LABEL[w.status] || w.status}</span>
+                  </div>
+                  <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint }}>
+                    {w.number}{w.readyByDate ? ` · ready ${w.readyByDate}` : ""}
+                  </div>
+                  {woLineSummary(w, products, 2) && <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint }}>{woLineSummary(w, products, 2)}</div>}
+                </button>
+              ))}
+              {!orders.length && <div className="py-3 text-sm" style={{ color: C.faint }}>No open orders assigned. Assign people on a work order, under "Assigned to".</div>}
+            </div>
+          </div>
+
+          <div className="rounded-sm p-4" style={card}>
+            <div style={head}>On the schedule this week</div>
+            <div className="mt-2">
+              {shifts.map((x) => {
+                const w = woById(x.workOrderId);
+                return (
+                  <div key={x.id} className="py-1.5 flex items-center justify-between gap-2" style={{ borderBottom: `1px solid ${C.kraft}`, fontSize: 13 }}>
+                    <span style={{ fontFamily: MONO, fontSize: 12 }}>{dayLabel(x.date)}</span>
+                    {w ? <button onClick={() => onOpenWO(w.id)} className="text-right" style={{ fontWeight: 600 }}>{woTitle(w) || w.customerName}</button> : <span style={{ color: C.faint }}>{x.note || "General work"}</span>}
+                  </div>
+                );
+              })}
+              {!shifts.length && <div className="py-2 text-sm" style={{ color: C.faint }}>Nothing scheduled.</div>}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ScheduleTab({ schedule, onChange, team, workOrders, me, onOpenWO }) {
   const [anchor, setAnchor] = useState(today());
   const [editing, setEditing] = useState(null);
@@ -10542,6 +10793,7 @@ export default function App() {
   const [units, _setUnits] = useState([]);
   const [shifts, _setShifts] = useState([]);
   const [schedule, _setSchedule] = useState([]);
+  const [tasks, _setTasks] = useState([]);
   const [invLog, _setInvLog] = useState([]);
   const [goals, setGoals] = useState({ boardsPerHour: 100 });
   // Office's records, loaded only so work order edits can carry up to them.
@@ -10569,7 +10821,7 @@ export default function App() {
   const [historyCounts, setHistoryCounts] = useState({ undo: 0, redo: 0 });
 
   useEffect(() => {
-    latestRef.current = { customers, products, workOrders, sortLog, team, suppliers, purchaseOrders, units, shifts, invLog, schedule };
+    latestRef.current = { customers, products, workOrders, sortLog, team, suppliers, purchaseOrders, units, shifts, invLog, schedule, tasks };
   });
 
   const refreshHistoryCounts = () => setHistoryCounts({ undo: historyRef.current.length, redo: futureRef.current.length });
@@ -10607,6 +10859,7 @@ export default function App() {
     _setShifts(snap.shifts || []);
     _setInvLog(snap.invLog || []);
     _setSchedule(snap.schedule || []);
+    _setTasks(snap.tasks || []);
     skipHistoryRef.current = false;
   };
 
@@ -10697,6 +10950,7 @@ export default function App() {
   const setShifts = (v) => { pushHistory(); _setShifts(v); };
   const setInvLog = (v) => { pushHistory(); _setInvLog(v); };
   const setSchedule = (v) => { pushHistory(); _setSchedule(v); };
+  const setTasks = (v) => { pushHistory(); _setTasks(v); };
 
   // Work order history (see describeWOChanges). Its own collection, and
   // deliberately not part of undo snapshots: undoing a change is itself
@@ -10838,6 +11092,7 @@ export default function App() {
     { key: KEY.invLog, set: _setInvLog, get: () => invLog, arr: true },
     { key: KEY.woHistory, set: _setWoHistory, get: () => woHistory, arr: true },
     { key: KEY.schedule, set: _setSchedule, get: () => schedule, arr: true },
+    { key: KEY.tasks, set: _setTasks, get: () => tasks, arr: true },
     { key: KEY.quotes, set: setQuotes, get: () => quotes, arr: true },
     { key: KEY.salesOrders, set: setSalesOrders, get: () => salesOrders, arr: true },
     { key: KEY.goals, set: (d) => setGoals(d && !Array.isArray(d) ? d : { boardsPerHour: 100 }), get: () => goals, arr: false },
@@ -11126,6 +11381,7 @@ export default function App() {
   useEffect(() => { if (loaded) saveKey(KEY.invLog, invLog); }, [invLog, loaded]);
   useEffect(() => { if (loaded) saveKey(KEY.woHistory, woHistory); }, [woHistory, loaded]);
   useEffect(() => { if (loaded) saveKey(KEY.schedule, schedule); }, [schedule, loaded]);
+  useEffect(() => { if (loaded) saveKey(KEY.tasks, tasks); }, [tasks, loaded]);
   useEffect(() => { if (loaded) saveKey(KEY.quotes, quotes); }, [quotes, loaded]);
   useEffect(() => { if (loaded) saveKey(KEY.salesOrders, salesOrders); }, [salesOrders, loaded]);
   useEffect(() => { if (loaded) saveKey(KEY.goals, goals); }, [goals, loaded]);
@@ -11311,7 +11567,7 @@ export default function App() {
      rather than a fixed home screen. Repeats collapse — bouncing between
      two tabs shouldn't build a stack you have to unwind press by press. */
   const tabStackRef = useRef([tab]);
-  const TAB_IDS = ["dashboard", "work", "orders", "inventory", "contacts", "schedule", "time", "reports", "prices"];
+  const TAB_IDS = ["dashboard", "week", "work", "orders", "inventory", "contacts", "schedule", "time", "reports", "prices"];
   const goTab = (next) => {
     if (!next || next === tab || !TAB_IDS.includes(next)) return;
     const stack = tabStackRef.current;
@@ -11399,6 +11655,7 @@ export default function App() {
 
   const tabs = [
     { id: "dashboard", label: "Dashboard", short: "Home", icon: LayoutGrid },
+    { id: "week", label: "My Week", short: "Week", icon: ListChecks },
     { id: "work", label: "Work", short: "Work", icon: Scissors },
     { id: "orders", label: "Orders", short: "Orders", icon: ClipboardList },
     { id: "inventory", label: "Inventory", short: "Stock", icon: Boxes },
@@ -11455,6 +11712,33 @@ export default function App() {
             Can't reach the database right now ({loadError}). Nothing is lost. Trying again every 15 seconds.
           </div>
         )}
+      </div>
+    );
+  }
+
+  // Pick your name before anything else (Ero, Nov 16), so history, the
+  // schedule and My Week all know who's here. Remembered on this device;
+  // asks again if the name was taken off the crew list. Not a password,
+  // anyone can still pick any name, and the header picker switches later.
+  if (team.length && !team.includes(deviceUser)) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center px-6" style={{ background: C.ink, color: "#fff" }}>
+        <div style={{ fontWeight: 900, letterSpacing: "0.08em", fontSize: 16, marginBottom: 18 }}>GNWS OPS</div>
+        <div style={{ fontSize: 22, fontWeight: 800, marginBottom: 6 }}>Who are you?</div>
+        <div style={{ fontSize: 13, color: "rgba(255,255,255,0.6)", marginBottom: 20, textAlign: "center" }}>
+          Pick your name. This device will remember it.
+        </div>
+        <div className="grid grid-cols-2 gap-3 w-full" style={{ maxWidth: 360 }}>
+          {team.map((n) => (
+            <button
+              key={n} type="button" onClick={() => setDeviceUser(n)}
+              className="rounded-sm py-4"
+              style={{ background: C.paper, color: C.ink, fontWeight: 800, fontSize: 17, border: `2px solid ${C.gold}` }}
+            >
+              {n}
+            </button>
+          ))}
+        </div>
       </div>
     );
   }
@@ -11613,7 +11897,7 @@ export default function App() {
         )}
         {tab === "orders" && ordersSubTab === "workorders" && (
           activeWO ? (
-            <WorkOrderDetail
+            <WorkOrderDetail me={deviceUser}
               wo={activeWO} customers={customers} products={products} goals={goals} sortLog={sortLog}
               onCreateProduct={(np) => setProductsLogged([...products, np], { by: whoWorking })}
               history={woHistory} onLog={(label) => logWOEvent(activeWO.id, label)}
@@ -11722,6 +12006,13 @@ export default function App() {
           </div>
         )}
 
+        {tab === "week" && (
+          <MyWeekTab
+            tasks={tasks} onChange={setTasks} team={team} me={deviceUser}
+            workOrders={workOrders} schedule={schedule} products={products}
+            onOpenWO={(id) => { setActiveWOId(id); goTab("orders"); setOrdersSubTab("workorders"); }}
+          />
+        )}
         {tab === "schedule" && (
           <ScheduleTab
             schedule={schedule} onChange={setSchedule} team={team} workOrders={workOrders}
