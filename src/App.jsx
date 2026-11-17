@@ -1545,6 +1545,10 @@ const PROCESS_STEPS = [
   { id: "rip", label: "Rip" },
   { id: "resaw", label: "Resaw" },
   { id: "plane", label: "Plane" },
+  // Sent out to the mill. Their work, not ours, so it carries no labor
+  // estimate; it's here so the order shows it's away and the trip runs
+  // as one load.
+  { id: "mill", label: "At mill" },
   { id: "mold", label: "Mould" },
   { id: "brush", label: "Brush 1" },
   { id: "paint", label: "Paint" },
@@ -2998,7 +3002,7 @@ function estimateWorkOrder(wo, goals) {
   const byStep = {};
   let unsized = 0;
   (wo.lines || []).forEach((line) => {
-    const steps = PROCESS_STEPS.filter((s) => line.steps?.[s.id]);
+    const steps = PROCESS_STEPS.filter((s) => line.steps?.[s.id] && s.id !== "mill");
     if (!steps.length) return;
     const sf = Number(line.qtySF) || 0;
     if (!sf) { unsized += 1; return; }
@@ -4610,6 +4614,27 @@ function WorkOrderDetail({ me, onCreateProduct, wo, customers, products, goals, 
                         </button>
                       );
                     })}
+                    {line.steps?.rip && (
+                      <label className="flex items-center gap-1 ml-2" style={{ fontFamily: MONO, fontSize: 10, color: C.faint }}>
+                        RIP WIDTH
+                        <input
+                          style={{ ...inputStyle, width: 44, padding: "0 4px", fontSize: 12 }} inputMode="decimal"
+                          value={line.runWidth || ""} placeholder={String(lineWidthIn({}, p) || "?")}
+                          onChange={(e) => updateLine(line.id, { runWidth: e.target.value })}
+                        />
+                        IN
+                      </label>
+                    )}
+                    {line.steps?.paint && (
+                      <label className="flex items-center gap-1 ml-2" style={{ fontFamily: MONO, fontSize: 10, color: C.faint }}>
+                        PAINT
+                        <input
+                          style={{ ...inputStyle, width: 80, padding: "0 4px", fontSize: 12 }}
+                          value={line.paintColor || ""} placeholder={linePaintColor({ ...line, paintColor: "" }, p, wo) || "color"}
+                          onChange={(e) => updateLine(line.id, { paintColor: e.target.value })}
+                        />
+                      </label>
+                    )}
                     {openRunsFor(line.id).map((r) => (
                       <span key={r.id} className="rounded-sm px-1.5" style={{ fontSize: 11, fontFamily: MONO, background: C.gold, color: "#fff" }}>
                         in {r.number} ({stepLabel(r.step)})
@@ -8074,27 +8099,57 @@ function ReceivingTab({ suppliers, purchaseOrders, onPOChange, units, onUnitsCha
    with no order at all. Orders still say what's owed to whom and when;
    runs say what the crew is running today.
 
-   Every order line already carries the steps it needs. A line's next
-   step is the first one checked and not yet done, in shop order, so the
-   Runs tab can group open lines by next step and width and offer each
-   group as a run. Pack and Ship stay with the order, since those are
-   per customer. Finishing a run marks that step done on every line in it,
-   and the next step takes over from there (after Rip: Plane, Resaw, or
-   Mould). Work on a run is logged with the same Start / Stop as an
+   Every order line already carries the steps it needs. The Runs tab
+   groups every step still open across all orders the way each machine
+   is set up (see runGroupFor) and offers each group as a run. Pack and
+   Ship stay with the order, since those are per customer. Finishing a
+   run marks that step done on every line in it. Work on a run is logged with the same Start / Stop as an
    order, and its hours are shared out to each order by square feet. */
 const stepLabel = (id) => PROCESS_STEPS.find((s) => s.id === id)?.label || id;
 const RUN_STEPS = PROCESS_STEPS.filter((s) => s.id !== "pack" && s.id !== "ship");
-const lineNextStep = (line) => RUN_STEPS.find((s) => line.steps?.[s.id] && !line.stepsDone?.[s.id])?.id || "";
-// Same nominal width runs together whatever the finished product is, since
-// a 7" shiplap (6.75" face) and a 7" S3S go through the gang rip side by
-// side. Anything without a width set groups by its own product.
-const runGroupOf = (product) => {
-  const w = Math.round(Number(product?.widthIn) || 0);
-  return w > 0
-    ? { key: `w${w}`, label: `${w} in` }
-    : { key: `p${product?.id || "custom"}`, label: product?.sku || "Custom item" };
-};
+// How each machine's run is grouped, the way the shop sets it up: the gang
+// rip runs every order of one width in a day, the paint machine every
+// order of one color, and everything else (resaw, the mill trip, chop...)
+// runs all of its orders together once it's set up.
+const PAINT_CODES = { WHT: "White", BLK: "Black", BLU: "Blue", GRY: "Gray", RED: "Red", TAN: "Tan", UMB: "Umber" };
+// Width in whole inches: the line's own setting first, then the product's
+// width, then whatever the SKU or name says (TNG-748 and 1/2" X 7" are 7).
+function lineWidthIn(line, product) {
+  if (Number(line.runWidth) > 0) return Math.round(Number(line.runWidth));
+  const w = Number(product?.widthIn);
+  if (w > 0) return Math.round(w);
+  const sku = String(product?.sku || "");
+  let m = /^[A-Z0-9]+-(\d)\d{2}\b/i.exec(sku);
+  if (m) return Number(m[1]);
+  m = /^1(\d)\d[A-Z]*$/i.exec(sku);
+  if (m) return Number(m[1]);
+  m = /x\s*(\d+(?:\.\d+)?)\s*(?:["\u201d]|in\b)/i.exec(`${sku} ${product?.name || ""}`);
+  return m ? Math.round(Number(m[1])) : 0;
+}
+// Paint color: the line's own setting, then the SKU's finish code, then a
+// color named in the product, line or order title ("S3S Sample - White").
+function linePaintColor(line, product, wo) {
+  if ((line.paintColor || "").trim()) return line.paintColor.trim();
+  const m = /-(WHT|BLK|BLU|GRY|RED|TAN|UMB)\b/i.exec(product?.sku || "");
+  if (m) return PAINT_CODES[m[1].toUpperCase()];
+  const text = `${product?.name || ""} ${line.desc || ""} ${line.note || ""} ${wo?.title || ""}`.toLowerCase();
+  const hit = [["white", "White"], ["black", "Black"], ["blue", "Blue"], ["grey", "Gray"], ["gray", "Gray"], ["red", "Red"], ["tan", "Tan"], ["umber", "Umber"]]
+    .find(([word]) => new RegExp(`\\b${word}\\b`).test(text));
+  return hit ? hit[1] : "";
+}
+function runGroupFor(step, line, product, wo) {
+  if (step === "rip") {
+    const w = lineWidthIn(line, product);
+    return w ? { key: `w${w}`, label: `${w} in` } : { key: "w?", label: "width not set" };
+  }
+  if (step === "paint") {
+    const c = linePaintColor(line, product, wo);
+    return c ? { key: `c${c.toLowerCase()}`, label: c } : { key: "c?", label: "color not set" };
+  }
+  return { key: "all", label: "All" };
+}
 const runLineKey = (woId, lineId) => `${woId}:${lineId}`;
+const runTitle = (step, groupLabel) => (groupLabel && groupLabel !== "All" ? `${stepLabel(step)} · ${groupLabel}` : `${stepLabel(step)} · all orders`);
 
 function runLines(run, workOrders, products = []) {
   return (run.lines || []).map((rl) => {
@@ -8144,7 +8199,10 @@ function loggedManSecondsForRun(sortLog, runId) {
   return out;
 }
 
-// Open order lines whose next step isn't already in an open run.
+// Every step an open order line still needs, unless it's already in an
+// open run for that step. Not only the next step: the crew doesn't always
+// tick off sorting before the gang rip day, and a 7" order should still
+// show up for that day.
 function runCandidates(workOrders, runs, products) {
   const taken = new Set();
   runs.filter((r) => r.status !== "done").forEach((r) => (r.lines || []).forEach((rl) => taken.add(`${runLineKey(rl.woId, rl.lineId)}:${r.step}`)));
@@ -8152,12 +8210,14 @@ function runCandidates(workOrders, runs, products) {
   workOrders.filter((w) => ACTIVE_WO_STATUSES.includes(w.status) && !w.archived).forEach((wo) => {
     (wo.lines || []).forEach((line) => {
       if (line.done) return;
-      const step = lineNextStep(line);
-      if (!step || taken.has(`${runLineKey(wo.id, line.id)}:${step}`)) return;
       const product = products.find((p) => p.id === line.productId);
       if (product && isService(product)) return;
-      const g = runGroupOf(product);
-      out.push({ wo, line, product, step, groupKey: `${step}|${g.key}`, groupLabel: g.label, sf: Number(line.qtySF) || 0 });
+      RUN_STEPS.forEach((st) => {
+        if (!line.steps?.[st.id] || line.stepsDone?.[st.id]) return;
+        if (taken.has(`${runLineKey(wo.id, line.id)}:${st.id}`)) return;
+        const g = runGroupFor(st.id, line, product, wo);
+        out.push({ wo, line, product, step: st.id, groupKey: `${st.id}|${g.key}`, groupLabel: g.label, sf: Number(line.qtySF) || 0 });
+      });
     });
   });
   return out;
@@ -8205,7 +8265,7 @@ function RunBuilder({ init, candidates, onCreate, onClose }) {
     <div className="fixed inset-0 z-50 overflow-auto p-4" style={{ background: "rgba(34,29,25,0.6)" }}>
       <div className="rounded-sm p-5 w-full max-w-lg mx-auto my-8" style={{ background: C.panel }}>
         <div className="flex items-center justify-between mb-3">
-          <div style={{ fontWeight: 800, fontSize: 16 }}>{stockMode ? "New run" : `New run: ${stepLabel(step)} · ${groupLabel}`}</div>
+          <div style={{ fontWeight: 800, fontSize: 16 }}>{stockMode ? "New run" : `New run: ${runTitle(step, groupLabel)}`}</div>
           <CloseBtn onClose={onClose} />
         </div>
         {stockMode && (
@@ -8215,8 +8275,8 @@ function RunBuilder({ init, candidates, onCreate, onClose }) {
                 {RUN_STEPS.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
               </select>
             </Field>
-            <Field label="Stock (what's running)">
-              <input style={inputStyle} value={groupLabel} onChange={(e) => setGroupLabel(e.target.value)} placeholder="e.g. 7 in" />
+            <Field label={step === "rip" ? "Width" : step === "paint" ? "Color" : "What's running"}>
+              <input style={inputStyle} value={groupLabel} onChange={(e) => setGroupLabel(e.target.value)} placeholder={step === "rip" ? "e.g. 7 in" : step === "paint" ? "e.g. White" : "optional"} />
             </Field>
           </div>
         )}
@@ -8251,7 +8311,7 @@ function RunBuilder({ init, candidates, onCreate, onClose }) {
         </Field>
         <div className="mt-4 flex gap-2">
           <Btn onClick={onClose}>Cancel</Btn>
-          <Btn kind="primary" big disabled={!canCreate} onClick={() => onCreate({ step, groupLabel: groupLabel.trim() || "Stock", items: chosen, stockSF, notes })}>
+          <Btn kind="primary" big disabled={!canCreate} onClick={() => onCreate({ step, groupLabel: groupLabel.trim() || "All", items: chosen, stockSF, notes })}>
             <Check size={15} /> Make the run
           </Btn>
         </div>
@@ -8281,7 +8341,7 @@ function RunDetail({ run, onChange, onDelete, onBack, workOrders, products, cand
       <div className="mb-4"><Btn onClick={onBack}><ChevronLeft size={14} /> All runs</Btn></div>
 
       <div className="rounded-sm p-3 mb-3" style={{ background: C.ink, color: "#fff" }}>
-        <div style={{ fontSize: 18, fontWeight: 800 }}>{stepLabel(run.step)} · {run.groupLabel}</div>
+        <div style={{ fontSize: 18, fontWeight: 800 }}>{runTitle(run.step, run.groupLabel)}</div>
         <div className="mt-0.5" style={{ fontFamily: MONO, fontSize: 12, color: C.kraftDark }}>
           {run.number} · {fmtConv(sf)} SF · {orders} order{orders === 1 ? "" : "s"}{Number(run.stockSF) > 0 ? ` + ${fmtConv(run.stockSF)} SF stock` : ""}
           {done ? ` · done ${shortDate(run.doneAt)}` : ""}
@@ -8455,7 +8515,7 @@ function RunsTab({ runs, onRunsChange, workOrders, onWorkOrdersChange, products,
     const n = new Set(runLines(r, workOrders).map((x) => x.wo.id)).size;
     return (
       <button key={r.id} onClick={() => setActiveId(r.id)} className="text-left rounded-sm p-3 hover:opacity-90" style={{ background: C.panel, border: `1px solid ${sessionActive(r.clock) ? C.moss : C.kraftDark}` }}>
-        <div style={{ fontWeight: 800, fontSize: 16 }}>{stepLabel(r.step)} · {r.groupLabel}</div>
+        <div style={{ fontWeight: 800, fontSize: 16 }}>{runTitle(r.step, r.groupLabel)}</div>
         <div style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>
           {r.number} · {fmtConv(sf)} SF · {n} order{n === 1 ? "" : "s"}{r.status === "done" ? ` · done ${shortDate(r.doneAt)}` : ""}
         </div>
@@ -8487,7 +8547,7 @@ function RunsTab({ runs, onRunsChange, workOrders, onWorkOrdersChange, products,
             const skus = [...new Set(g.items.map((x) => x.product?.sku || x.line.desc || "Custom"))];
             return (
               <button key={g.key} onClick={() => setBuilder({ step: g.step, groupLabel: g.groupLabel, items: g.items })} className="text-left rounded-sm p-3 hover:opacity-90" style={{ background: C.paper, border: `1px dashed ${C.kraftDark}` }}>
-                <div style={{ fontWeight: 800, fontSize: 16 }}>{g.step === "sorting" ? "Sort" : stepLabel(g.step)} · {g.groupLabel}</div>
+                <div style={{ fontWeight: 800, fontSize: 16 }}>{runTitle(g.step, g.groupLabel)}</div>
                 <div style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>{n} order{n === 1 ? "" : "s"} · {fmtConv(sf)} SF</div>
                 <div className="mt-1 text-xs" style={{ color: C.faint }}>{skus.slice(0, 4).join(", ")}{skus.length > 4 ? ` +${skus.length - 4}` : ""}</div>
                 <div className="mt-1.5 text-xs" style={{ fontWeight: 700, color: C.moss }}>Make a run <ChevronRight size={12} style={{ display: "inline" }} /></div>
