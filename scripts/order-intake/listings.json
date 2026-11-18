@@ -12,10 +12,10 @@
     {
       "listingSku": "SHP-748-NAT",
       "title": "Raw 'Barnwood' Board",
-      "sku": "TRM-848-NAT",
+      "sku": "CHP-848-NAT",
       "unit": "box",
       "perItem": 1,
-      "why": "The Shopify listing's SKU field (SHP-748-NAT, 7\" Shiplap Natural) is wrong; the real item is the 8\" x 48\" End Trim, Natural (TRM-848-NAT), same as the matching Etsy listing. Sold per box of 10 boards, per Ero 2026-09-16."
+      "why": "The Shopify listing's SKU field (SHP-748-NAT, 7\" Shiplap Natural) is wrong; the real item is the 8\" x 48\" chopped board, Natural (CHP-848-NAT, was TRM-848-NAT until 2026-11-18), same as the matching Etsy listing. Sold per box of 10 boards, per Ero 2026-09-16."
     },
     {
       "title": "Reclaimed Wood Interior Samples",
@@ -92,10 +92,10 @@
     {
       "listingSku": "TRM-848-NAT",
       "title": "Uncut/Raw 'Barnwood' Board",
-      "sku": "TRM-848-NAT",
+      "sku": "CHP-848-NAT",
       "unit": "box",
       "perItem": 1,
-      "why": "Same 8\" x 48\" End Trim, Natural as the Raw 'Barnwood' Board listing, sold per box of 10 boards. Seen on Shopify 71050, 2026-10-14."
+      "why": "Same 8\" x 48\" chopped board, Natural (CHP-848-NAT) as the Raw 'Barnwood' Board listing, sold per box of 10 boards. Seen on Shopify 71050, 2026-10-14."
     },
     {
       "listingSku": "SHP-748-ACO",
@@ -109,7 +109,7 @@
   "etsy": [
     {
       "title": "Reclaimed Wood Planks - Weathered Gray Barn Wood - Rustic Wall Decor - DIY Project Material",
-      "sku": "TRM-848-NAT",
+      "sku": "CHP-848-NAT",
       "unit": "box",
       "perItem": 1,
       "why": "How Ero entered Etsy orders 4145102181 (WO-2026-2261) and 4134397453 (WO-2026-004): one item is one box of 10 boards."

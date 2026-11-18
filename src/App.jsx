@@ -4502,7 +4502,7 @@ function WorkOrderDetail({ me, onCreateProduct, wo, customers, products, goals, 
                   style={{ marginBottom: 4 }}
                   onChange={(id, made) => {
                     const newProduct = products.find((pr) => pr.id === id) || made;
-                    // Switching to another size (TRM-848 to TRM-856, say) keeps the
+                    // Switching to another size (CHP-848 to CHP-856, say) keeps the
                     // count the line is shown in, 5 units or 10 boxes, and works the
                     // square feet out again for the new size, rather than keeping
                     // the old square feet and quietly changing the board count.
@@ -7391,7 +7391,7 @@ function ProductPicker({ products, value, onChange, placeholder = "Pick a produc
 /* A new length, width or finish of a sized SKU, made right where it's
    needed. End trim gets cut to whatever the job calls for (848, 856,
    866...), so instead of setting each one up in Inventory first, the crew
-   types the size and finish and gets TRM-856-BRS, built from the SKU it
+   types the size and finish and gets CHP-856-BRS, built from the SKU it
    came from: same category, steps, box and pallet counts, with the
    square feet worked out from the new size. If that SKU already exists,
    it's just picked. */
@@ -8594,10 +8594,11 @@ const WALKIN_MILLED = [
   { group: '7" Shiplap', items: [["SHP-748-NAT", 6.5], ["SHP-748-BRS", 7.0]] },
   { group: '5" T&G', items: [["TNG-548-NAT", 6.0], ["TNG-548-BRS", 6.5]] },
   { group: '7" T&G', items: [["TNG-748-NAT", 6.5], ["TNG-748-BRS", 7.0]] },
-  // Not on the guide, so Ero said to assume these: end trim at what the
-  // website gets ($80 a box of 10 is about $3/SF), the 1/4" S3S a bit over
-  // Rockin' Wood's $4.50, and slat lap at the website price ($12.65).
-  { group: "End trim", items: [["TRM-848-NAT", 3.0], ["TRM-845-NAT", 3.0], ["TRM-648-NAT", 3.0]] },
+  // Not on the guide, so Ero said to assume these: chopped boards (the old
+  // "end trim", renamed CHP Nov 2026) at what the website gets ($80 a box
+  // of 10 is about $3/SF), the 1/4" S3S a bit over Rockin' Wood's $4.50,
+  // and slat lap at the website price ($12.65).
+  { group: "Chopped boards", items: [["CHP-848-NAT", 3.0], ["CHP-845-NAT", 3.0], ["CHP-648-NAT", 3.0]] },
   { group: '1/4" S3S, 1/4 x 7 x 55"', items: [["S3S-755-NAT", 5.0]] },
   { group: "Acoustic slat wall (slat lap)", items: [["SLT-748-NAT", 12.65], ["SLT-756-NAT", 12.65]] },
 ];
