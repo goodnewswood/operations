@@ -8111,7 +8111,7 @@ const RUN_STEPS = PROCESS_STEPS.filter((s) => s.id !== "pack" && s.id !== "ship"
 // rip runs every order of one width in a day, the paint machine every
 // order of one color, and everything else (resaw, the mill trip, chop...)
 // runs all of its orders together once it's set up.
-const PAINT_CODES = { WHT: "White", BLK: "Black", BLU: "Blue", GRY: "Gray", RED: "Red", TAN: "Tan", UMB: "Umber", SNA: "Sienna" };
+const PAINT_CODES = { WHT: "White", BLK: "Black", BLU: "Blue", GRY: "Gray", RED: "Red", TAN: "Tan", UMB: "Umber", BRN: "Brown" };
 // Width in whole inches: the line's own setting first, then the product's
 // width, then whatever the SKU or name says (TNG-748 and 1/2" X 7" are 7).
 function lineWidthIn(line, product) {
@@ -8130,10 +8130,10 @@ function lineWidthIn(line, product) {
 // color named in the product, line or order title ("S3S Sample - White").
 function linePaintColor(line, product, wo) {
   if ((line.paintColor || "").trim()) return line.paintColor.trim();
-  const m = /-(WHT|BLK|BLU|GRY|RED|TAN|UMB|SNA)\b/i.exec(product?.sku || "");
+  const m = /-(WHT|BLK|BLU|GRY|RED|TAN|UMB|BRN)\b/i.exec(product?.sku || "");
   if (m) return PAINT_CODES[m[1].toUpperCase()];
   const text = `${product?.name || ""} ${line.desc || ""} ${line.note || ""} ${wo?.title || ""}`.toLowerCase();
-  const hit = [["white", "White"], ["black", "Black"], ["blue", "Blue"], ["grey", "Gray"], ["gray", "Gray"], ["red", "Red"], ["tan", "Tan"], ["umber", "Umber"], ["sienna", "Sienna"]]
+  const hit = [["white", "White"], ["black", "Black"], ["blue", "Blue"], ["grey", "Gray"], ["gray", "Gray"], ["red", "Red"], ["tan", "Tan"], ["umber", "Umber"], ["sienna", "Brown"], ["brown", "Brown"]]
     .find(([word]) => new RegExp(`\\b${word}\\b`).test(text));
   return hit ? hit[1] : "";
 }
