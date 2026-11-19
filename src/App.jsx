@@ -1313,9 +1313,13 @@ function stepRate(sortLog, step) {
 // Services (installation, delivery) are sold, not stocked: no count, no
 // square feet, no place on the floor. Like packaging they sell in their
 // own unit: "ea" for a flat charge, or "sf" to price by the square foot.
+// Packaging and shop supplies (clamps, straps, plastic, screws) both sit on
+// a shelf and get counted by the each in their own unit. Only packaging
+// shows up as a box for shipping.
+const isShelfStock = (p) => p?.category === "packing" || p?.category === "supplies";
 const isService = (p) => p?.category === "service";
 const canonicalUnitFor = (p) =>
-  p.category === "paint" ? "gal" : (p.category === "packing" || isService(p)) ? (p.unitLabel || "ea") : (p.kind === "sf" ? "sf" : "board");
+  p.category === "paint" ? "gal" : (isShelfStock(p) || isService(p)) ? (p.unitLabel || "ea") : (p.kind === "sf" ? "sf" : "board");
 const hasSF = (p) => canonicalUnitFor(p) === "sf" || Object.keys(buildUnitGraph(p)).includes("sf");
 // A product names its raw source one of two ways: a finished SF good
 // points at it directly (sourceBoardSku), while a sorted-but-unmilled
@@ -1418,7 +1422,7 @@ function convertQty(product, qty, fromUnit, toUnit) {
 function unitsFor(product) {
   if (!product) return ["sf", "board", "plank"];
   if (product.category === "paint") return ["gal", "qt", "sf"];
-  if (product.category === "packing" || isService(product)) return [product.unitLabel || "ea"];
+  if (isShelfStock(product) || isService(product)) return [product.unitLabel || "ea"];
   const units = new Set(["board", "plank", "sf"]);
   const graph = buildUnitGraph(product);
   Object.keys(graph).forEach((u) => units.add(u));
@@ -3776,7 +3780,7 @@ function customerUpdateEmail(u, { customer, products, brandKey, sender }) {
   const order = `order ${ref}${po}${forWhom}`;
   const items = (wo.lines || [])
     .map((l) => ({ l, p: products.find((x) => x.id === l.productId) }))
-    .filter(({ p }) => p?.category !== "packing")
+    .filter(({ p }) => !isShelfStock(p))
     .map(({ l, p }) => {
       const unit = l.displayUnit || "sf";
       return `  ${fmtConv(convertQty(p, l.qtySF, "sf", unit))} ${unitLabel(unit)}, ${p ? p.name : (l.desc || "custom item")}`;
@@ -5189,6 +5193,7 @@ function InventoryDetail({ product, products, invLog, onChange, onBack, onDelete
             <option value="milled">Milled wood (planks, boxes)</option>
             <option value="paint">Paint</option>
             <option value="packing">Packaging</option>
+            <option value="supplies">Shop supplies</option>
             <option value="service">Service (not stocked)</option>
           </select>
         </Field>
@@ -5201,7 +5206,7 @@ function InventoryDetail({ product, products, invLog, onChange, onBack, onDelete
               "ea" for a flat charge, or "sf" to price it by the square foot.
             </div>
           </Field>
-        ) : category === "packing" ? (
+        ) : isShelfStock({ category }) ? (
           <>
             <Field label="On hand">
               <div className="flex items-center gap-1">
@@ -5212,7 +5217,7 @@ function InventoryDetail({ product, products, invLog, onChange, onBack, onDelete
             {/* A box's outside size is what the carrier charges on, so the
                 Shipping panel fills it in from here for any product that
                 packs into this box. Empty weight gets added to the wood. */}
-            <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
+            {category === "packing" && <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
               <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6, color: C.gold }}>Box size for shipping (outside, inches)</div>
               <div className="grid grid-cols-4 gap-2">
                 <Field label="Length"><input type="number" style={inputStyle} value={p.boxL ?? ""} placeholder="—" onChange={(e) => update({ boxL: e.target.value })} /></Field>
@@ -5220,7 +5225,7 @@ function InventoryDetail({ product, products, invLog, onChange, onBack, onDelete
                 <Field label="Height"><input type="number" style={inputStyle} value={p.boxH ?? ""} placeholder="—" onChange={(e) => update({ boxH: e.target.value })} /></Field>
                 <Field label="Empty lbs"><input type="number" style={inputStyle} value={p.boxLbs ?? ""} placeholder={String(EMPTY_BOX_LBS)} onChange={(e) => update({ boxLbs: e.target.value })} /></Field>
               </div>
-            </div>
+            </div>}
           </>
         ) : (
           <div className="mt-2 pt-2" style={{ borderTop: `1px solid ${C.kraft}` }}>
@@ -5524,7 +5529,7 @@ function InventoryCountSheet({ products, group, onClose }) {
   // Same two units the Inventory table shows for this SKU, so the sheet
   // and the screen never disagree about what a number means.
   const onHandLine = (p) => {
-    if (p.category === "packing") return `${num(p.onHand)} ${p.unitLabel || "ea"}`;
+    if (isShelfStock(p)) return `${num(p.onHand)} ${p.unitLabel || "ea"}`;
     const canonical = canonicalUnitFor(p);
     const opts = unitOptionsFor(p);
     const saved = (p.displayUnits || []).filter((u) => opts.includes(u));
@@ -5543,7 +5548,7 @@ function InventoryCountSheet({ products, group, onClose }) {
     const c = (p && p.category) || cat;
     const labels =
       c === "paint" ? ["Total gallons", "Total quarts", "Total units"]
-      : c === "packing" ? [`Total ${(p && p.unitLabel) || "units"}`, "Total boxes", "Total units"]
+      : c === "packing" || c === "supplies" ? [`Total ${(p && p.unitLabel) || "units"}`, "Total boxes", "Total units"]
       : ["Total pallets", "Total units", "Total boards"];
     // A SKU counted in "units" would otherwise get two identical boxes.
     return [...new Set(labels)];
@@ -5568,7 +5573,7 @@ function InventoryCountSheet({ products, group, onClose }) {
       <div className="max-w-4xl mx-auto my-8 print-shell">
         <div className="flex flex-wrap justify-between items-center gap-2 mb-3 no-print">
           <div className="flex flex-wrap items-center gap-2">
-            {[["all", "All"], ["wood", "Wood"], ["milled", "Milled"], ["paint", "Paint"], ["packing", "Packaging"]].map(([id, label]) => (
+            {[["all", "All"], ["wood", "Wood"], ["milled", "Milled"], ["paint", "Paint"], ["packing", "Packaging"], ["supplies", "Supplies"]].map(([id, label]) => (
               <button
                 key={id} onClick={() => setCat(id)}
                 className="px-3 py-1.5 rounded-sm text-xs"
@@ -5722,7 +5727,7 @@ function InventoryCountEntry({ products, group, onCommit, onClose }) {
         </div>
 
         <div className="px-4 pt-3 flex flex-wrap gap-2">
-          {[["all", "All"], ["wood", "Wood"], ["milled", "Milled"], ["paint", "Paint"], ["packing", "Packaging"]].map(([id, label]) => (
+          {[["all", "All"], ["wood", "Wood"], ["milled", "Milled"], ["paint", "Paint"], ["packing", "Packaging"], ["supplies", "Supplies"]].map(([id, label]) => (
             <button
               key={id} onClick={() => setCat(id)}
               className="px-3 py-1.5 rounded-sm text-xs"
@@ -5839,7 +5844,7 @@ function InventoryTab({ products, onChange, invLog, activeId, setActiveId }) {
     );
   }
 
-  const sfEquivalent = (p) => (p.category === "packing" || isService(p) ? 0 : convertQty(p, p.onHand, canonicalUnitFor(p), "sf"));
+  const sfEquivalent = (p) => (isShelfStock(p) || isService(p) ? 0 : convertQty(p, p.onHand, canonicalUnitFor(p), "sf"));
   const needsReorder = (p) => Number(p.reorderPoint) > 0 && (Number(p.onHand) || 0) <= Number(p.reorderPoint);
   const filtered = products
     .filter((p) => (group === "all" ? true : (p.category || "wood") === group))
@@ -5875,7 +5880,7 @@ function InventoryTab({ products, onChange, invLog, activeId, setActiveId }) {
       id: "onHand", label: "On hand",
       render: (p) => (isService(p) ? (
         <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>not stocked</span>
-      ) : p.category === "packing" ? (
+      ) : isShelfStock(p) ? (
         <span className="flex items-center gap-1">
           <input
             type="number"
@@ -5917,7 +5922,7 @@ function InventoryTab({ products, onChange, invLog, activeId, setActiveId }) {
     },
     {
       id: "sf", label: "≈ SF",
-      render: (p) => (p.category === "packing" || isService(p) ? "—" :<span style={{ fontFamily: MONO, fontSize: 12, color: C.faint }}>{num(sfEquivalent(p), 0)}</span>),
+      render: (p) => (isShelfStock(p) || isService(p) ? "—" :<span style={{ fontFamily: MONO, fontSize: 12, color: C.faint }}>{num(sfEquivalent(p), 0)}</span>),
       sortValue: (p) => sfEquivalent(p),
     },
     {
@@ -5948,7 +5953,7 @@ function InventoryTab({ products, onChange, invLog, activeId, setActiveId }) {
         </div>
       </div>
       <div className="flex flex-wrap items-center gap-2 mb-3">
-        {[["all", "All"], ["wood", "Wood"], ["milled", "Milled"], ["paint", "Paint"], ["packing", "Packaging"], ["service", "Services"]].map(([id, label]) => (
+        {[["all", "All"], ["wood", "Wood"], ["milled", "Milled"], ["paint", "Paint"], ["packing", "Packaging"], ["supplies", "Supplies"], ["service", "Services"]].map(([id, label]) => (
           <button
             key={id} onClick={() => setGroup(id)}
             className="px-3 py-1.5 rounded-sm text-xs"
@@ -6510,7 +6515,7 @@ function defaultParcelsFor(wo, products) {
   };
   (wo?.lines || []).forEach((l) => {
     const product = products?.find((x) => x.id === l.productId);
-    if (!product || product.category === "packing" || isService(product)) return;
+    if (!product || isShelfStock(product) || isService(product)) return;
     const plan = boxPlanFor(product, l.qtySF, products);
     if (!plan) return;
     if (plan.count > 1) add(plan.dims, plan.fullLbs, plan.count - 1, plan.box.sku);
@@ -6662,7 +6667,7 @@ function PackingSlipPrintView({ wo, customer, products, onClose }) {
   const seller = blind ? customer : { company: ours.name, address: SHIPPER.address, cityLine: SHIPPER.cityStateZip };
   const sellerCity = seller?.cityLine || [seller?.city, seller?.state, seller?.zip].filter(Boolean).join(", ");
   // Boxes and other packing supplies are how it ships, not what they bought.
-  const items = (wo.lines || []).filter((l) => products.find((p) => p.id === l.productId)?.category !== "packing");
+  const items = (wo.lines || []).filter((l) => products.find((p) => p.id === l.productId)?.category !== "packing" && products.find((p) => p.id === l.productId)?.category !== "supplies");
   return (
     <PrintPortal>
     <div className="fixed inset-0 z-50 overflow-auto print-overlay" style={{ background: "rgba(34,29,25,0.6)" }}>
@@ -6761,7 +6766,7 @@ function lineConversions(product, qtySF) {
   if (!product) return [{ unit: "sf", qty: Number(qtySF) || 0 }];
   const units = product.category === "paint"
     ? ["sf", "gal", "qt"]
-    : product.category === "packing" || isService(product)
+    : isShelfStock(product) || isService(product)
     ? [product.unitLabel || "ea"]
     : (() => {
         const graph = buildUnitGraph(product);
@@ -6903,7 +6908,7 @@ function BOLModal({ wo, customer, products, onClose }) {
   // Each line at its own thickness, plus the pallets themselves.
   const woodLbs = (wo.lines || []).reduce((sum, l) => {
     const product = products.find((p) => p.id === l.productId);
-    if (product && (product.category === "packing" || isService(product))) return sum;
+    if (product && (isShelfStock(product) || isService(product))) return sum;
     return sum + (Number(l.qtySF) || 0) * lbsPerSFFor(product);
   }, 0);
   const [weight, setWeight] = useState(String(Math.round((woodLbs + Math.ceil(estimatedPallets) * PALLET_LBS) / 10) * 10));
@@ -7272,7 +7277,7 @@ const skuSizeKey = (sku) => (/^(\d{3})/.exec(String(sku || "")) || [])[1] || nul
    listed. A family comes from the SKU itself: 185N/185P/185RAW share
    "185", S3S-545-NAT and S3S-545-BLK share "S3S-545", and the paint
    colors share "GS". A product can also name its family outright. */
-const FAMILY_GROUPS = [["wood", "Raw and sorted boards"], ["milled", "Milled"], ["paint", "Paint"], ["packing", "Packaging"], ["service", "Services"]];
+const FAMILY_GROUPS = [["wood", "Raw and sorted boards"], ["milled", "Milled"], ["paint", "Paint"], ["packing", "Packaging"], ["supplies", "Shop supplies"], ["service", "Services"]];
 function familyKeyOf(p) {
   if (p.family) return `f:${p.family}`;
   const sku = String(p.sku || "").trim();
