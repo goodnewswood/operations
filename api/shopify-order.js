@@ -38,7 +38,9 @@ export function toIntakeOrder(o) {
   const fullName = (x) => [x?.first_name, x?.last_name].filter(Boolean).join(" ");
   return {
     channel: "shopify",
-    orderNumber: String(o.order_number ?? o.name ?? "").replace(/^#/, "").trim(),
+    // "name" is the number Shopify shows (71054). order_number is its
+    // internal count (1054), which the order intake and Ero never see.
+    orderNumber: String(o.name ?? o.order_number ?? "").replace(/^#/, "").trim(),
     placedAt: o.created_at,
     buyer: {
       name: fullName(cust) || addr?.name || fullName(o.billing_address),
@@ -89,7 +91,7 @@ export async function POST(request) {
 
   let order;
   try { order = JSON.parse(raw.toString("utf8")); } catch { return Response.json({ error: "body isn't JSON" }, { status: 400 }); }
-  const label = `Shopify #${order.order_number ?? order.name ?? "?"}`;
+  const label = `Shopify #${String(order.name ?? order.order_number ?? "?").replace(/^#/, "")}`;
   if (order.test) {
     // Logged so "Send test" in Shopify shows up as proof the hookup works.
     console.log(`[shopify-order] ${label} test notification received, signature ok, topic ${topic || "?"}`);
@@ -101,7 +103,7 @@ export async function POST(request) {
   if (topic === "orders/cancelled") {
     try {
       const { code, lines, ...result } = await markCancelled({
-        channel: "shopify", orderNumber: order.order_number ?? order.name,
+        channel: "shopify", orderNumber: String(order.name ?? order.order_number ?? "").replace(/^#/, ""),
         cancelledAt: order.cancelled_at, reason: order.cancel_reason || "",
       });
       console.log(`[shopify-order] ${label} cancelled: ${lines.join(" ")}`);
