@@ -4811,7 +4811,10 @@ function ImportInvoiceModal({ customers, products, onClose, onImported }) {
       const response = await fetch("/api/parse-invoice", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...body, catalog }),
+        body: JSON.stringify({
+          ...body, catalog,
+          customers: (customers || []).filter((c) => c.company).map((c) => ({ company: c.company, contact: c.contact || "", email: c.email || "" })),
+        }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Server couldn't read that");
@@ -4820,9 +4823,12 @@ function ImportInvoiceModal({ customers, products, onClose, onImported }) {
       const cleaned = textBlock.text.replace(/```json|```/g, "").trim();
       const parsed = JSON.parse(cleaned);
 
+      // The reader picks the buyer off our own list, so an exact name wins.
+      // The loose match is only for when it couldn't.
       const nameKey = (parsed.customerName || "").toLowerCase().trim();
       const match = nameKey
-        ? customers.find((c) => c.company && (c.company.toLowerCase().includes(nameKey) || nameKey.includes(c.company.toLowerCase())))
+        ? customers.find((c) => (c.company || "").toLowerCase().trim() === nameKey)
+          || customers.find((c) => c.company && (c.company.toLowerCase().includes(nameKey) || nameKey.includes(c.company.toLowerCase())))
         : null;
 
       onImported({ parsed, matchedCustomerId: match?.id || "", fileName });
@@ -4856,11 +4862,11 @@ function ImportInvoiceModal({ customers, products, onClose, onImported }) {
     <div className="fixed inset-0 z-50 overflow-auto p-4" style={{ background: "rgba(34,29,25,0.6)" }}>
       <div className="rounded-sm p-5 w-full max-w-md mx-auto my-8" style={{ background: C.panel }}>
         <div className="flex items-center justify-between mb-3">
-          <div style={{ fontWeight: 800, fontSize: 16 }}>Start a work order from an order</div>
+          <div style={{ fontWeight: 800, fontSize: 16 }}>Enter an order</div>
           <CloseBtn onClose={onClose} />
         </div>
         <p className="text-sm mb-3" style={{ color: C.faint }}>
-          Paste the order — an email, a text, whatever the customer sent — or upload the PDF. It'll try to pull the customer and line items into a new draft work order; review and fix it up before the crew works from it.
+          Paste the order — an email, a text, whatever the customer sent — or upload the PDF. It reads the customer, their order number, the items, prices and payment, and makes the sales order and the work order together; look them over before the crew works from it.
         </p>
 
         <div className="flex gap-2 mb-3">
@@ -4887,7 +4893,7 @@ function ImportInvoiceModal({ customers, products, onClose, onImported }) {
             />
             <div className="mt-3">
               <Btn kind="primary" onClick={handlePaste} disabled={busy || !pasted.trim()} big>
-                <Check size={16} /> Create work order
+                <Check size={16} /> Create order
               </Btn>
             </div>
           </>
@@ -12131,6 +12137,20 @@ export default function App() {
 
   const handleImported = ({ parsed, matchedCustomerId, fileName }) => {
     const cust = customers.find((c) => c.id === matchedCustomerId);
+    const money = (n) => `$${(Number(n) || 0).toFixed(2).replace(/\.00$/, "")}`;
+    // Steps come from the last work order that made the same item, the
+    // way Claude copies them, since that's how the crew actually ran it.
+    // The item's own defaults are the fallback.
+    const stepsLike = (product) => {
+      if (!product) return defaultSteps();
+      const recent = workOrders
+        .filter((wo) => !wo.deleted)
+        .slice().sort((x, y) => String(y.createdAt || y.date || "").localeCompare(String(x.createdAt || x.date || "")))
+        .flatMap((wo) => wo.lines || [])
+        .find((l) => l.productId === product.id && l.steps && Object.values(l.steps).some(Boolean));
+      if (recent) return { ...recent.steps };
+      return product.steps ? { ...product.steps } : defaultSteps();
+    };
     const lines = (parsed.lines || []).map((l) => {
       const product = matchProductForImport(l, products);
       // Quantities are held in the canonical unit and shown in whatever
@@ -12141,33 +12161,104 @@ export default function App() {
         id: uid(), productId: product?.id || "", desc: product ? "" : (l.description || ""),
         qtySF: product ? convertQty(product, qty, unit, "sf") : (!l.unit || l.unit === "sf" ? qty : 0),
         displayUnit: unit, done: false,
-        steps: product?.steps ? { ...product.steps } : defaultSteps(),
+        steps: stepsLike(product),
         note: !product && l.unit && l.unit !== "sf" ? `${l.quantity} ${l.unit} on the invoice, double check against SF` : "",
+        // Kept for the sales order only. The work order never carries money.
+        _qty: qty, _unit: unit, _price: Number(l.unitPrice) || 0, _what: l.description || "",
       };
     });
     const unmatchedFlag = !matchedCustomerId && parsed.customerName
-      ? `⚠ No matching customer found for "${parsed.customerName}" — assign one above.`
+      ? `No matching customer found for "${parsed.customerName}", assign one above.`
       : "";
-    const baseNumber = nextNumber(workOrders, "WO");
-    const suffix = productSuffix(lines, products);
+    // A quote, its sales order and its work order share one number, so the
+    // next one has to be free in all three, and it stays bare (no SF/SKU
+    // tail), the same as an order Claude enters.
+    const number = (prefix) => `${prefix}-${nextNumber([...workOrders, ...salesOrders, ...quotes]
+      .map((r) => ({ number: String(r.number || "").replace(/^(WO|SO|Q)-/, "X-") })), "X").slice(2)}`;
+    const woNumber = number("WO");
+    const soNumber = woNumber.replace(/^WO-/, "SO-");
     // A drop ship order is only a drop ship if it actually says where it's
     // going. A true/false with nothing behind it would just put an empty
     // address block on the packing slip.
     const shipTo = { ...EMPTY_SHIP_TO, ...(parsed.shipTo || {}) };
     const dropShip = !!parsed.dropShip && Object.values(shipTo).some((v) => String(v || "").trim());
-    // On a drop ship the board should say whose house it's going to, not
-    // the distributor who placed it.
-    const titleWho = (dropShip && (shipTo.name || shipTo.company)) || cust?.company || parsed.customerName || "";
+    const company = cust?.company || parsed.customerName || "";
+    const endCustomer = String(parsed.endCustomer || "").trim() || (dropShip ? (shipTo.name || shipTo.company) : "");
+    // The board says whose job it is first, then who it's through when
+    // that's someone else, then how much of what.
+    const titleBase = importedWOTitle({ who: endCustomer || company, lines, products });
+    const title = endCustomer && company && surnameOf(endCustomer) !== surnameOf(company)
+      ? titleBase.replace(/^([^·]+?) · /, `$1 · ${company} · `)
+      : titleBase;
+
+    // The notes read the way Claude writes them: whose order, for whom,
+    // from whom and when, what, any special asks, then payment.
+    const when = (() => {
+      const d = parsed.orderDate ? new Date(`${parsed.orderDate}T12:00:00`) : new Date();
+      return isNaN(d) ? "" : d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+    })();
+    const sender = String(parsed.senderName || "").trim();
+    const what = lines.map((l) => {
+      const product = products.find((p) => p.id === l.productId);
+      return `${Math.round(l._qty * 100) / 100} ${unitLabel(l._unit)} ${product ? product.name : l._what}`.trim();
+    }).join(", ");
+    const pay = parsed.payment || {};
+    const paid = !!pay.paid && Number(pay.amount) > 0;
+    const shipLine = dropShip
+      ? `Ship to ${shipToLines(shipTo).join(", ")}${shipTo.phone ? `. Phone ${shipTo.phone}` : ""}.`
+      : "Ship-to address not given yet.";
+    const head = [
+      `${company ? `${company} order` : "Order"}${parsed.customerPO ? ` ${parsed.customerPO}` : ""}`,
+      endCustomer ? ` for ${endCustomer}` : "",
+      sender ? `, sent by ${sender}` : "",
+      when ? ` ${when}` : "",
+      ".",
+    ].join("");
+    const details = String(parsed.details || "").trim().replace(/\.?$/, ".");
+    const woNotes = [
+      [head, what ? `${what}.` : "", parsed.details ? details : ""].filter(Boolean).join(" "),
+      parsed.notes || "",
+      fileName ? `From invoice: ${fileName}` : "",
+      unmatchedFlag,
+    ].filter(Boolean).join("\n");
+    const soNotes = [
+      [head, what ? `${what}.` : "", parsed.details ? details : "",
+        paid ? `${money(pay.amount)} paid${pay.method ? ` via ${pay.method}` : ""}${pay.reference ? `, payment ID ${pay.reference}` : ""}.` : "",
+        shipLine].filter(Boolean).join(" "),
+      parsed.notes || "",
+      unmatchedFlag,
+    ].filter(Boolean).join("\n");
+
+    const woId = uid();
+    const soId = uid();
+    const cleanLine = ({ _qty, _unit, _price, _what, ...l }) => l;
     const w = {
-      id: uid(), number: suffix ? `${baseNumber}-${suffix}` : baseNumber,
-      title: importedWOTitle({ who: titleWho, lines, products }),
-      customerId: matchedCustomerId || "", customerName: cust?.company || parsed.customerName || "",
+      id: woId, number: woNumber, title,
+      customerId: matchedCustomerId || "", customerName: company,
       customerPO: parsed.customerPO || "",
-      dropShip, shipTo,
+      dropShip, shipTo, ...(dropShip ? { blindShip: true } : {}),
       status: "not_started", date: today(), createdAt: new Date().toISOString(),
-      lines, readyByDate: "", shipDate: parsed.shipDate || "", shipVia: "",
-      notes: [parsed.notes, fileName ? `Imported from invoice: ${fileName}` : "Imported from pasted order text", unmatchedFlag].filter(Boolean).join("\n"),
+      lines: lines.map(cleanLine), readyByDate: "", shipDate: parsed.shipDate || "", shipVia: "",
+      notes: woNotes, salesOrderId: soId,
     };
+    // Every order gets its sales order too, so GNWS Office has the price
+    // and the payment without anyone typing the order in twice.
+    const so = {
+      id: soId, number: soNumber, date: today(),
+      ...(cust?.brand ? { brand: cust.brand } : {}),
+      customerId: matchedCustomerId || "", customerPO: parsed.customerPO || "",
+      lines: lines.map((l) => ({
+        id: uid(), productId: l.productId, desc: l.desc, qtySF: l.qtySF, displayUnit: l.displayUnit,
+        unitPrice: l._price ? String(l._price) : "",
+        note: l._price ? `${Math.round(l._qty * 100) / 100} ${unitLabel(l._unit)} at ${money(l._price)}/${l._unit === "sf" ? "sq ft" : l._unit}.` : "",
+      })),
+      notes: soNotes, terms: "", status: "converted",
+      paymentStatus: paid ? "Paid" : "Unpaid", paidVia: paid ? (pay.method || "") : "",
+      quoteId: "", workOrderId: woId, shipVia: "", shipDate: parsed.shipDate || "", readyByDate: "",
+      shippingCost: "", depositRequired: "",
+      dropShip, shipTo, ...(dropShip ? { blindShip: true } : {}),
+    };
+    setSalesOrders((list) => [so, ...list]);
     setWorkOrders([w, ...workOrders]);
     setActiveWOId(w.id);
     goTab("orders");
