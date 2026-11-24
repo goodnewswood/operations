@@ -4671,7 +4671,7 @@ function WorkOrderDetail({ me, onCreateProduct, wo, customers, products, goals, 
       <WorkOrderHistory wo={wo} history={history} sortLog={sortLog} />
       {woPrintOpen && <WorkOrderPrintView wo={wo} customer={customer} products={products} onClose={() => setWoPrintOpen(false)} />}
       {slipOpen && <PackingSlipPrintView wo={wo} customer={customer} products={products} onClose={() => setSlipOpen(false)} />}
-      {bolOpen && <BOLModal wo={wo} customer={customer} products={products} onClose={() => setBolOpen(false)} />}
+      {bolOpen && <BOLModal wo={wo} customer={customer} products={products} onSave={(bol) => update({ bol: { ...(wo.bol || {}), ...bol } })} onClose={() => setBolOpen(false)} />}
       {palletModalOpen && (
         <PalletLabelModal
           wo={wo} customer={customer} products={products}
@@ -6902,7 +6902,7 @@ function WorkOrderPrintView({ wo, customer, products, onClose }) {
   );
 }
 
-function BOLModal({ wo, customer, products, onClose }) {
+function BOLModal({ wo, customer, products, onSave, onClose }) {
   useBackLayer(true, onClose);
   const totalSF = (wo.lines || []).reduce((sum, l) => sum + (Number(l.qtySF) || 0), 0);
   const estimatedPallets = (wo.lines || []).reduce((sum, l) => {
@@ -6910,14 +6910,20 @@ function BOLModal({ wo, customer, products, onClose }) {
     if (!product || !unitsFor(product).includes("pallet")) return sum;
     return sum + convertQty(product, Number(l.qtySF) || 0, "sf", "pallet");
   }, 0);
-  const [pallets, setPallets] = useState(estimatedPallets > 0 ? String(Math.ceil(estimatedPallets)) : "");
+  // A pallet count or weight typed here stays with the work order, so the
+  // BOL reprints the same instead of going back to the estimate. The
+  // estimate only knows lines sold by the unit, so loose stock like fir
+  // or mushroom board comes up short until someone types the real count.
+  const saved = wo.bol || {};
+  const [pallets, setPallets] = useState(saved.pallets ? String(saved.pallets) : (estimatedPallets > 0 ? String(Math.ceil(estimatedPallets)) : ""));
   // Each line at its own thickness, plus the pallets themselves.
   const woodLbs = (wo.lines || []).reduce((sum, l) => {
     const product = products.find((p) => p.id === l.productId);
     if (product && (isShelfStock(product) || isService(product))) return sum;
     return sum + (Number(l.qtySF) || 0) * lbsPerSFFor(product);
   }, 0);
-  const [weight, setWeight] = useState(String(Math.round((woodLbs + Math.ceil(estimatedPallets) * PALLET_LBS) / 10) * 10));
+  const estWeight = (n) => String(Math.round((woodLbs + n * PALLET_LBS) / 10) * 10);
+  const [weight, setWeight] = useState(saved.weight ? String(saved.weight) : estWeight(Number(saved.pallets) || Math.ceil(estimatedPallets)));
   const [date, setDate] = useState(today());
   const [carrier, setCarrier] = useState(wo.shipVia || "");
   const bolNumber = `BOL-${wo.number}`;
@@ -6932,8 +6938,15 @@ function BOLModal({ wo, customer, products, onClose }) {
       <style>{PRINT_CSS}</style>
       <div className="max-w-2xl mx-auto my-8 print-shell">
         <div className="flex justify-end gap-2 mb-3 no-print">
-          <Field label="Pallets" w={90}><input type="number" style={inputStyle} value={pallets} onChange={(e) => setPallets(e.target.value)} /></Field>
-          <Field label="Weight (lbs)" w={110}><input type="number" style={inputStyle} value={weight} onChange={(e) => setWeight(e.target.value)} /></Field>
+          <Field label="Pallets" w={90}><input type="number" style={inputStyle} value={pallets} onChange={(e) => {
+            const v = e.target.value;
+            setPallets(v);
+            // Weight follows the pallet count until someone sets it by hand.
+            const w = saved.weight ? weight : estWeight(Number(v) || 0);
+            if (!saved.weight) setWeight(w);
+            onSave?.({ pallets: v });
+          }} /></Field>
+          <Field label="Weight (lbs)" w={110}><input type="number" style={inputStyle} value={weight} onChange={(e) => { setWeight(e.target.value); onSave?.({ weight: e.target.value }); }} /></Field>
           <Field label="Carrier / ship via" w={160}><input style={inputStyle} value={carrier} onChange={(e) => setCarrier(e.target.value)} /></Field>
           <Field label="Date" w={140}><input type="date" style={inputStyle} value={date} onChange={(e) => setDate(e.target.value)} /></Field>
           <div className="flex items-end gap-2">
